@@ -21,7 +21,8 @@ exactly the uses the compiler would bind, one line each.
   just edited.
 - **Built for an agent.** Symbols are addressed by name (`TFoo.Bar`) or by file,
   line and identifier - no column counting. Answers are compact text:
-  relative paths, grouped by file, capped.
+  relative paths, grouped by file and by the routine each row sits in,
+  capped.
 
 Measured on the client group (9 projects, 7,700 units, Win32 + Win64, RAD
 Studio 13): the whole group loads in **9 s / 2.7 GB** under the default policy,
@@ -34,10 +35,10 @@ or **16 s / 4.3 GB** under the exact one. Typical calls take 60-500 ms.
 | `status` | What is loaded: members, analyses, unit counts, unit names that do not resolve, load progress |
 | `find` | Declarations by name, qualified name or wildcard, project units first |
 | `definition` | Where a symbol is declared and implemented, optionally with the source that follows |
-| `references` | Every use across the group, grouped by file; also units, built-ins and conditional defines |
+| `references` | Every use across the group, grouped by file and by the routine or type it sits in; also units, built-ins and conditional defines |
 | `related` | `descendants`, `overrides`, `implementations`, `assignments`, `creations`, `destructions` |
 | `outline` | The structure of one unit with line numbers, without reading it |
-| `diagnostics` | PasTree's semantic errors for a file or the whole group, from the files on disk now |
+| `diagnostics` | PasTree's semantic errors for a file or the whole group, from the files on disk now, each naming its routine |
 | `unit_deps` | What a unit uses (resolved to files) and what uses it |
 
 Design and rationale of each: [SPEC.md](SPEC.md).

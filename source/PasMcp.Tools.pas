@@ -826,6 +826,279 @@ begin
     end));
 end;
 
+{ ---- where a row sits --------------------------------------------------------- }
+
+type
+  // A routine or type declaration of one file, as the span of its tokens.
+  TEnclosingSpan = record
+    FromLine, FromCol, ToLine, ToCol: Integer;
+    NameLine: Integer;     // the line its name is written on
+    Name: string;          // TFoo.Save, TFoo.Save.Helper, TOuter.TInner
+    Outer: Integer;        // the span around it, in the same list; -1 if none
+  end;
+
+  { The routine or type a row sits in (SPEC 9.2.1): `TFoo.Save` for a
+    statement, `TFoo` for a member declaration, `TFoo.Save.Helper` inside a
+    nested routine, nothing at unit level. "Who uses X" is mostly answered by
+    that name alone - no file opened to see which method a line belongs to.
+    Read from the public tree, once per file per call: PasTree's own
+    RTEnclosingRoutine is private, and it is only this climb over
+    Nodes[].Parent to an nkRoutine. }
+  TEnclosing = class
+  private
+    FWs: TMcpWorkspace;
+    FByFile: TObjectDictionary<string, TList<TEnclosingSpan>>;
+    function ModelOf(const AFile: string): TPasSemaModel;
+    function SpansOf(const AFile: string): TList<TEnclosingSpan>;
+  public
+    constructor Create(AWs: TMcpWorkspace);
+    destructor Destroy; override;
+    { The name of the innermost span around ALine:ACol; '' when there is
+      none. ASkipNameLine: a row on the line that names that declaration (a
+      routine's header, `TFoo = class(...)`) shows the name already and gets
+      the next one out instead - a method declaration then names its class. }
+    function NameAt(const AFile: string; ALine, ACol: Integer;
+      ASkipNameLine: Boolean): string;
+  end;
+
+// File and 1-based line and column of visible token AVis.
+function VisPos(LM: TPasSemaModel; AVis: Integer; out AFileId, ALine,
+  ACol: Integer): Boolean;
+var
+  LTok: Integer;
+begin
+  Result := False;
+  if (AVis < 0) or (AVis > High(LM.Tree.Source.Visible)) then
+    Exit;
+  AFileId := LM.Tree.Source.Visible[AVis].FileId;
+  LTok := LM.Tree.Source.Visible[AVis].TokenIndex;
+  if (AFileId < 0) or (AFileId > High(LM.Tree.Source.Files)) or (LTok < 0) or
+     (LTok > High(LM.Tree.Source.Files[AFileId].Tokens)) then
+    Exit;
+  LM.Tree.Source.Files[AFileId].OffsetToLineCol(
+    LM.Tree.Source.Files[AFileId].Tokens[LTok].Start, ALine, ACol);
+  Result := True;
+end;
+
+// A routine's or type's own name as written, generic parameters left out:
+// `Save`, `TFoo.Save` for a method body, `TFoo`; '' for a nameless header.
+// ANameVis: the visible token of its first segment.
+function DeclName(LM: TPasSemaModel; ANode: Integer;
+  out ANameVis: Integer): string;
+var
+  LChild, LPrev: Integer;
+begin
+  Result := '';
+  ANameVis := -1;
+  LChild := LM.Tree.Nodes[ANode].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    case LM.Tree.Nodes[LChild].Kind of
+      nkIdent:
+        begin
+          // A parameterless function's result type is an nkIdent too, told
+          // apart by the colon before it (as PasTree.Outline does).
+          LPrev := LM.Tree.NodeLeftmostVis(LChild) - 1;
+          if (LPrev >= 0) and (LPrev <= High(LM.Tree.Source.Visible)) and
+             (LM.Tree.Source.VisibleToken(LPrev).Kind = tkColon) then
+            Break;
+          if Result = '' then
+            ANameVis := LM.Tree.NodeLeftmostVis(LChild)
+          else
+            Result := Result + '.';
+          Result := Result + LM.Tree.NodeText(LChild);
+          // A type's name is one segment; an alias's next nkIdent is its type.
+          if LM.Tree.Nodes[ANode].Kind = nkTypeDecl then
+            Break;
+        end;
+      nkGenericParams, nkAttrGroup:
+        ;
+    else
+      Break;
+    end;
+    LChild := LM.Tree.Nodes[LChild].NextSibling;
+  end;
+end;
+
+// The nearest routine or type declaration around ANode, NIL_NODE at unit
+// level. An anonymous method is not one: its lines belong to the routine
+// that writes it.
+function OuterDecl(LM: TPasSemaModel; ANode: Integer): Integer;
+begin
+  Result := LM.Tree.Nodes[ANode].Parent;
+  while (Result <> NIL_NODE) and (LM.Tree.Nodes[Result].Kind <> nkRoutine) and
+        (LM.Tree.Nodes[Result].Kind <> nkTypeDecl) do
+    Result := LM.Tree.Nodes[Result].Parent;
+end;
+
+constructor TEnclosing.Create(AWs: TMcpWorkspace);
+begin
+  inherited Create;
+  FWs := AWs;
+  FByFile := TObjectDictionary<string, TList<TEnclosingSpan>>.Create(
+    [doOwnsValues]);
+end;
+
+destructor TEnclosing.Destroy;
+begin
+  FByFile.Free;
+  inherited;
+end;
+
+// The model to read AFile's spans from: its owner analysis' for an own file
+// (the one diagnostics report from), else one already hydrated - a library
+// unit is demoted after every build, and the search that found the row has
+// hydrated it in its own analysis - else the first, hydrated now.
+function TEnclosing.ModelOf(const AFile: string): TPasSemaModel;
+var
+  LFirst: TMcpAnalysis;
+  LFirstMid, LMid, LOwner: Integer;
+begin
+  Result := nil;
+  LOwner := FWs.OwnerAnalysis(AFile);
+  if LOwner >= 0 then
+  begin
+    LMid := FWs.Analyses[LOwner].Nav.ModelIdOf(AFile);
+    if (LMid >= 0) and FWs.Analyses[LOwner].Proj.EnsureHydrated(LMid) then
+      Exit(FWs.Analyses[LOwner].Proj.Model(LMid));
+  end;
+  LFirst := nil;
+  LFirstMid := -1;
+  for var LA in FWs.Analyses do
+  begin
+    LMid := LA.Nav.ModelIdOf(AFile);
+    if LMid < 0 then
+      Continue;
+    if not LA.Proj.Model(LMid).Demoted then
+      Exit(LA.Proj.Model(LMid));
+    if LFirst = nil then
+    begin
+      LFirst := LA;
+      LFirstMid := LMid;
+    end;
+  end;
+  if (LFirst <> nil) and LFirst.Proj.EnsureHydrated(LFirstMid) then
+    Result := LFirst.Proj.Model(LFirstMid);
+end;
+
+function TEnclosing.SpansOf(const AFile: string): TList<TEnclosingSpan>;
+var
+  LM: TPasSemaModel;
+  LFileId, LFromFile, LToFile, LNameFile, LNameVis, LCol, LUp: Integer;
+  LSpan: TEnclosingSpan;
+  LNodes: TList<Integer>;
+  LIndexOf: TDictionary<Integer, Integer>;
+  LNames: TDictionary<Integer, string>;
+
+  // Qualified by the declarations around it, outer first.
+  function FullName(ANode: Integer): string;
+  var
+    LOwn, LOuterName: string;
+    LVis, LOuter: Integer;
+  begin
+    if LNames.TryGetValue(ANode, Result) then
+      Exit;
+    LOwn := DeclName(LM, ANode, LVis);
+    LOuter := OuterDecl(LM, ANode);
+    LOuterName := '';
+    if LOuter <> NIL_NODE then
+      LOuterName := FullName(LOuter);
+    if (LOwn = '') or (LOuterName = '') then
+      Result := LOwn
+    else
+      Result := LOuterName + '.' + LOwn;
+    LNames.Add(ANode, Result);
+  end;
+
+begin
+  if FByFile.TryGetValue(LowerCase(AFile), Result) then
+    Exit;
+  Result := TList<TEnclosingSpan>.Create;
+  FByFile.Add(LowerCase(AFile), Result);
+  LM := ModelOf(AFile);
+  if LM = nil then
+    Exit;
+  LFileId := -1;
+  for var LIdx := 0 to High(LM.Tree.Source.FileNames) do
+    if SameText(LM.Tree.Source.FileNames[LIdx], AFile) then
+    begin
+      LFileId := LIdx;
+      Break;
+    end;
+  if LFileId < 0 then
+    Exit;
+  LNodes := TList<Integer>.Create;
+  LIndexOf := TDictionary<Integer, Integer>.Create;
+  LNames := TDictionary<Integer, string>.Create;
+  try
+    for var LNode := 0 to High(LM.Tree.Nodes) do
+    begin
+      if (LM.Tree.Nodes[LNode].Kind <> nkRoutine) and
+         (LM.Tree.Nodes[LNode].Kind <> nkTypeDecl) then
+        Continue;
+      // Both ends in this file: a declaration split over an $I include is
+      // not worth reconstructing (NodeSpanText gives up on it too).
+      if not VisPos(LM, LM.Tree.NodeLeftmostVis(LNode), LFromFile,
+         LSpan.FromLine, LSpan.FromCol) or (LFromFile <> LFileId) or
+         not VisPos(LM, LM.Tree.Nodes[LNode].LastToken, LToFile, LSpan.ToLine,
+         LSpan.ToCol) or (LToFile <> LFileId) then
+        Continue;
+      LSpan.Name := FullName(LNode);
+      if LSpan.Name = '' then
+        Continue;
+      DeclName(LM, LNode, LNameVis);
+      if not VisPos(LM, LNameVis, LNameFile, LSpan.NameLine, LCol) then
+        LSpan.NameLine := LSpan.FromLine;
+      LSpan.Outer := -1;
+      LIndexOf.Add(LNode, Result.Count);
+      LNodes.Add(LNode);
+      Result.Add(LSpan);
+    end;
+    // Once every span is known: a node is not always allocated after the
+    // one around it.
+    for var LIdx := 0 to Result.Count - 1 do
+      if LIndexOf.TryGetValue(OuterDecl(LM, LNodes[LIdx]), LUp) then
+      begin
+        LSpan := Result[LIdx];
+        LSpan.Outer := LUp;
+        Result[LIdx] := LSpan;
+      end;
+  finally
+    LNames.Free;
+    LIndexOf.Free;
+    LNodes.Free;
+  end;
+end;
+
+function TEnclosing.NameAt(const AFile: string; ALine, ACol: Integer;
+  ASkipNameLine: Boolean): string;
+var
+  LList: TList<TEnclosingSpan>;
+  LSpans: TArray<TEnclosingSpan>;
+  LCount, LBest: Integer;
+begin
+  Result := '';
+  LList := SpansOf(AFile);
+  LCount := LList.Count;
+  LSpans := LList.List;   // the list's own array, not a copy
+  LBest := -1;
+  // Declarations nest, so of the spans around the row the innermost is the
+  // one that starts last.
+  for var LIdx := 0 to LCount - 1 do
+    if ((ALine > LSpans[LIdx].FromLine) or ((ALine = LSpans[LIdx].FromLine) and
+        (ACol >= LSpans[LIdx].FromCol))) and
+       ((ALine < LSpans[LIdx].ToLine) or ((ALine = LSpans[LIdx].ToLine) and
+        (ACol <= LSpans[LIdx].ToCol))) and
+       ((LBest < 0) or (LSpans[LIdx].FromLine > LSpans[LBest].FromLine) or
+        ((LSpans[LIdx].FromLine = LSpans[LBest].FromLine) and
+         (LSpans[LIdx].FromCol > LSpans[LBest].FromCol))) then
+      LBest := LIdx;
+  if (LBest >= 0) and ASkipNameLine and (LSpans[LBest].NameLine = ALine) then
+    LBest := LSpans[LBest].Outer;
+  if LBest >= 0 then
+    Result := LSpans[LBest].Name;
+end;
+
 // Grouped by file, one trimmed line per row:
 //   uMain.pas
 //     120  LFoo.Bar(1);
@@ -833,14 +1106,24 @@ end;
 // line out when it repeats the previous row's: an override chain is one
 // signature written 250 times, and on the client group that was 60% of the
 // answer. ATagOnly: the tag is the whole row (descendants).
+// AEnclosing: rows are grouped under the routine or type they sit in, its
+// name printed once for a run of rows - a row outside any stays at the file
+// level:
+//   uMain.pas
+//     TMain.Save
+//       120  LFoo.Bar(1);
+//       135  LFoo.Bar(2);
+//     300  LFoo: TFoo;
 procedure AppendHitsByFile(AWs: TMcpWorkspace; ASb: TStringBuilder;
-  const AHits: TArray<THit>; ALimit: Integer; ATagOnly: Boolean = False);
+  const AHits: TArray<THit>; ALimit: Integer; ATagOnly: Boolean = False;
+  AEnclosing: TEnclosing = nil);
 var
-  LFile, LLine, LPrev: string;
+  LFile, LLine, LPrev, LWhere, LLastWhere, LIndent: string;
   LShown: Integer;
 begin
   LFile := '';
   LPrev := '';
+  LLastWhere := '';
   LShown := 0;
   for var LH in AHits do
   begin
@@ -850,20 +1133,35 @@ begin
     begin
       LFile := LH.FilePath;
       ASb.AppendLine(AWs.RelPath(LFile));
+      LLastWhere := '';
+    end;
+    LIndent := '  ';
+    if AEnclosing <> nil then
+    begin
+      LWhere := AEnclosing.NameAt(LH.FilePath, LH.Line, LH.Col, True);
+      if LWhere <> '' then
+      begin
+        if LWhere <> LLastWhere then
+          ASb.AppendLine('  ' + LWhere);
+        LIndent := '    ';
+      end;
+      LLastWhere := LWhere;
     end;
     if ATagOnly then
-      ASb.AppendLine(Format('  %d  %s', [LH.Line, LH.Tag]))
+      ASb.AppendLine(Format('%s%d  %s', [LIndent, LH.Line, LH.Tag]))
     else if LH.Tag <> '' then
     begin
       LLine := CleanLine(LH.Snippet);
       if LLine = LPrev then
-        ASb.AppendLine(Format('  %d  [%s]', [LH.Line, LH.Tag]))
+        ASb.AppendLine(Format('%s%d  [%s]', [LIndent, LH.Line, LH.Tag]))
       else
-        ASb.AppendLine(Format('  %d  [%s]  %s', [LH.Line, LH.Tag, LLine]));
+        ASb.AppendLine(Format('%s%d  [%s]  %s', [LIndent, LH.Line, LH.Tag,
+          LLine]));
       LPrev := LLine;
     end
     else
-      ASb.AppendLine(Format('  %d  %s', [LH.Line, CleanLine(LH.Snippet)]));
+      ASb.AppendLine(Format('%s%d  %s', [LIndent, LH.Line,
+        CleanLine(LH.Snippet)]));
     Inc(LShown);
   end;
   if Length(AHits) > LShown then
@@ -1062,11 +1360,13 @@ var
   LSb: TStringBuilder;
   LLimit: Integer;
   LId: TSymId;
+  LEnclosing: TEnclosing;
 begin
   LT := ResolveOne(AWs, AArgs);
   LLimit := EnsureRange(ArgInt(AArgs, 'limit', 150), 1, 5000);
   LSet := THitSet.Create(AWs);
   LSb := TStringBuilder.Create;
+  LEnclosing := TEnclosing.Create(AWs);
   try
     for var LA in AWs.Analyses do
     begin
@@ -1096,12 +1396,13 @@ begin
     else
       LSb.AppendLine(Format('%s (%s) - %d references in %d files', [LT.Name,
         LT.Head, Length(LHits), FileCount(LHits)]));
-    AppendHitsByFile(AWs, LSb, LHits, LLimit);
+    AppendHitsByFile(AWs, LSb, LHits, LLimit, False, LEnclosing);
     if LSet.Compiled > 0 then
       LSb.AppendLine(Format('(+%d in compiled units without source, not '
         + 'shown)', [LSet.Compiled]));
     Result := LSb.ToString.TrimRight;
   finally
+    LEnclosing.Free;
     LSb.Free;
     LSet.Free;
   end;
@@ -1121,6 +1422,7 @@ var
   LSb: TStringBuilder;
   LLimit, LDm, LTMid, LTSym: Integer;
   LAccepted: Boolean;
+  LEnclosing: TEnclosing;
 
   // The relation's own identity test, at the declaration site (it normalizes:
   // a method to its declaration, an alias to its type); the resolved ids when
@@ -1163,6 +1465,7 @@ begin
       + 'methods and variables', [LT.Name, LT.Head]);
   LLimit := EnsureRange(ArgInt(AArgs, 'limit', 150), 1, 5000);
   LAccepted := False;
+  LEnclosing := nil;
   LSet := THitSet.Create(AWs);
   LSb := TStringBuilder.Create;
   try
@@ -1251,12 +1554,20 @@ begin
     // Descendants by file like every other answer, not as an indented tree:
     // a tree repeats a path on every row (250 rows, 27 tokens each, on the
     // client group), and `<- parent` keeps the shape.
-    AppendHitsByFile(AWs, LSb, LHits, LLimit, LRel = 'descendants');
+    // A row that is a statement - an assignment, a creation, a destruction -
+    // goes under the routine it sits in. A descendant, override or
+    // implementation row is a declaration, and its [tag] names its type.
+    if (LRel = 'assignments') or (LRel = 'creations') or
+       (LRel = 'destructions') then
+      LEnclosing := TEnclosing.Create(AWs);
+    AppendHitsByFile(AWs, LSb, LHits, LLimit, LRel = 'descendants',
+      LEnclosing);
     if LSet.Compiled > 0 then
       LSb.AppendLine(Format('(+%d in compiled units without source, not '
         + 'shown)', [LSet.Compiled]));
     Result := LSb.ToString.TrimRight;
   finally
+    LEnclosing.Free;
     LSb.Free;
     LSet.Free;
   end;
@@ -1367,7 +1678,7 @@ end;
 
 function ToolDiagnostics(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
 var
-  LFile, LDiagFile, LKey: string;
+  LFile, LDiagFile, LKey, LWhere: string;
   LLibrary: Boolean;
   LLimit, LShown, LOwner, LN: Integer;
   LByFile: TDictionary<string, Integer>;
@@ -1379,6 +1690,7 @@ var
   LArr: TArray<THit>;
   LSb: TStringBuilder;
   LFiles: TDictionary<string, Boolean>;
+  LEnclosing: TEnclosing;
 begin
   LFile := '';
   if ArgStr(AArgs, 'file') <> '' then
@@ -1389,6 +1701,7 @@ begin
   LSeen := TDictionary<string, Boolean>.Create;
   LFiles := TDictionary<string, Boolean>.Create;
   LSb := TStringBuilder.Create;
+  LEnclosing := TEnclosing.Create(AWs);
   try
     for var LA in AWs.Analyses do
       for var LMid := 0 to LA.Proj.ModelCount - 1 do
@@ -1482,8 +1795,12 @@ begin
     begin
       if LShown >= LLimit then
         Break;
-      LSb.AppendLine(Format('%s:%d:%d: %s', [AWs.RelPath(LRow.FilePath),
-        LRow.Line, LRow.Col, LRow.Snippet]));
+      // No source line is shown, so a row on a routine's header names that
+      // routine too.
+      LWhere := LEnclosing.NameAt(LRow.FilePath, LRow.Line, LRow.Col, False);
+      LSb.AppendLine(Format('%s:%d:%d: %s%s', [AWs.RelPath(LRow.FilePath),
+        LRow.Line, LRow.Col, LRow.Snippet,
+        IfThen(LWhere <> '', ' (in ' + LWhere + ')', '')]));
       Inc(LShown);
     end;
     if Length(LArr) > LShown then
@@ -1491,6 +1808,7 @@ begin
         [Length(LArr) - LShown]));
     Result := LSb.ToString.TrimRight;
   finally
+    LEnclosing.Free;
     LSb.Free;
     LFiles.Free;
     LSeen.Free;
@@ -1640,8 +1958,10 @@ const
     '{"name":"references","description":"Every use of a symbol across all '
     + 'projects of the group, by resolved identity rather than text: '
     + 'same-named unrelated symbols, comments and strings are not in it. '
-    + 'Grouped by file with the source line. Also takes a unit name (its '
-    + 'uses clauses), and by position a compiler built-in or a conditional '
+    + 'Grouped by file and, within a file, under the routine or type each '
+    + 'use sits in (TFoo.Save), with the source line - usually enough to '
+    + 'answer without opening the file. Also takes a unit name (its uses '
+    + 'clauses), and by position a compiler built-in or a conditional '
     + 'define.",'
     + '"inputSchema":{"type":"object","properties":{' + TARGET_PROPS + ','
     + '"limit":{"type":"integer","description":"Max rows (default 150)"}}}},' +
@@ -1652,10 +1972,10 @@ const
     + 'or one of its methods. assignments: writes to a variable, field or '
     + 'property. creations: TFoo.Create calls of exactly that class. '
     + 'destructions: Free/Destroy/FreeAndNil of a TFoo, and a form''s '
-    + 'Release. Grouped by file; '
-    + 'a descendant row names its parent (`<- TParent`) unless that is the '
-    + 'type asked about, and a row whose source line repeats the previous '
-    + 'row''s shows only its [tag].",'
+    + 'Release. Grouped by file; assignment, creation and destruction rows '
+    + 'under the routine they sit in, a descendant row names its parent '
+    + '(`<- TParent`) unless that is the type asked about, and a row whose '
+    + 'source line repeats the previous row''s shows only its [tag].",'
     + '"inputSchema":{"type":"object","properties":{'
     + '"relation":{"type":"string","enum":["descendants","overrides",'
     + '"implementations","assignments","creations","destructions"]},'
@@ -1678,9 +1998,10 @@ const
 
     '{"name":"diagnostics","description":"Semantic errors PasTree finds - '
     + 'undeclared identifiers, unknown members, wrong argument counts, '
-    + 'missing units - for one file or every unit of the group. Reflects the '
-    + 'files on disk now, so it is a quick check after editing (a subset of '
-    + 'what the compiler reports, not a build).",'
+    + 'missing units - for one file or every unit of the group, each row '
+    + 'naming the routine it is in. Reflects the files on disk now, so it is '
+    + 'a quick check after editing (a subset of what the compiler reports, '
+    + 'not a build).",'
     + '"inputSchema":{"type":"object","properties":{'
     + '"file":{"type":"string","description":"Only this file"},'
     + '"library":{"type":"boolean","description":"Include library units '
@@ -1712,7 +2033,9 @@ begin
     + 'text), `related` answers hierarchy/override/implementation/assignment/'
     + 'creation questions, `outline` shows a unit''s structure with line '
     + 'numbers, `unit_deps` its uses graph, `diagnostics` checks name '
-    + 'resolution after edits. Symbols are addressed by name (TFoo, '
+    + 'resolution after edits. Their rows name the routine or type they sit '
+    + 'in, which usually answers the question without opening the file. '
+    + 'Symbols are addressed by name (TFoo, '
     + 'TFoo.Bar, Unit.TFoo.Bar) or by file + line + name. Result paths are '
     + 'relative to ' + AWs.Root + '. The index re-reads changed files before '
     + 'every call, so results match the files on disk.';

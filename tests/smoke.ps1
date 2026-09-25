@@ -64,16 +64,21 @@ Check 'status' (Block $b 'status') @('member AppA', 'member AppB', 'analysis 0:'
 Check 'find' (Block $b 'find {"query":"TCircle"}') @('Shared\uShapes.pas:21  TCircle (class)')
 Check 'find wildcard' (Block $b 'find {"query":"*Circ*"') @('AppB\uAppB.pas:11  TBigCircle', 'Shared\uShapes.pas:21  TCircle')
 Check 'definition' (Block $b 'definition {"symbol":"TCircle.Area"') @('declared at Shared\uShapes.pas:26', 'implemented at Shared\uShapes.pas:53', 'Result := Pi * FRadius * FRadius;')
-Check 'references' (Block $b 'references {"symbol":"TShape.Area"}') @('1 references in 1 files', '22  Writeln(LShape.Describe')
+Check 'references' (Block $b 'references {"symbol":"TShape.Area"}') @('1 references in 1 files', "  RunA`n    22  Writeln(LShape.Describe")
 Check 'references by position' (Block $b 'references {"file"') @('TCircle.Radius (property)', '21  TCircle(LShape).Radius := 3;')
-Check 'references unit' (Block $b 'references {"symbol":"uShapes"}') @('3 references in 3 files', 'AppB\AppB.dpr')
+# A row in no routine or type (a uses clause) stays at the file level.
+Check 'references unit' (Block $b 'references {"symbol":"uShapes"}') @('3 references in 3 files', 'AppB\AppB.dpr', "AppA\uAppA.pas`n  13  uShapes;")
+# Rows under what they sit in: a member declaration under its class, a
+# statement under its routine, two uses on one line under one heading.
+Check 'references grouped' (Block $b 'references {"symbol":"TCircle.FRadius"}') @('5 references in 1 files', "  TCircle`n    27  property Radius", "  TCircle.Create`n    50  FRadius := ARadius;", "  TCircle.Area`n    55  Result := Pi * FRadius * FRadius;`n    55  ")
 Check 'descendants' (Block $b 'related {"relation":"descendants"') @('  11  TBigCircle <- TCircle', "  21  TCircle`n", "  30  TSquare`n") @('<- TShape')
-Check 'overrides' (Block $b 'related {"relation":"overrides"') @('[TShape introduces]', '26  [TCircle override]  function Area', "  35  [TSquare override]`n", '[TBigCircle override]')
+# A declaration row whose [tag] names its type gets no heading.
+Check 'overrides' (Block $b 'related {"relation":"overrides"') @('[TShape introduces]', '26  [TCircle override]  function Area', "  35  [TSquare override]`n", '[TBigCircle override]', "Shared\uShapes.pas`n  17  [TShape introduces]")
 Check 'implementors' (Block $b 'related {"relation":"implementations", "symbol":"IShape"}') @('[TShape]')
 Check 'implementations' (Block $b 'related {"relation":"implementations", "symbol":"IShape.Area"}') @('[TShape implements]')
-Check 'assignments' (Block $b 'related {"relation":"assignments"') @('50  FRadius := ARadius;')
-Check 'creations' (Block $b 'related {"relation":"creations"') @('19  LShape := TCircle.Create(2);')
-Check 'destructions' (Block $b 'related {"relation":"destructions"') @('24  FreeAndNil(LShape);')
+Check 'assignments' (Block $b 'related {"relation":"assignments"') @("  TCircle.Create`n    50  FRadius := ARadius;")
+Check 'creations' (Block $b 'related {"relation":"creations"') @("  RunA`n    19  LShape := TCircle.Create(2);")
+Check 'destructions' (Block $b 'related {"relation":"destructions"') @("  RunA`n    24  FreeAndNil(LShape);")
 Check 'outline' (Block $b 'outline') @('21  type TCircle = class', '27    property Radius: Double', '53  function TCircle.Area: Double', '40 implementation')
 Check 'unit_deps' (Block $b 'unit_deps') @('uShapes is used by 3 units', 'AppB\uAppB.pas:8')
 Check 'diagnostics' (Block $b 'diagnostics') @('no diagnostics')
@@ -127,17 +132,20 @@ try {
     Check 'call before edit' (ToolText $r) @('creations of TCircle', ': 1')
     if ($r.result.isError) { Write-Host 'FAIL call before edit reported isError'; $script:failures++ }
 
-    # The edit: a second TCircle.Create in project A's unit.
+    # The edit: a second TCircle.Create in project A's unit, and a name that
+    # resolves to nothing.
     $unit = Join-Path $copy 'AppA\uAppA.pas'
     $text = [IO.File]::ReadAllText($unit)
-    $text = $text.Replace("    FreeAndNil(LShape);", "    FreeAndNil(LShape);`r`n    TCircle.Create(5).Free;")
+    $text = $text.Replace("    FreeAndNil(LShape);", "    FreeAndNil(LShape);`r`n    TCircle.Create(5).Free;`r`n    NoSuchName := 1;")
     [IO.File]::WriteAllText($unit, $text, $utf8)
     $r = Rpc 4 'tools/call' '{"name":"related","arguments":{"relation":"creations","symbol":"TCircle"}}'
     Check 'call after edit' (ToolText $r) @('(index: re-analyzed 1 changed file(s)', 'creations of TCircle', ': 2', 'TCircle.Create(5).Free;')
+    $r = Rpc 5 'tools/call' '{"name":"diagnostics","arguments":{}}'
+    Check 'diagnostics after edit' (ToolText $r) @('AppA\uAppA.pas:26:5: ', "'NoSuchName' (in RunA)")
 
-    $r = Rpc 5 'tools/call' '{"name":"no_such_tool","arguments":{}}'
+    $r = Rpc 6 'tools/call' '{"name":"no_such_tool","arguments":{}}'
     if (-not $r.result.isError) { Write-Host 'FAIL unknown tool not reported as isError'; $script:failures++ }
-    $r = Rpc 6 'no/such/method' '{}'
+    $r = Rpc 7 'no/such/method' '{}'
     if ($r.error.code -ne -32601) { Write-Host 'FAIL unknown method not -32601'; $script:failures++ }
 
     $stdin.Close()

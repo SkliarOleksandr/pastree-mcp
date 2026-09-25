@@ -56,6 +56,21 @@ Common rules:
   column). A search runs in every analysis holding that site and the rows are
   merged and de-duplicated by hit site.
 - **Order**: the group's own files first, then libraries; by file and line.
+- **Where a row sits**: `references`, the statement relations of `related`
+  (`assignments`, `creations`, `destructions`) and `diagnostics` name the
+  innermost routine or type around each row - `TFoo.Save`, `TFoo.Save.Helper`
+  in a nested routine, `TFoo` for a member declaration - so "who uses X" is
+  answered without opening a file to see which method a line is in. A grouped
+  answer prints the name once, as a heading over its run of rows. A row on
+  the line that names its own declaration (a routine's header, `TFoo =
+  class`) shows that name already and gets the next one out; a row in no
+  routine or type (a `uses` clause) stays at the file level. `diagnostics`
+  shows no source line, so each of its rows ends `(in TFoo.Save)`, header
+  lines included. The declaration relations (`descendants`, `overrides`,
+  `implementations`) get none: their `[tag]` names the type. The name comes
+  from the public tree - the nearest `nkRoutine` or `nkTypeDecl` ancestor,
+  the climb PasTree's private `RTEnclosingRoutine` makes - once per file per
+  call.
 - **Errors the agent can act on** (unknown name, ambiguity, file not in any
   closure, wrong relation for the symbol) are tool results with `isError`
   set, as MCP specifies - the agent reads those; a protocol error would only
@@ -240,14 +255,14 @@ are here so a new tool is not the one that breaks them.
 
 ### 9.2 Reading less
 
-1. **Enclosing routine on every reference row.** `references`, `related` and
-   `diagnostics` rows gain the routine they sit in:
-   `TFoo.Save: Stream.Write(...)`. Most "who uses X" questions are answered
-   by that name alone - no file opened to see which method a line belongs
-   to. The cheapest change in this section: `RTEnclosingRoutine` is private
-   to `TPasNavigator` and needs a public entry in PasTree; nothing else is
-   new. A name repeated on consecutive rows prints once, like the repeated
-   source line in `related`; measure what it adds per row.
+1. **Enclosing routine on every reference row** - done in 0.3.0: "Where a
+   row sits", section 3. It needed no PasTree change: `RTEnclosingRoutine`
+   is private, but it only climbs `Nodes[].Parent`, which is public.
+   Measured on the client group (the 22 questions of the layer 1 bench):
+   about 5 tokens more per row where rows share routines (1,245 references
+   of an interface: 20.7k -> 27.0k tokens), about 10 where every row has a
+   routine of its own (11 callers: 335 -> 452); the whole bench 60.5k ->
+   67.3k, still 11x below grep with context lines. Time unchanged.
 2. **`source`** - the exact text of a declaration by name: a routine's
    implementation, a type's whole declaration, a constant's value.
    `definition context: N` approximates it with a line count the agent has
@@ -406,8 +421,8 @@ gap between the answers and the truth.
 
 ### 9.8 Order
 
-1. Enclosing routine on rows, `source`, `members` - cheap, every task uses
-   them, and all but one library entry point exist.
+1. Enclosing routine on rows (done, 0.3.0), `source`, `members` - cheap,
+   every task uses them, and every library entry point they need is public.
 2. `callers` / `callees`, then `impact`.
 3. `compile`.
 4. Forms (9.5) - the largest gap, and new library work.

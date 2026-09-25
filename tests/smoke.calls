@@ -7,6 +7,7 @@ definition {"symbol":"TCircle.Area", "context":3}
 references {"symbol":"TShape.Area"}
 references {"file":"AppA\\uAppA.pas", "line":21, "name":"Radius"}
 references {"symbol":"uShapes"}
+references {"symbol":"TCircle.FRadius"}
 related {"relation":"descendants", "symbol":"TShape"}
 related {"relation":"overrides", "symbol":"TShape.Area"}
 related {"relation":"implementations", "symbol":"IShape"}
