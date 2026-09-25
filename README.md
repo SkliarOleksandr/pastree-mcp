@@ -58,6 +58,10 @@ build.bat 37.0
 builds `out\pastree-mcp.exe` (Win64) and runs the smoke test. It must end with
 `built, smoke test passed`.
 
+`pastree-mcp.dproj` builds the same exe by hand - in RAD Studio, or with
+`msbuild pastree-mcp.dproj /p:Config=Release` from a RAD Studio command
+prompt - with the same search path and output directories, but no smoke test.
+
 ### Claude Code
 
 In the root of the Delphi project, add `.mcp.json`:
@@ -78,6 +82,10 @@ or register it once from that directory:
 ```
 claude mcp add pastree -- C:\Repos\pastree-mcp\out\pastree-mcp.exe --project MyGroup.groupproj
 ```
+
+To work on pastree-mcp itself with the index, point a `.mcp.json` in this
+repository (ignored) at `--project pastree-mcp.dproj`: the agent gets this
+server's sources and PasTree's.
 
 Without `--project` the server takes the only `.groupproj` in its working
 directory, else the only `.dproj`. The tools then appear to the agent as

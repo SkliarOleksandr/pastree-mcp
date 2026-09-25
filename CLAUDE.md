@@ -80,6 +80,11 @@ edit on disk in between; the expectations pin fixture line numbers.
   running exe); the next session starts the new one.
 - **Every `.dcu` goes to `out\dcu\<RAD Studio version>\win64`**, never beside
   a source - .dcu files are not portable between compiler versions.
+- **`pastree-mcp.dproj` is the build by hand and the self-index** (RAD Studio,
+  msbuild; the server reads it when `.mcp.json` points an agent at this
+  repository). Its namespaces, search path and output directories are
+  build.bat's: change one, change the other - a drift builds, or indexes, a
+  different program without a word.
 - **PasTree `..\object-pascal-tree` may be under edit by another session.**
   Read the commit line `build.bat` prints; check `git status` there before
   touching anything, never `git add -A` there.
