@@ -41,7 +41,7 @@ PasTree demo and pastree-lsp are the reference and are cited in the code.
 
 Common rules:
 
-- **Target addressing** (definition, references, related): `symbol` - a name,
+- **Target addressing** (definition, source, references, related): `symbol` - a name,
   optionally qualified from the right (`Bar`, `TFoo.Bar`, `UnitName.TFoo.Bar`;
   generic parameters ignored) - or `file` + `line` + `name` (the identifier
   written on that line; `column` only when it occurs twice). An ambiguous name
@@ -83,6 +83,7 @@ Common rules:
 | `status` | project + model counts, `UsesList` health | Answers during loading too. Lists unit names that do not resolve: each one silences its importers' diagnostics, so it is the thing to know before trusting "no errors" or "no references". |
 | `find` | symbol tables of every model, filtered as `ProjectOutline` | Exact, qualified or wildcard. No exact hit falls back to `*query*` and says so. Declaration sites are computed only for the rows shown - on the client group `Create` matches 25,000 symbols. `scope: project` = own units only. |
 | `definition` | `DeclHit`, `GotoImplementation` | For a routine also the implementation (its header line, found by scanning up from the body start `GotoImplementation` returns). `context: N` appends N source lines - of the implementation when there is one. Several matches are all listed; this is the one tool where a list is the answer. |
+| `source` | `DeclRootOf`, `GotoImplementation`, the raw token stream | The exact text of one declaration: a routine's implementation (`part: impl`, the default when it has one), its declaration (`decl`) or both; a type's whole declaration; a constant with its value. The node's span gives both ends - no line count to guess, as `definition context` makes the agent do. The comment directly above comes with it, read from the comment tokens the lexer keeps: comments starting their own line, no blank line between them and the declaration; one longer than 30 lines is named, not shown (in old code it is as often a commented-out earlier version as documentation). Lines come from the model's token stream, so they are numbered like every other answer. `limit` caps each part (300 lines). A routine with no body says why: abstract, an interface method, external. |
 | `references` | `FindReferences`, `FindUnitReferences`, `FindBuiltinReferences`, `FindDefineReferences` | Rows in compiled units read from a `.dcu` (no source) are counted, not shown. |
 | `related` | `TypeAt`+`FindDescendants`, `MethodAt`+`FindOverrides`, `InterfaceMethodAt`+`FindImplementations` / `InterfaceAt`+`FindInterfaceImplementors`, `AssignableAt`+`FindAssignments`, `ClassAt`+`FindCreations`/`FindDestructions` | The `...At` test runs at the declaration site - it normalizes (method to its declaration, alias to its type) and refuses what the relation cannot mean, which becomes an error naming what was needed. Rows are grouped by file like every answer; a descendant names its parent (`<- TParent`) below the first level, and a tagged row whose source line repeats the previous row's (an override chain is one signature) shows only its tag. An indented tree was tried first: it repeats a path per row and cost as much as grep on a 250-class hierarchy. |
 | `outline` | `PasModuleOutline` | Sections, uses, includes, types with members, routines with signatures, each with its line. `owner` and `section` filter; `members: false` keeps only types and bodies. |
@@ -263,13 +264,14 @@ are here so a new tool is not the one that breaks them.
    of an interface: 20.7k -> 27.0k tokens), about 10 where every row has a
    routine of its own (11 callers: 335 -> 452); the whole bench 60.5k ->
    67.3k, still 11x below grep with context lines. Time unchanged.
-2. **`source`** - the exact text of a declaration by name: a routine's
-   implementation, a type's whole declaration, a constant's value.
-   `definition context: N` approximates it with a line count the agent has
-   to guess; a node spans `FirstToken..LastToken`, so the server knows where
-   the routine ends. For a method, `part: impl | decl | both`; for a type,
-   `members: false` keeps the declaration and drops nested detail. Replaces
-   the most common `Read` with an offset.
+2. **`source`** - done in 0.4.0, section 3. `members: false` for a type was
+   left out: `outline` with `owner` already lists a type's members with
+   their lines. Measured on the client group: an 11-line constructor 123
+   tokens, a 301-line method 3.9k, a 57-line class 0.7k - what reading
+   exactly those lines costs, a floor an agent without the server does not
+   reach, since it cannot know where a routine ends; a 6-line routine 104
+   tokens where `definition context: 25` took 365. One call where there
+   were a search and a read.
 3. **`members`** - every member of a type INCLUDING inherited ones, each with
    its declaring type and visibility (`EnumMembersX`). "What can I call on
    this object" is currently an outline per ancestor. `visibility` filters
@@ -421,8 +423,9 @@ gap between the answers and the truth.
 
 ### 9.8 Order
 
-1. Enclosing routine on rows (done, 0.3.0), `source`, `members` - cheap,
-   every task uses them, and every library entry point they need is public.
+1. Enclosing routine on rows (done, 0.3.0), `source` (done, 0.4.0),
+   `members` - cheap, every task uses them, and every library entry point
+   they need is public.
 2. `callers` / `callees`, then `impact`.
 3. `compile`.
 4. Forms (9.5) - the largest gap, and new library work.

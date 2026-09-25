@@ -22,6 +22,7 @@ begin
   Result := 2 * inherited Area;
 end;
 
+// Project B's run: a square and a big circle, summed through IShape.
 procedure RunB;
 var
   LSquare: TSquare;

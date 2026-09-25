@@ -64,6 +64,20 @@ Check 'status' (Block $b 'status') @('member AppA', 'member AppB', 'analysis 0:'
 Check 'find' (Block $b 'find {"query":"TCircle"}') @('Shared\uShapes.pas:21  TCircle (class)')
 Check 'find wildcard' (Block $b 'find {"query":"*Circ*"') @('AppB\uAppB.pas:11  TBigCircle', 'Shared\uShapes.pas:21  TCircle')
 Check 'definition' (Block $b 'definition {"symbol":"TCircle.Area"') @('declared at Shared\uShapes.pas:26', 'implemented at Shared\uShapes.pas:53', 'Result := Pi * FRadius * FRadius;')
+Check 'source' (Block $b 'source {"symbol":"TCircle.Area"}') @('TCircle.Area (function) implemented at Shared\uShapes.pas:53-56', "53  function TCircle.Area: Double;`n54  begin", "56  end;`n") @('declared at')
+Check 'source both' (Block $b 'source {"symbol":"TCircle.Area", "part"') @('TCircle.Area (function) declared at Shared\uShapes.pas:26', "26      function Area: Double; override;`nimplemented at Shared\uShapes.pas:53-56")
+Check 'source type' (Block $b 'source {"symbol":"TCircle"}') @('TCircle (class) declared at Shared\uShapes.pas:21-28', '21    TCircle = class(TShape)', '28    end;')
+Check 'source limit' (Block $b 'source {"symbol":"TSquare"') @('TSquare (class) declared at Shared\uShapes.pas:30-36', "31    private`n... 5 more lines, to line 36")
+# The comment directly above comes with it; the blank line above that stops it.
+Check 'source comment' (Block $b 'source {"symbol":"RunB"}') @('RunB (procedure) implemented at AppB\uAppB.pas:26-32', "25  // Project B's run", '32  end;') @('24  ')
+# No body to show: the declaration, and why.
+Check 'source abstract' (Block $b 'source {"symbol":"TShape.Area"}') @('TShape.Area (function) declared at Shared\uShapes.pas:17', 'abstract, no body')
+Check 'source interface' (Block $b 'source {"symbol":"IShape.Area"}') @('declared at Shared\uShapes.pas:12', 'an interface method, no body')
+Check 'source unit' (Block $b 'source {"symbol":"uShapes"}') @('is a unit - `outline` shows its structure')
+# A local has no name to find it by; by position it has a source like any other.
+Check 'source local' (Block $b 'source {"file"') @('LShape (var) declared at Shared\uShapes.pas:71', '71    LShape: IShape;')
+# "AppA\tuAppA.pas" in JSON is a tab, not a backslash: say so, not "invalid characters in path".
+Check 'control character' (Block $b 'outline {"file":"AppA') @('`file` holds a control character (#9)')
 Check 'references' (Block $b 'references {"symbol":"TShape.Area"}') @('1 references in 1 files', "  RunA`n    22  Writeln(LShape.Describe")
 Check 'references by position' (Block $b 'references {"file"') @('TCircle.Radius (property)', '21  TCircle(LShape).Radius := 3;')
 # A row in no routine or type (a uses clause) stays at the file level.
@@ -79,11 +93,11 @@ Check 'implementations' (Block $b 'related {"relation":"implementations", "symbo
 Check 'assignments' (Block $b 'related {"relation":"assignments"') @("  TCircle.Create`n    50  FRadius := ARadius;")
 Check 'creations' (Block $b 'related {"relation":"creations"') @("  RunA`n    19  LShape := TCircle.Create(2);")
 Check 'destructions' (Block $b 'related {"relation":"destructions"') @("  RunA`n    24  FreeAndNil(LShape);")
-Check 'outline' (Block $b 'outline') @('21  type TCircle = class', '27    property Radius: Double', '53  function TCircle.Area: Double', '40 implementation')
+Check 'outline' (Block $b 'outline {"file":"Shared') @('21  type TCircle = class', '27    property Radius: Double', '53  function TCircle.Area: Double', '40 implementation')
 Check 'unit_deps' (Block $b 'unit_deps') @('uShapes is used by 3 units', 'AppB\uAppB.pas:8')
 Check 'diagnostics' (Block $b 'diagnostics') @('no diagnostics')
 Check 'ambiguous' (Block $b 'references {"symbol":"Area"}') @('is ambiguous - 5 declarations', 'IShape.Area', 'TBigCircle.Area')
-Check 'unknown' (Block $b 'definition {"symbol":"NoSuchThing"}') @('no declaration named `NoSuchThing`')
+Check 'unknown' (Block $b 'definition {"symbol":"NoSuchThing"}') @('no declaration named `NoSuchThing`', 'a local or a parameter is addressed by `file` + `line` + `name`')
 
 # ---- 2. strict policy ---------------------------------------------------------
 Write-Host '--- CLI, strict policy'
@@ -127,7 +141,7 @@ try {
     $stdin.WriteLine('{"jsonrpc":"2.0","method":"notifications/initialized"}')
     $r = Rpc 2 'tools/list' '{}'
     $names = ($r.result.tools | ForEach-Object { $_.name }) -join ','
-    Check 'tools/list' $names @('status', 'find', 'definition', 'references', 'related', 'outline', 'diagnostics', 'unit_deps')
+    Check 'tools/list' $names @('status', 'find', 'definition', 'source', 'references', 'related', 'outline', 'diagnostics', 'unit_deps')
     $r = Rpc 3 'tools/call' '{"name":"related","arguments":{"relation":"creations","symbol":"TCircle"}}'
     Check 'call before edit' (ToolText $r) @('creations of TCircle', ': 1')
     if ($r.result.isError) { Write-Host 'FAIL call before edit reported isError'; $script:failures++ }

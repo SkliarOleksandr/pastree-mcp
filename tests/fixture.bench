@@ -34,3 +34,8 @@ descendants TShape
 == outline-shapes | What is in uShapes?
 call outline {"file":"Shared\\uShapes.pas"}
 read Shared\uShapes.pas
+
+== source-circle-area | Show TCircle.Area's implementation.
+call source {"symbol":"TCircle.Area"}
+grep function\s+TCircle\.Area\b
+read Shared\uShapes.pas 53 4

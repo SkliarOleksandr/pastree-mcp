@@ -4,6 +4,16 @@ status
 find {"query":"TCircle"}
 find {"query":"*Circ*", "scope":"project"}
 definition {"symbol":"TCircle.Area", "context":3}
+source {"symbol":"TCircle.Area"}
+source {"symbol":"TCircle.Area", "part":"both"}
+source {"symbol":"TCircle"}
+source {"symbol":"TSquare", "limit":2}
+source {"symbol":"RunB"}
+source {"symbol":"TShape.Area"}
+source {"symbol":"IShape.Area"}
+source {"symbol":"uShapes"}
+source {"file":"Shared\\uShapes.pas", "line":71, "name":"LShape"}
+outline {"file":"AppA\tuAppA.pas"}
 references {"symbol":"TShape.Area"}
 references {"file":"AppA\\uAppA.pas", "line":21, "name":"Radius"}
 references {"symbol":"uShapes"}

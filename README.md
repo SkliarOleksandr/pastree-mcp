@@ -35,6 +35,7 @@ or **16 s / 4.3 GB** under the exact one. Typical calls take 60-500 ms.
 | `status` | What is loaded: members, analyses, unit counts, unit names that do not resolve, load progress |
 | `find` | Declarations by name, qualified name or wildcard, project units first |
 | `definition` | Where a symbol is declared and implemented, optionally with the source that follows |
+| `source` | The exact text of one declaration - a routine's body, a whole type, a constant - numbered, with the comment above it |
 | `references` | Every use across the group, grouped by file and by the routine or type it sits in; also units, built-ins and conditional defines |
 | `related` | `descendants`, `overrides`, `implementations`, `assignments`, `creations`, `destructions` |
 | `outline` | The structure of one unit with line numbers, without reading it |

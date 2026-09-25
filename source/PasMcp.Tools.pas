@@ -141,6 +141,22 @@ begin
     Result := SameText(LV.Value, 'true') or (LV.Value = '1');
 end;
 
+// The `file` argument as a full path. A control character in it is a JSON
+// escape the caller did not mean - "src\frmMain.pas" holds a form feed -
+// and would otherwise come back as the RTL's "invalid characters in path".
+function ArgFile(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
+var
+  LRaw: string;
+begin
+  LRaw := ArgStr(AArgs, 'file');
+  for var LCh in LRaw do
+    if LCh < ' ' then
+      raise EToolError.CreateFmt('`file` holds a control character (#%d): in '
+        + 'JSON a backslash is written \\, or use / - %s', [Ord(LCh),
+        LRaw.Replace(LCh, '?')]);
+  Result := AWs.FullPath(LRaw);
+end;
+
 { ---- small text helpers --------------------------------------------------- }
 
 function CleanLine(const AText: string; AMax: Integer = 160): string;
@@ -460,7 +476,7 @@ var
 begin
   Result := Default(TTarget);
   Result.Ids := NewIds(AWs);
-  LFile := AWs.FullPath(ArgStr(AArgs, 'file'));
+  LFile := ArgFile(AWs, AArgs);
   LLine := ArgInt(AArgs, 'line', 0);
   LName := ArgStr(AArgs, 'name');
   if LName.Contains('.') then
@@ -719,7 +735,8 @@ begin
   LCands := ResolveName(AWs, LSymbol, ArgStr(AArgs, 'kind'), False, 12, LMore);
   if Length(LCands) = 0 then
     raise EToolError.CreateFmt('no declaration named `%s` in the analyzed '
-      + 'closure (try `find` with a wildcard: *%s*)', [LSymbol,
+      + 'closure (try `find` with a wildcard: *%s*; a local or a parameter is '
+      + 'addressed by `file` + `line` + `name`)', [LSymbol,
       StripGenerics(LSymbol.Split(['.'])[High(LSymbol.Split(['.']))])]);
   if Length(LCands) = 1 then
   begin
@@ -920,6 +937,16 @@ begin
   end;
 end;
 
+// The index of AFile among the files a model was read from (its main file
+// and its includes); -1 when it is not one of them.
+function FileIdOf(LM: TPasSemaModel; const AFile: string): Integer;
+begin
+  for var LIdx := 0 to High(LM.Tree.Source.FileNames) do
+    if SameText(LM.Tree.Source.FileNames[LIdx], AFile) then
+      Exit(LIdx);
+  Result := -1;
+end;
+
 // The nearest routine or type declaration around ANode, NIL_NODE at unit
 // level. An anonymous method is not one: its lines belong to the routine
 // that writes it.
@@ -1018,13 +1045,7 @@ begin
   LM := ModelOf(AFile);
   if LM = nil then
     Exit;
-  LFileId := -1;
-  for var LIdx := 0 to High(LM.Tree.Source.FileNames) do
-    if SameText(LM.Tree.Source.FileNames[LIdx], AFile) then
-    begin
-      LFileId := LIdx;
-      Break;
-    end;
+  LFileId := FileIdOf(LM, AFile);
   if LFileId < 0 then
     Exit;
   LNodes := TList<Integer>.Create;
@@ -1284,7 +1305,8 @@ begin
       False, 10, LMore);
     if Length(LTargets) = 0 then
       raise EToolError.CreateFmt('no declaration named `%s` (try `find` with '
-        + 'a wildcard)', [ArgStr(AArgs, 'symbol')]);
+        + 'a wildcard; a local or a parameter is addressed by `file` + `line` '
+        + '+ `name`)', [ArgStr(AArgs, 'symbol')]);
   end;
   LSb := TStringBuilder.Create;
   try
@@ -1346,6 +1368,321 @@ begin
     end;
     if LMore > 0 then
       LSb.AppendLine(Format('... %d more declarations of that name', [LMore]));
+    Result := LSb.ToString.TrimRight;
+  finally
+    LSb.Free;
+  end;
+end;
+
+{ ---- source ------------------------------------------------------------------- }
+
+const
+  // A longer comment above a declaration is named, not shown: in old code it
+  // is as often a commented-out earlier version as documentation.
+  MAX_COMMENT_LINES = 30;
+
+// Line breaks in a whitespace token; CRLF, LF and a lone CR count once each.
+function LineBreaks(const AText: string): Integer;
+begin
+  Result := 0;
+  for var LIdx := 1 to Length(AText) do
+    if (AText[LIdx] = #10) or ((AText[LIdx] = #13) and
+       ((LIdx = Length(AText)) or (AText[LIdx + 1] <> #10))) then
+      Inc(Result);
+end;
+
+// The first line of the comment written directly above visible token AVis -
+// comments each starting their own line, no blank line between them and the
+// declaration - read from the raw token stream, where the lexer keeps them.
+// AVisLine when there is none.
+function CommentAboveLine(LM: TPasSemaModel; AVis, AVisLine: Integer): Integer;
+var
+  LFileId, LIdx, LFirst, LCol: Integer;
+begin
+  Result := AVisLine;
+  if (AVis < 0) or (AVis > High(LM.Tree.Source.Visible)) then
+    Exit;
+  LFileId := LM.Tree.Source.Visible[AVis].FileId;
+  if (LFileId < 0) or (LFileId > High(LM.Tree.Source.Files)) then
+    Exit;
+  LFirst := -1;
+  LIdx := LM.Tree.Source.Visible[AVis].TokenIndex - 1;
+  while LIdx >= 0 do
+  begin
+    case LM.Tree.Source.Files[LFileId].Tokens[LIdx].Kind of
+      tkWhitespace:
+        if LineBreaks(LM.Tree.Source.Files[LFileId].TokenText(LIdx)) > 1 then
+          Break;
+      tkCommentLine, tkCommentBrace, tkCommentParen:
+        begin
+          // `end; // done` belongs to the code before it.
+          if (LIdx > 0) and
+             ((LM.Tree.Source.Files[LFileId].Tokens[LIdx - 1].Kind <>
+               tkWhitespace) or (LineBreaks(LM.Tree.Source.Files[LFileId].
+               TokenText(LIdx - 1)) = 0)) then
+            Break;
+          LFirst := LIdx;
+        end;
+    else
+      Break;   // code, or a directive - `{$R *.dfm}` is not a doc comment
+    end;
+    Dec(LIdx);
+  end;
+  if LFirst >= 0 then
+    LM.Tree.Source.Files[LFileId].OffsetToLineCol(
+      LM.Tree.Source.Files[LFileId].Tokens[LFirst].Start, Result, LCol);
+end;
+
+// A declaration node in lines: its file (an index into the model's files),
+// AFrom - the first line to show, the comment above included - AAt, its own
+// first line, and ATo, its last. False when it straddles an $I include.
+function DeclLines(LM: TPasSemaModel; ANode: Integer; out AFileId, AFrom, AAt,
+  ATo: Integer): Boolean;
+var
+  LToFile, LCol: Integer;
+begin
+  Result := VisPos(LM, LM.Tree.NodeLeftmostVis(ANode), AFileId, AAt, LCol) and
+    VisPos(LM, LM.Tree.Nodes[ANode].LastToken, LToFile, ATo, LCol) and
+    (LToFile = AFileId);
+  if Result then
+    AFrom := CommentAboveLine(LM, LM.Tree.NodeLeftmostVis(ANode), AAt);
+end;
+
+// The innermost routine whose tokens in file AFileId hold ALine:ACol.
+function RoutineNodeAt(LM: TPasSemaModel; AFileId, ALine, ACol: Integer): Integer;
+var
+  LFromFile, LFromLine, LFromCol, LToFile, LToLine, LToCol, LBestLine,
+    LBestCol: Integer;
+begin
+  Result := NIL_NODE;
+  LBestLine := 0;
+  LBestCol := 0;
+  for var LNode := 0 to High(LM.Tree.Nodes) do
+  begin
+    if (LM.Tree.Nodes[LNode].Kind <> nkRoutine) or
+       not VisPos(LM, LM.Tree.NodeLeftmostVis(LNode), LFromFile, LFromLine,
+       LFromCol) or (LFromFile <> AFileId) or
+       not VisPos(LM, LM.Tree.Nodes[LNode].LastToken, LToFile, LToLine,
+       LToCol) or (LToFile <> AFileId) then
+      Continue;
+    if (ALine < LFromLine) or ((ALine = LFromLine) and (ACol < LFromCol)) or
+       (ALine > LToLine) or ((ALine = LToLine) and (ACol > LToCol)) then
+      Continue;
+    if (Result = NIL_NODE) or (LFromLine > LBestLine) or
+       ((LFromLine = LBestLine) and (LFromCol > LBestCol)) then
+    begin
+      Result := LNode;
+      LBestLine := LFromLine;
+      LBestCol := LFromCol;
+    end;
+  end;
+end;
+
+function HasBody(LM: TPasSemaModel; ARoutine: Integer): Boolean;
+var
+  LChild: Integer;
+begin
+  LChild := LM.Tree.Nodes[ARoutine].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if LM.Tree.Nodes[LChild].Kind = nkRoutineBody then
+      Exit(True);
+    LChild := LM.Tree.Nodes[LChild].NextSibling;
+  end;
+  Result := False;
+end;
+
+function HasDirective(LM: TPasSemaModel; ARoutine: Integer;
+  const AWord: string): Boolean;
+var
+  LChild: Integer;
+begin
+  LChild := LM.Tree.Nodes[ARoutine].FirstChild;
+  while LChild <> NIL_NODE do
+  begin
+    if (LM.Tree.Nodes[LChild].Kind = nkDirective) and
+       SameText(LM.Tree.NodeText(LChild), AWord) then
+      Exit(True);
+    LChild := LM.Tree.Nodes[LChild].NextSibling;
+  end;
+  Result := False;
+end;
+
+// Is a routine declaration a member of an interface type?
+function InInterfaceType(LM: TPasSemaModel; ARoutine: Integer): Boolean;
+var
+  LUp: Integer;
+begin
+  LUp := LM.Tree.Nodes[ARoutine].Parent;
+  while LUp <> NIL_NODE do
+  begin
+    case LM.Tree.Nodes[LUp].Kind of
+      nkInterfaceType:
+        Exit(True);
+      nkClassType, nkRecordType, nkObjectType, nkHelperType, nkTypeDecl,
+      nkRoutineBody:
+        Exit(False);
+    end;
+    LUp := LM.Tree.Nodes[LUp].Parent;
+  end;
+  Result := False;
+end;
+
+// Why a routine declaration has no body to show.
+function NoBodyNote(LM: TPasSemaModel; ARoutine: Integer): string;
+begin
+  if HasDirective(LM, ARoutine, 'abstract') then
+    Result := 'abstract, no body: `related overrides` lists the overrides'
+  else if InInterfaceType(LM, ARoutine) then
+    Result := 'an interface method, no body: `related implementations` lists '
+      + 'the methods implementing it'
+  else if HasDirective(LM, ARoutine, 'external') then
+    Result := 'external, no body in source'
+  else
+    Result := 'no implementation found';
+end;
+
+// One part - a declaration or an implementation - under its heading, the
+// lines numbered as in the file, at most ALimit of them.
+procedure AppendPart(ASb: TStringBuilder; AWs: TMcpWorkspace; LM: TPasSemaModel;
+  ANode: Integer; const AHead: string; ALimit: Integer);
+var
+  LFileId, LFrom, LAt, LTo, LLast, LWidth: Integer;
+begin
+  if not DeclLines(LM, ANode, LFileId, LFrom, LAt, LTo) then
+  begin
+    ASb.AppendLine(AHead + ' across an $I include - not shown; read the file');
+    Exit;
+  end;
+  ASb.AppendLine(Format('%s at %s:%s', [AHead,
+    AWs.RelPath(LM.Tree.Source.FileNames[LFileId]),
+    IfThen(LTo > LAt, Format('%d-%d', [LAt, LTo]), IntToStr(LAt))]));
+  if LAt - LFrom > MAX_COMMENT_LINES then
+  begin
+    ASb.AppendLine(Format('(%d comment lines above it, from line %d)',
+      [LAt - LFrom, LFrom]));
+    LFrom := LAt;
+  end;
+  LLast := Min(LTo, LFrom + ALimit - 1);
+  LWidth := Length(IntToStr(LLast));
+  for var LLine := LFrom to LLast do
+    ASb.AppendLine(Format('%*d  %s', [LWidth, LLine,
+      LM.Tree.Source.Files[LFileId].LineText(LLine)]));
+  if LTo > LLast then
+    ASb.AppendLine(Format('... %d more lines, to line %d (raise `limit`)',
+      [LTo - LLast, LTo]));
+end;
+
+{ The exact text of one declaration (SPEC 9.2.2): a routine's implementation
+  from its header to its `end;`, a type's whole declaration, a constant with
+  its value - where `definition` + `context` makes the agent guess how many
+  lines a routine has. The lines come from the model's own token stream, so
+  their numbers are the ones every other answer uses. }
+function ToolSource(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
+var
+  LT: TTarget;
+  LPart, LTitle: string;
+  LLimit, LMid, LSym, LDeclNode, LImplNode, LDm, LFileId: Integer;
+  LA: TMcpAnalysis;
+  LM, LImplM: TPasSemaModel;
+  LNavT: TPasNavTarget;
+  LSb: TStringBuilder;
+  LIsRoutine, LSame, LShowDecl, LShowImpl: Boolean;
+begin
+  LPart := LowerCase(ArgStr(AArgs, 'part'));
+  if (LPart <> '') and (LPart <> 'impl') and (LPart <> 'decl') and
+     (LPart <> 'both') then
+    raise EToolError.Create('`part` is impl, decl or both');
+  LLimit := EnsureRange(ArgInt(AArgs, 'limit', 300), 1, 5000);
+  LT := ResolveOne(AWs, AArgs);
+  case LT.Kind of
+    tkUnit:
+      raise EToolError.CreateFmt('%s is a unit - `outline` shows its '
+        + 'structure with line numbers; `source` takes one of its '
+        + 'declarations', [LT.Name]);
+    tkBuiltin, tkDefine:
+      raise EToolError.CreateFmt('%s is a %s - it has no source declaration',
+        [LT.Name, LT.Head]);
+  end;
+  if SameText(TPath.GetExtension(LT.DeclFile), '.dcu') then
+    raise EToolError.CreateFmt('%s is declared in a compiled unit without '
+      + 'source (%s)', [LT.Name, AWs.RelPath(LT.DeclFile)]);
+
+  // The declaration node, from the first analysis that holds the symbol.
+  LA := nil;
+  for var LCand in AWs.Analyses do
+    if LT.Ids[LCand.Index].Mid >= 0 then
+    begin
+      LA := LCand;
+      Break;
+    end;
+  LDeclNode := NIL_NODE;
+  LM := nil;
+  LMid := -1;
+  if LA <> nil then
+  begin
+    LMid := LT.Ids[LA.Index].Mid;
+    LSym := LT.Ids[LA.Index].Sym;
+    if LA.Proj.EnsureHydrated(LMid) then
+    begin
+      LM := LA.Proj.Model(LMid);
+      if (LSym >= 0) and (LSym < LM.SymCount) then
+        LDeclNode := LM.Tree.DeclRootOf(LM.Symbols[LSym].DeclNode);
+    end;
+  end;
+  if LDeclNode = NIL_NODE then
+    raise EToolError.CreateFmt('no source declaration of %s found', [LT.Name]);
+
+  // A routine declared apart from its body - a method, an interface-section
+  // or a forward routine - is implemented in the declaring unit: the routine
+  // around the first statement GotoImplementation finds.
+  LIsRoutine := LM.Tree.Nodes[LDeclNode].Kind = nkRoutine;
+  LImplNode := NIL_NODE;
+  LImplM := nil;
+  if LIsRoutine and HasBody(LM, LDeclNode) then
+  begin
+    LImplNode := LDeclNode;
+    LImplM := LM;
+  end
+  else if LIsRoutine then
+  begin
+    LDm := LA.Nav.ModelIdOf(LT.DeclFile);
+    if LDm < 0 then
+      LDm := LMid;
+    if LA.Nav.GotoImplementation(LDm, LT.DeclLine, LT.DeclCol, LNavT) and
+       LA.Proj.EnsureHydrated(LNavT.UnitId) then
+    begin
+      LImplM := LA.Proj.Model(LNavT.UnitId);
+      LFileId := FileIdOf(LImplM, LNavT.FilePath);
+      if LFileId >= 0 then
+        LImplNode := RoutineNodeAt(LImplM, LFileId, LNavT.Line, LNavT.Col);
+    end;
+  end;
+
+  // Declared where it is implemented (a routine of the implementation
+  // section only): one text, whichever part is asked.
+  LSame := (LImplNode = LDeclNode) and (LImplM = LM);
+  if LPart = '' then
+    LPart := IfThen(LImplNode <> NIL_NODE, 'impl', 'decl');
+  LShowImpl := (LImplNode <> NIL_NODE) and ((LPart = 'impl') or
+    (LPart = 'both'));
+  LShowDecl := not (LSame and LShowImpl) and ((LPart <> 'impl') or
+    (LImplNode = NIL_NODE));
+  LTitle := Format('%s (%s) ', [LT.Name, LT.Head]);
+  LSb := TStringBuilder.Create;
+  try
+    if LShowDecl then
+    begin
+      AppendPart(LSb, AWs, LM, LDeclNode, LTitle + 'declared', LLimit);
+      LTitle := '';
+      if LIsRoutine and (LImplNode = NIL_NODE) then
+        LSb.AppendLine('(' + NoBodyNote(LM, LDeclNode) + ')')
+      else if not LIsRoutine and (LPart = 'impl') then
+        LSb.AppendLine('(not a routine: its declaration is all its source)');
+    end;
+    if LShowImpl then
+      AppendPart(LSb, AWs, LImplM, LImplNode, LTitle + IfThen(LSame,
+        'declared', 'implemented'), LLimit);
     Result := LSb.ToString.TrimRight;
   finally
     LSb.Free;
@@ -1603,9 +1940,9 @@ var
   LSb: TStringBuilder;
   LMembers: Boolean;
 begin
-  LFile := AWs.FullPath(ArgStr(AArgs, 'file'));
   if ArgStr(AArgs, 'file') = '' then
     raise EToolError.Create('`file` is required');
+  LFile := ArgFile(AWs, AArgs);
   if not ModelOfFile(AWs, LFile, LA, LMid) then
     raise EToolError.CreateFmt('%s is not part of any analyzed project',
       [AWs.RelPath(LFile)]);
@@ -1694,7 +2031,7 @@ var
 begin
   LFile := '';
   if ArgStr(AArgs, 'file') <> '' then
-    LFile := AWs.FullPath(ArgStr(AArgs, 'file'));
+    LFile := ArgFile(AWs, AArgs);
   LLibrary := ArgBool(AArgs, 'library', False);
   LLimit := EnsureRange(ArgInt(AArgs, 'limit', 60), 1, 5000);
   LRows := TList<THit>.Create;
@@ -1833,7 +2170,7 @@ begin
   LMid := -1;
   if ArgStr(AArgs, 'file') <> '' then
   begin
-    LFile := AWs.FullPath(ArgStr(AArgs, 'file'));
+    LFile := ArgFile(AWs, AArgs);
     LFound := ModelOfFile(AWs, LFile, LA, LMid);
   end
   else if ArgStr(AArgs, 'unit') <> '' then
@@ -1955,6 +2292,18 @@ const
     + '"context":{"type":"integer","description":"Source lines to include '
     + '(default 0, max 200)"}}}},' +
 
+    '{"name":"source","description":"The exact source text of one '
+    + 'declaration, by name: a routine''s implementation from its header to '
+    + 'its end, a type''s whole declaration, a constant with its value - '
+    + 'numbered as in the file, with the comment written directly above it. '
+    + 'Use it instead of reading a file at a guessed offset.",'
+    + '"inputSchema":{"type":"object","properties":{' + TARGET_PROPS + ','
+    + '"part":{"type":"string","enum":["impl","decl","both"],"description":'
+    + '"For a routine: its implementation (the default when it has one), its '
+    + 'declaration, or both"},'
+    + '"limit":{"type":"integer","description":"Max lines per part (default '
+    + '300)"}}}},' +
+
     '{"name":"references","description":"Every use of a symbol across all '
     + 'projects of the group, by resolved identity rather than text: '
     + 'same-named unrelated symbols, comments and strings are not in it. '
@@ -2029,7 +2378,9 @@ begin
     + ExtractFileName(AWs.ProjectFile) + ' (' + AWs.Root + '). For Object '
     + 'Pascal code prefer these tools over grep and reading whole files: '
     + '`find` locates declarations, `definition` jumps to declaration and '
-    + 'implementation, `references` lists real uses (resolved identity, not '
+    + 'implementation, `source` gives the exact text of one declaration (a '
+    + 'routine''s body, a whole type) instead of a file read at a guessed '
+    + 'offset, `references` lists real uses (resolved identity, not '
     + 'text), `related` answers hierarchy/override/implementation/assignment/'
     + 'creation questions, `outline` shows a unit''s structure with line '
     + 'numbers, `unit_deps` its uses graph, `diagnostics` checks name '
@@ -2077,6 +2428,8 @@ begin
       Result := ToolFind(AWs, AArgs)
     else if AName = 'definition' then
       Result := ToolDefinition(AWs, AArgs)
+    else if AName = 'source' then
+      Result := ToolSource(AWs, AArgs)
     else if AName = 'references' then
       Result := ToolReferences(AWs, AArgs)
     else if AName = 'related' then
