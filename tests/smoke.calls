@@ -1,0 +1,21 @@
+# Tool calls for tests\smoke.ps1, one per line: <tool> <json arguments>.
+# Also usable by hand: out\pastree-mcp.exe --project tests\fixtures\group\Fixture.groupproj --script tests\smoke.calls
+status
+find {"query":"TCircle"}
+find {"query":"*Circ*", "scope":"project"}
+definition {"symbol":"TCircle.Area", "context":3}
+references {"symbol":"TShape.Area"}
+references {"file":"AppA\\uAppA.pas", "line":21, "name":"Radius"}
+references {"symbol":"uShapes"}
+related {"relation":"descendants", "symbol":"TShape"}
+related {"relation":"overrides", "symbol":"TShape.Area"}
+related {"relation":"implementations", "symbol":"IShape"}
+related {"relation":"implementations", "symbol":"IShape.Area"}
+related {"relation":"assignments", "symbol":"TCircle.FRadius"}
+related {"relation":"creations", "symbol":"TCircle"}
+related {"relation":"destructions", "symbol":"TShape"}
+outline {"file":"Shared\\uShapes.pas"}
+unit_deps {"unit":"uShapes"}
+diagnostics {}
+references {"symbol":"Area"}
+definition {"symbol":"NoSuchThing"}

@@ -1,0 +1,60 @@
+# Line endings, declared rather than left to whoever cloned this.
+#
+# WHY THIS FILE EXISTS. Without it, what lands in a working copy depends on the
+# machine's own core.autocrlf, so two clones of one commit can differ - and the
+# consumer here is RAD Studio, which writes CRLF for everything it touches. A
+# tool that edits a source with LF then leaves the IDE re-saving it with CRLF,
+# and the next diff is the whole file. The same rule is declared in the PasTree
+# repo (object-pascal-tree/.gitattributes); keep the two in step.
+#
+# Everything is normalized to LF IN THE REPOSITORY; eol= controls what the
+# working copy gets. Delphi sources and anything cmd.exe parses get CRLF.
+
+* text=auto
+
+# Delphi sources and projects - CRLF, the way the IDE writes them.
+*.pas   text eol=crlf
+*.dpr   text eol=crlf
+*.dpk   text eol=crlf
+*.inc   text eol=crlf
+*.dproj text eol=crlf
+*.dfm   text eol=crlf
+*.groupproj text eol=crlf
+
+# Batch files: cmd.exe is the one interpreter here that can genuinely misparse
+# an LF-only file, and every build in this repo goes through one.
+*.bat   text eol=crlf
+
+# PowerShell, called from those batch files for the few things cmd cannot do.
+# CRLF for the same reason and one of its own: a here-string or a line
+# continuation in a script Windows PowerShell reads as LF-only is a class of
+# parse error that reads as a logic bug.
+*.ps1   text eol=crlf
+
+# Resource scripts, compiled by brcc32 - a Windows tool, like the rest.
+*.rc    text eol=crlf
+
+# Documentation and data - LF, which is what their own tooling and every
+# diff viewer expect. `.calls` are the CLI scripts of testssmoke.ps1.
+*.md    text eol=lf
+*.json  text eol=lf
+*.calls text eol=lf
+
+# Shell scripts, and the hooks that ARE shell scripts without an extension -
+# LF, or /bin/sh chokes on the CR: `#!/bin/sh\r` is not an interpreter. The
+# irony is deliberate to record: without these two lines the `* text=auto`
+# above hands a CRLF working copy to the very hook that exists to keep CRLF
+# where it belongs, and it stops running.
+*.sh          text eol=lf
+.githooks/*   text eol=lf
+
+# Git's own configuration, LF like the rest of the tooling - and not left to
+# `text=auto`, which is how this file came to be the one exception to the rule
+# it declares.
+.gitattributes text eol=lf
+.gitignore     text eol=lf
+LICENSE text eol=lf
+
+# Compiled/binary output that may end up tracked: never touched.
+*.res   binary
+*.ico   binary

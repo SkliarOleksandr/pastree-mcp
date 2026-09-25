@@ -1,0 +1,29 @@
+#!/bin/sh
+#
+# Rejects a commit that would carry a working-copy file with LF line endings
+# where .gitattributes declares `eol=crlf` (every Delphi source, project and
+# .bat file in this repository).
+#
+# WHY THIS EXISTS. The index is normalized to LF for everything, so an LF
+# working copy produces a CLEAN-looking diff and nothing complains - until RAD
+# Studio opens the file, re-saves it as CRLF, and the next diff is the whole
+# file. The usual culprit is an in-place edit from a POSIX shell: git-bash's
+# perl and friends READ through the crlf layer and WRITE without it, silently
+# converting the file. This hook is the only check that catches that whatever
+# tool did it.
+#
+# Enabled per clone: git config core.hooksPath .githooks
+set -e
+
+BAD=$(git diff --cached --name-only --diff-filter=ACMR -z |
+  xargs -0 -r git ls-files --eol -- |
+  awk -F'\t' '$1 ~ /w[/]lf/ && $1 ~ /eol=crlf/ { print $2 }')
+
+if [ -n "$BAD" ]; then
+  echo "pre-commit: LF line endings where .gitattributes says CRLF:" >&2
+  echo "$BAD" | sed 's/^/  /' >&2
+  echo >&2
+  echo "  modified file:   perl -pe 's/\r?\n/\r\n/' F > F.tmp && mv F.tmp F" >&2
+  echo "  unmodified one:  rm F && git checkout -- F" >&2
+  exit 1
+fi
