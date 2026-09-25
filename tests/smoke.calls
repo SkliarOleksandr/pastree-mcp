@@ -25,6 +25,14 @@ related {"relation":"implementations", "symbol":"IShape.Area"}
 related {"relation":"assignments", "symbol":"TCircle.FRadius"}
 related {"relation":"creations", "symbol":"TCircle"}
 related {"relation":"destructions", "symbol":"TShape"}
+callers {"symbol":"TCircle.Area"}
+callers {"symbol":"TCircle.Area", "depth":3}
+callers {"symbol":"TShapeBox.GetItem", "depth":2}
+callers {"symbol":"TShapeBox.SetItem"}
+callers {"symbol":"TShapeBox.Changed"}
+callers {"symbol":"TBigBox.Changed"}
+callers {"symbol":"NeverCalled"}
+callers {"symbol":"TCircle"}
 outline {"file":"Shared\\uShapes.pas"}
 unit_deps {"unit":"uShapes"}
 diagnostics {}

@@ -13,7 +13,9 @@
 #     it takes to tell a real hit from a namesake), plus the reads;
 #   - the grep hits sorted against the answer: in the answer, in a comment or
 #     string, or other (a namesake - or a row the answer missed); and the rows
-#     of the answer grep did not find at all.
+#     of the answer grep did not find at all;
+#   - with `also` lines, the tokens of the calls to the other tools the new
+#     one replaces (the references per caller that `callers` saves).
 #
 # The baseline is a LOWER bound on what an agent pays: it counts one pass of
 # each pattern and no file opened to disambiguate. The files grep searches are
@@ -200,26 +202,34 @@ foreach ($line in [IO.File]::ReadAllLines((Resolve-Path $Bench).Path)) {
     $t = $line.Trim()
     if ($t -eq '' -or $t.StartsWith('#')) { continue }
     if ($t -match '^==\s*(\S+)\s*\|\s*(.*)$') {
-        $q = [pscustomobject]@{ Id = $Matches[1]; Text = $Matches[2]; Call = $null; Greps = @(); Reads = @() }
+        $q = [pscustomobject]@{ Id = $Matches[1]; Text = $Matches[2]; Call = $null; Also = @(); Greps = @(); Reads = @() }
         [void]$questions.Add($q)
         continue
     }
     if ($null -eq $q) { throw "$Bench($lineNo): a question starts with ``== id | text``" }
     if ($t -match '^call\s+(.+)$') { $q.Call = $Matches[1] }
+    elseif ($t -match '^also\s+(.+)$') { $q.Also += $Matches[1] }
     elseif ($t -match '^grep\s+(.+)$') { $q.Greps += [pscustomobject]@{ Kind = 'grep'; In = ''; Arg = $Matches[1] } }
     elseif ($t -match '^grep-in\s+(\S+)\s+(.+)$') { $q.Greps += [pscustomobject]@{ Kind = 'grep'; In = $Matches[1]; Arg = $Matches[2] } }
     elseif ($t -match '^descendants\s+(\S+)$') { $q.Greps += [pscustomobject]@{ Kind = 'descendants'; In = ''; Arg = $Matches[1] } }
     elseif ($t -match '^read\s+(\S+)(?:\s+(\d+)\s+(\d+))?$') {
         $q.Reads += [pscustomobject]@{ File = $Matches[1]; From = $Matches[2]; Count = $Matches[3] }
     }
-    else { throw "$Bench($lineNo): expected call, grep, grep-in, descendants or read: $t" }
+    else { throw "$Bench($lineNo): expected call, also, grep, grep-in, descendants or read: $t" }
 }
 foreach ($q in $questions) { if (-not $q.Call) { throw "question $($q.Id) has no call" } }
 
 # ---- the tool answers: one analysis, every call --------------------------------
+# Each question's call, then its `also` calls - the answers come back in that
+# order.
+$allCalls = New-Object System.Collections.ArrayList
+foreach ($q in $questions) {
+    [void]$allCalls.Add($q.Call)
+    foreach ($c in $q.Also) { [void]$allCalls.Add($c) }
+}
 $calls = Join-Path ([IO.Path]::GetTempPath()) ('pastree-bench-' + [Guid]::NewGuid().ToString('N') + '.calls')
-[IO.File]::WriteAllLines($calls, [string[]]($questions | ForEach-Object { $_.Call }), (New-Object Text.UTF8Encoding($false)))
-Write-Host "running $($questions.Count) calls on $Project ($Groups)"
+[IO.File]::WriteAllLines($calls, [string[]]$allCalls, (New-Object Text.UTF8Encoding($false)))
+Write-Host "running $($allCalls.Count) calls on $Project ($Groups)"
 $sw = [Diagnostics.Stopwatch]::StartNew()
 $prevEnc = [Console]::OutputEncoding
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
@@ -241,7 +251,16 @@ foreach ($line in $outLines) {
     }
     elseif ($cur) { [void]$cur.Lines.Add($line) }
 }
-if ($answers.Count -ne $questions.Count) { throw "expected $($questions.Count) answers, got $($answers.Count)" }
+if ($answers.Count -ne $allCalls.Count) { throw "expected $($allCalls.Count) answers, got $($answers.Count)" }
+# Back to the questions: the answer to its call, the tokens of its `also`.
+$next = 0
+foreach ($q in $questions) {
+    $q | Add-Member -NotePropertyName Answer -NotePropertyValue $answers[$next]
+    $next++
+    $alt = 0
+    foreach ($c in $q.Also) { $alt += $answers[$next].Tokens; $next++ }
+    $q | Add-Member -NotePropertyName AltTokens -NotePropertyValue $alt
+}
 
 # (file, line) pairs an answer names. Rows: those under a file heading, and
 # file:line written inline (find, descendants). Heading: the file:line of the
@@ -306,7 +325,7 @@ function Read-Chars($Read) {
 
 $rows = New-Object System.Collections.ArrayList
 foreach ($i in 0..($questions.Count - 1)) {
-    $q = $questions[$i]; $a = $answers[$i]
+    $q = $questions[$i]; $a = $q.Answer
     $sites = Answer-Sites $a
     $hitKeys = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
     $grepChars = 0; $ctxChars = 0; $calls = 0; $inAnswer = 0; $inComment = 0; $other = 0
@@ -342,7 +361,8 @@ foreach ($i in 0..($questions.Count - 1)) {
     $base = [int](($grepChars + $readChars) / 4)
     $baseCtx = [int](($ctxChars + $readChars) / 4)
     [void]$rows.Add([pscustomobject]@{
-        Id = $q.Id; Text = $q.Text; Call = $q.Call; Greps = $q.Greps; Reads = $q.Reads
+        Id = $q.Id; Text = $q.Text; Call = $q.Call; Also = $q.Also; Greps = $q.Greps; Reads = $q.Reads
+        Alt = if ($q.Also.Count -gt 0) { $q.AltTokens } else { $null }
         Ms = $a.Ms; Tool = $a.Tokens; AnswerFirst = ($a.Lines | Select-Object -First 1)
         Sites = $sites.Rows.Count; Base = $base; BaseCtx = $baseCtx; Calls = $calls
         Hits = $hitKeys.Count; InAnswer = $inAnswer; InComment = $inComment; Other = $other
@@ -359,17 +379,18 @@ $md = New-Object System.Collections.ArrayList
 [void]$md.Add(("Group ``{0}``, policy {1}, {2} questions, {3} files / {4:N0} lines searched by grep, {5} ({6:yyyy-MM-dd HH:mm})." -f `
     (Split-Path -Leaf $Project), $Groups, $rows.Count, $corpus.Paths.Count, $corpus.Lines, (& $Exe --version 2>$null | Select-Object -First 1), (Get-Date)))
 [void]$md.Add("")
-[void]$md.Add("Tokens are characters / 4. **grep** = the grep output alone plus the reads; **+ctx** = with $Context lines of context, the least it takes to tell a real hit from a namesake. Both are lower bounds: one pass per pattern, no file opened. **calls** = baseline tool calls at Grep's $GrepCap-line page. Hits: **ans** in the answer, **c/s** inside a comment or string, **oth** other (a namesake, or a row the answer lacks); **miss** = answer rows grep did not find.")
+[void]$md.Add("Tokens are characters / 4. **grep** = the grep output alone plus the reads; **+ctx** = with $Context lines of context, the least it takes to tell a real hit from a namesake. Both are lower bounds: one pass per pattern, no file opened. **calls** = baseline tool calls at Grep's $GrepCap-line page. Hits: **ans** in the answer, **c/s** inside a comment or string, **oth** other (a namesake, or a row the answer lacks); **miss** = answer rows grep did not find. **also** = the tokens of the calls to the other tools it replaces, and how many (`also` lines of the bench).")
 [void]$md.Add("")
-[void]$md.Add("| id | tool ms | tool tok | rows | grep tok | +ctx tok | +ctx / tool | calls | hits | ans | c/s | oth | miss |")
-[void]$md.Add("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
+[void]$md.Add("| id | tool ms | tool tok | rows | grep tok | +ctx tok | +ctx / tool | calls | hits | ans | c/s | oth | miss | also tok (n) |")
+[void]$md.Add("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
 $tTool = 0; $tBase = 0; $tCtx = 0
 foreach ($r in $rows) {
     $tTool += $r.Tool; $tBase += $r.Base; $tCtx += $r.BaseCtx
-    [void]$md.Add(("| {0} | {1} | {2:N0} | {3} | {4:N0} | {5:N0} | {6} | {7} | {8} | {9} | {10} | {11} | {12} |" -f `
-        $r.Id, $r.Ms, $r.Tool, $r.Sites, $r.Base, $r.BaseCtx, (Ratio $r.BaseCtx $r.Tool), $r.Calls, $r.Hits, $r.InAnswer, $r.InComment, $r.Other, $r.Missed))
+    [void]$md.Add(("| {0} | {1} | {2:N0} | {3} | {4:N0} | {5:N0} | {6} | {7} | {8} | {9} | {10} | {11} | {12} | {13} |" -f `
+        $r.Id, $r.Ms, $r.Tool, $r.Sites, $r.Base, $r.BaseCtx, (Ratio $r.BaseCtx $r.Tool), $r.Calls, $r.Hits, $r.InAnswer, $r.InComment, $r.Other, $r.Missed,
+        $(if ($null -ne $r.Alt) { "{0:N0} ({1})" -f $r.Alt, $r.Also.Count } else { '' })))
 }
-[void]$md.Add(("| **total** | | **{0:N0}** | | **{1:N0}** | **{2:N0}** | **{3}** | | | | | | |" -f $tTool, $tBase, $tCtx, (Ratio $tCtx $tTool)))
+[void]$md.Add(("| **total** | | **{0:N0}** | | **{1:N0}** | **{2:N0}** | **{3}** | | | | | | | |" -f $tTool, $tBase, $tCtx, (Ratio $tCtx $tTool)))
 [void]$md.Add("")
 [void]$md.Add("## Questions")
 [void]$md.Add("")
@@ -382,6 +403,7 @@ foreach ($r in $rows) {
         else { [void]$md.Add("  - grep: ``$($p.Arg)``") }
     }
     foreach ($x in $r.Reads) { [void]$md.Add("  - read: ``$($x.File)$(if ($x.From) { " $($x.From) +$($x.Count)" })``") }
+    foreach ($c in $r.Also) { [void]$md.Add("  - also: ``$c``") }
     if ($Detail -gt 0 -and $r.Greps.Count -gt 0) {
         foreach ($m in $r.MissedText) { [void]$md.Add("  - missed by grep: ``$m``") }
         foreach ($o in $r.OtherText) { [void]$md.Add("  - other: ``$o``") }
@@ -392,5 +414,5 @@ if ($Out) {
     [IO.File]::WriteAllText($Out, $text, (New-Object Text.UTF8Encoding($false)))
     Write-Host "report: $Out"
 }
-$rows | Format-Table Id, Ms, Tool, Sites, Base, BaseCtx, Calls, Hits, InAnswer, InComment, Other, Missed -AutoSize | Out-String -Width 200 | Write-Host
+$rows | Format-Table Id, Ms, Tool, Sites, Base, BaseCtx, Calls, Hits, InAnswer, InComment, Other, Missed, Alt -AutoSize | Out-String -Width 200 | Write-Host
 Write-Host ("total: tool {0:N0} tokens, grep {1:N0}, grep with context {2:N0} ({3})" -f $tTool, $tBase, $tCtx, (Ratio $tCtx $tTool))

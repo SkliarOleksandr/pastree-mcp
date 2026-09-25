@@ -93,6 +93,20 @@ Check 'implementations' (Block $b 'related {"relation":"implementations", "symbo
 Check 'assignments' (Block $b 'related {"relation":"assignments"') @("  TCircle.Create`n    50  FRadius := ARadius;")
 Check 'creations' (Block $b 'related {"relation":"creations"') @("  RunA`n    19  LShape := TCircle.Create(2);")
 Check 'destructions' (Block $b 'related {"relation":"destructions"') @("  RunA`n    24  FreeAndNil(LShape);")
+# callers: through the virtual method it overrides and the interface method
+# it implements, a named inherited; then level by level to each main block.
+Check 'callers' (Block $b 'callers {"symbol":"TCircle.Area"}') @('callers of TCircle.Area (Shared\uShapes.pas:26) - 3 calls in 3 routines', 'also through TShape.Area (virtual), IShape.Area (interface)', "  RunA`n    22  [via TShape.Area]  Writeln", "  TBigCircle.Area`n    22  Result := 2 * inherited Area;", "  TotalArea`n    75  [via IShape.Area]")
+Check 'callers depth' (Block $b 'callers {"symbol":"TCircle.Area", "depth":3}') @('depth 2: 2 in 2; depth 3: 1 in 1', "AppA\AppA.dpr`n  9  [-> RunA, main block]  RunA;", "  RunB`n    31  [-> TotalArea]", "AppB\AppB.dpr`n  13  [-> RunB, main block]")
+# A getter reached through its property; a handler only assigned: not a call,
+# a level that finds nothing, the .dfm note.
+Check 'callers getter' (Block $b 'callers {"symbol":"TShapeBox.GetItem"') @('all through TShapeBox.Item (property read)', "  TShapeBox.BoxClick`n    53  if Item <> nil then", '43  [-> TShapeBox.BoxClick, not a call]  FOnChange := BoxClick;', 'no callers found: TShapeBox.BoxClick', '(TShapeBox.BoxClick: published') @('54  ')
+Check 'callers setter' (Block $b 'callers {"symbol":"TShapeBox.SetItem"}') @('all through TShapeBox.Item (property write)', '54  Item := nil;') @('53  ')
+# A bare inherited names nothing a reference search finds; an override is
+# called through its ancestor.
+Check 'callers inherited' (Block $b 'callers {"symbol":"TShapeBox.Changed"}') @('2 calls in 2 routines', "  TBigBox.Changed`n    59  inherited;")
+Check 'callers override' (Block $b 'callers {"symbol":"TBigBox.Changed"}') @('all through TShapeBox.Changed (virtual)', "  TShapeBox.SetItem`n    44  Changed;") @('59  ')
+Check 'callers none' (Block $b 'callers {"symbol":"NeverCalled"}') @('callers of NeverCalled (AppB\uBoxes.pas:31) - none found')
+Check 'callers not a routine' (Block $b 'callers {"symbol":"TCircle"}') @('TCircle is a class - `callers` takes a routine')
 Check 'outline' (Block $b 'outline {"file":"Shared') @('21  type TCircle = class', '27    property Radius: Double', '53  function TCircle.Area: Double', '40 implementation')
 Check 'unit_deps' (Block $b 'unit_deps') @('uShapes is used by 3 units', 'AppB\uAppB.pas:8')
 Check 'diagnostics' (Block $b 'diagnostics') @('no diagnostics')
@@ -106,6 +120,8 @@ Check 'strict status' (Block $b 'status') @('analysis 0:', 'analysis 1:')
 Check 'strict references unit' (Block $b 'references {"symbol":"uShapes"}') @('3 references in 3 files')
 Check 'strict descendants' (Block $b 'related {"relation":"descendants"') @('descendants of TShape (Shared\uShapes.pas:15): 3', 'TBigCircle <- TCircle')
 Check 'strict overrides' (Block $b 'related {"relation":"overrides"') @('overrides of TShape.Area (Shared\uShapes.pas:17): 4')
+# Rows of both analyses in one walk: RunA is project A's, the rest project B's.
+Check 'strict callers' (Block $b 'callers {"symbol":"TCircle.Area", "depth":3}') @('3 calls in 3 routines; depth 2: 2 in 2; depth 3: 1 in 1', '22  [via TShape.Area]', '75  [via IShape.Area]', '9  [-> RunA, main block]', '13  [-> RunB, main block]')
 
 # ---- 3. MCP over stdio, with an edit in between ------------------------------------
 Write-Host '--- MCP over stdio'
@@ -141,7 +157,7 @@ try {
     $stdin.WriteLine('{"jsonrpc":"2.0","method":"notifications/initialized"}')
     $r = Rpc 2 'tools/list' '{}'
     $names = ($r.result.tools | ForEach-Object { $_.name }) -join ','
-    Check 'tools/list' $names @('status', 'find', 'definition', 'source', 'references', 'related', 'outline', 'diagnostics', 'unit_deps')
+    Check 'tools/list' $names @('status', 'find', 'definition', 'source', 'references', 'callers', 'related', 'outline', 'diagnostics', 'unit_deps')
     $r = Rpc 3 'tools/call' '{"name":"related","arguments":{"relation":"creations","symbol":"TCircle"}}'
     Check 'call before edit' (ToolText $r) @('creations of TCircle', ': 1')
     if ($r.result.isError) { Write-Host 'FAIL call before edit reported isError'; $script:failures++ }

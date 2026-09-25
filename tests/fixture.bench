@@ -6,6 +6,9 @@
 # Format:
 #   == <id> | <the question, as an agent would be asked it>
 #   call <tool> <json>          the pastree-mcp call that answers it (one)
+#   also <tool> <json>          a call to the OTHER tools that the one above
+#                               replaces - any number; their tokens are summed
+#                               (`callers` against `references` per level)
 #   grep <regex>                what an agent without the server would grep,
 #                               case-insensitive, over the group's sources
 #   grep-in <path> <regex>      the same over the files under one path
@@ -34,6 +37,17 @@ descendants TShape
 == outline-shapes | What is in uShapes?
 call outline {"file":"Shared\\uShapes.pas"}
 read Shared\uShapes.pas
+
+== callers-circle-area | Who calls TCircle.Area, and who calls those?
+call callers {"symbol":"TCircle.Area", "depth":2}
+also related {"relation":"overrides", "symbol":"TCircle.Area"}
+also references {"symbol":"TCircle.Area"}
+also references {"symbol":"TShape.Area"}
+also references {"symbol":"IShape.Area"}
+also references {"symbol":"RunA"}
+also references {"symbol":"TBigCircle.Area"}
+also references {"symbol":"TotalArea"}
+grep \bArea\b
 
 == source-circle-area | Show TCircle.Area's implementation.
 call source {"symbol":"TCircle.Area"}

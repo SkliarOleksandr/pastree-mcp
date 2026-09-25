@@ -9,7 +9,7 @@ the tree, comments and strings included, then reading files to sort out which
 hits are real, at thousands of tokens per question. With it, one call returns
 exactly the uses the compiler would bind, one line each.
 
-- **Semantic, not textual.** References, overrides, implementations,
+- **Semantic, not textual.** References, callers, overrides, implementations,
   descendants, assignments, creations and destructions come from resolved
   symbol identity - the same analysis that drives the
   [pastree-lsp](../pastree-lsp) editor features.
@@ -37,6 +37,7 @@ or **16 s / 4.3 GB** under the exact one. Typical calls take 60-500 ms.
 | `definition` | Where a symbol is declared and implemented, optionally with the source that follows |
 | `source` | The exact text of one declaration - a routine's body, a whole type, a constant - numbered, with the comment above it |
 | `references` | Every use across the group, grouped by file and by the routine or type it sits in; also units, built-ins and conditional defines |
+| `callers` | Who calls a routine - through the virtual method it overrides, an interface method it implements or a property it is the accessor of too, bare `inherited;` included - and, with `depth`, who calls those |
 | `related` | `descendants`, `overrides`, `implementations`, `assignments`, `creations`, `destructions` |
 | `outline` | The structure of one unit with line numbers, without reading it |
 | `diagnostics` | PasTree's semantic errors for a file or the whole group, from the files on disk now, each naming its routine |
