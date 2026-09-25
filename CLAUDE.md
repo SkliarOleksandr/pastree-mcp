@@ -21,10 +21,13 @@ real group, and that is only seen by running it there.
 
 **Everything written into this repository is in English** - docs, comments,
 log lines, commit messages, tool descriptions. Conversation is in whatever
-language suits.
+language suits; the repository is not, because it outlives the conversation
+and the next reader may be a stranger or a future session.
 
 **Only the plain hyphen `-`. Never an em dash (U+2014) or en dash (U+2013).**
-Sweep before committing - nothing may come back:
+They are non-ASCII, and `dcc` on a legacy code page, `cmd.exe` and the diff
+tools each render them differently. Sweep before committing - nothing may come
+back:
 
 ```bash
 git ls-files | xargs grep -l -e "$(printf '\342\200\224')" -e "$(printf '\342\200\223')"
@@ -32,14 +35,19 @@ git ls-files | xargs grep -l -e "$(printf '\342\200\224')" -e "$(printf '\342\20
 
 **Tracked files never name the closed client project** or its code - say "the
 client group". Measurements and logs from it go to `local/`, which is ignored,
-as do plans, audits and in-flight notes.
+as do plans, audits and in-flight notes. A finished conclusion belongs in a
+tracked document (SPEC.md, README.md); the working paper that produced it does
+not.
 
 ## Line endings: CRLF for everything Delphi and cmd.exe read
 
-`.pas`, `.dpr`, `.dproj`, `.groupproj`, `.bat`, `.ps1` are CRLF; `.md`,
-`.json`, `.calls` are LF (`.gitattributes`). In Git Bash, `sed -i` and
-`perl -pi` read through the crlf layer and write without it, silently turning
-a whole file LF. `.claude/hooks/eol-crlf.sh` restores CRLF after each tool call
+`.pas`, `.dpr`, `.dpk`, `.inc`, `.dproj`, `.groupproj`, `.dfm`, `.bat`, `.ps1`
+are CRLF; `.md`, `.json`, `.calls`, `.bench` are LF (`.gitattributes`, the
+same rules as PasTree's and pastree-lsp's - keep them in step). In Git Bash,
+`sed -i` and `perl -pi` read through the crlf layer and write without it,
+silently turning a whole file LF - and the index is LF for everything, so no
+diff shows it until RAD Studio re-saves the file and the next diff is all of
+it. `.claude/hooks/eol-crlf.sh` restores CRLF after each tool call
 **for tracked files only**, and `.githooks/pre-commit` refuses such a commit
 (`git config core.hooksPath .githooks` per clone). A NEW file is neither
 tracked nor fixed - convert it yourself, then check every `eol=crlf` row reads
@@ -75,11 +83,15 @@ edit on disk in between; the expectations pin fixture line numbers.
 - **PasTree `..\object-pascal-tree` may be under edit by another session.**
   Read the commit line `build.bat` prints; check `git status` there before
   touching anything, never `git add -A` there.
+- **A new tool gets smoke rows, the empty case included** - a call over the
+  fixture and one where the walk finds nothing (no members, no callers).
+  pastree-lsp shipped an access violation on an empty scope that no request
+  had exercised.
 - **Measure with the CLI** (`--script`, README): one analysis, many calls, the
   time and approximate tokens of each answer. A change to a tool's output is a
   change to what every agent session pays; look at the numbers.
 
-## Two traps
+## Three traps
 
 **stdout is the protocol.** One stray `Writeln` - here or in anything linked -
 and the client drops the connection with a JSON parse error naming no cause.
@@ -88,3 +100,16 @@ Log through `PasMcp.Log`, which writes stderr and the log file.
 **A `}` in a `{ }` comment closes it.** A JSON example in a Delphi brace
 comment (`{"query":...}`) ends the comment at its first `}` and the compiler
 reports nonsense lines below it. Keep JSON out of brace comments; use `//`.
+
+**Assume a BOM.** Delphi writes UTF-8 with a BOM by default, so a leading BOM
+is the common case and never content. Read text with `TFile.ReadAllText` /
+`ReadAllLines` (BOM-aware) or through PasTree, never byte by byte by hand. In
+pastree-lsp one BOM made a whole file resolve nothing while the log said only
+`no identifier at`.
+
+## Where the answers are
+
+- A failure an agent or a user reports: `<project>-pastree-mcp.log` beside the
+  project (or `--log`), then stderr as Claude Code kept it.
+- Why a tool or the group handling is shaped as it is: `SPEC.md`. Do not
+  re-derive it; what is planned next is its section 9.
