@@ -1,0 +1,36 @@
+# Questions for tests\bench.ps1 over tests\fixtures\group - a check that the
+# harness runs, not a measurement (five units say nothing about cost).
+#
+#   powershell -File tests\bench.ps1 -Project tests\fixtures\group\Fixture.groupproj -Bench tests\fixture.bench
+#
+# Format:
+#   == <id> | <the question, as an agent would be asked it>
+#   call <tool> <json>          the pastree-mcp call that answers it (one)
+#   grep <regex>                what an agent without the server would grep,
+#                               case-insensitive, over the group's sources
+#   grep-in <path> <regex>      the same over the files under one path
+#   descendants <class>         grep for `= class(<names>` level by level from
+#                               <class>, every name of a level in one call
+#   read <file> [<from> <count>]  a file (or lines of one) it would read, 2000
+#                               lines per call as Claude Code's Read
+# Any number of grep / grep-in / descendants / read lines; paths are relative
+# to the group directory.
+# The baseline is the first thing a competent agent would try, not a straw man:
+# the qualified name when the call site would carry one, the plain name when it
+# would not.
+
+== refs-area | Where is TShape.Area used?
+call references {"symbol":"TShape.Area"}
+grep \bArea\b
+
+== creations-circle | Where are TCircle objects created?
+call related {"relation":"creations", "symbol":"TCircle"}
+grep TCircle\.Create\b
+
+== descendants-shape | Which classes derive from TShape, directly or not?
+call related {"relation":"descendants", "symbol":"TShape"}
+descendants TShape
+
+== outline-shapes | What is in uShapes?
+call outline {"file":"Shared\\uShapes.pas"}
+read Shared\uShapes.pas

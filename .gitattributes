@@ -35,10 +35,12 @@
 *.rc    text eol=crlf
 
 # Documentation and data - LF, which is what their own tooling and every
-# diff viewer expect. `.calls` are the CLI scripts of testssmoke.ps1.
+# diff viewer expect. `.calls` are the CLI scripts of tests\smoke.ps1, `.bench`
+# the question lists of tests\bench.ps1.
 *.md    text eol=lf
 *.json  text eol=lf
 *.calls text eol=lf
+*.bench text eol=lf
 
 # Shell scripts, and the hooks that ARE shell scripts without an extension -
 # LF, or /bin/sh chokes on the CR: `#!/bin/sh\r` is not an interpreter. The

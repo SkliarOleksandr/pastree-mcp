@@ -124,6 +124,9 @@ begin
     if SameText(ParamStr(LIdx), '--version') then
     begin
       Writeln(PasMcpVersionBanner);
+      // ExitProcess skips the RTL's closing of Output: redirected to a pipe,
+      // the line would still be in its buffer.
+      Flush(Output);
       ExitProcess(0);
     end
     else if SameText(ParamStr(LIdx), '--project') then

@@ -105,6 +105,20 @@ analysis is built once, every call runs against it, and each answer is printed
 with its time and approximate token count. This is the way to measure a tool
 before an agent uses it.
 
+### Measuring against grep
+
+```
+powershell -File tests\bench.ps1 -Project X.groupproj -Bench questions.bench -Out report.md
+```
+
+runs a list of questions (format in `tests\fixture.bench`), each with the tool
+call that answers it and the grep patterns and reads an agent without the
+server would start with. The report sets the tokens of the answer against the
+grep output with and without context lines, and sorts every grep hit: in the
+answer, in a comment or string, or a namesake - and the answer rows grep did
+not find. `-Detail N` lists those hits. The baseline is a lower bound: one pass
+per pattern, no file opened to tell hits apart.
+
 ## Status
 
 A prototype. It works end to end - including on the client group - but has not

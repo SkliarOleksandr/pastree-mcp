@@ -69,24 +69,12 @@ Common rules:
 | `find` | symbol tables of every model, filtered as `ProjectOutline` | Exact, qualified or wildcard. No exact hit falls back to `*query*` and says so. Declaration sites are computed only for the rows shown - on the client group `Create` matches 25,000 symbols. `scope: project` = own units only. |
 | `definition` | `DeclHit`, `GotoImplementation` | For a routine also the implementation (its header line, found by scanning up from the body start `GotoImplementation` returns). `context: N` appends N source lines - of the implementation when there is one. Several matches are all listed; this is the one tool where a list is the answer. |
 | `references` | `FindReferences`, `FindUnitReferences`, `FindBuiltinReferences`, `FindDefineReferences` | Rows in compiled units read from a `.dcu` (no source) are counted, not shown. |
-| `related` | `TypeAt`+`FindDescendants`, `MethodAt`+`FindOverrides`, `InterfaceMethodAt`+`FindImplementations` / `InterfaceAt`+`FindInterfaceImplementors`, `AssignableAt`+`FindAssignments`, `ClassAt`+`FindCreations`/`FindDestructions` | The `...At` test runs at the declaration site - it normalizes (method to its declaration, alias to its type) and refuses what the relation cannot mean, which becomes an error naming what was needed. Descendants print as an indented tree. |
+| `related` | `TypeAt`+`FindDescendants`, `MethodAt`+`FindOverrides`, `InterfaceMethodAt`+`FindImplementations` / `InterfaceAt`+`FindInterfaceImplementors`, `AssignableAt`+`FindAssignments`, `ClassAt`+`FindCreations`/`FindDestructions` | The `...At` test runs at the declaration site - it normalizes (method to its declaration, alias to its type) and refuses what the relation cannot mean, which becomes an error naming what was needed. Rows are grouped by file like every answer; a descendant names its parent (`<- TParent`) below the first level, and a tagged row whose source line repeats the previous row's (an override chain is one signature) shows only its tag. An indented tree was tried first: it repeats a path per row and cost as much as grep on a 250-class hierarchy. |
 | `outline` | `PasModuleOutline` | Sections, uses, includes, types with members, routines with signatures, each with its line. `owner` and `section` filter; `members: false` keeps only types and bodies. |
 | `diagnostics` | model `Diags` | Own units by default. Each unit reports from ONE analysis - its owner (section 4) - so a unit analyzed under two configurations does not report twice. Over the limit, a per-file count comes first. |
 | `unit_deps` | `UsesList`, `NodeSite`, `FindUnitReferences` | Uses resolved to files, implementation-section ones marked; used-by merged across analyses. |
 
-### Planned, in rough order of value
-
-1. **`members`** - every member of a type INCLUDING inherited ones, with the
-   declaring type (`EnumMembersX`). "What can I call on this object" is
-   currently an outline per ancestor.
-2. **`type_of`** - the type of an expression or variable at a position
-   (`WithTargetTypeX`, `XTypeText`) plus the doc comment (`SymDocComment`).
-3. **`callers`** - the routines containing each reference, so the answer is a
-   call hierarchy rather than a list of lines; `callees` the reverse.
-4. **`rename_plan`** - `PlanRename` / `PlanUnitRename` as a list of edits the
-   agent applies itself (the server never writes files).
-5. **`defines`** - where a conditional symbol is defined and which are in
-   effect at a position (`FindDefines`, `DefinesAt`).
+What comes next - new tools and changes to these - is section 9.
 
 ## 4. Project groups
 

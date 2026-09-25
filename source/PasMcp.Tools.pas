@@ -88,7 +88,6 @@ type
     Line, Col: Integer;
     Snippet: string;
     Tag: string;           // row label for related(): 'TFoo override'
-    Depth: Integer;
     Own: Boolean;
   end;
 
@@ -758,8 +757,7 @@ type
   public
     constructor Create(AWs: TMcpWorkspace);
     destructor Destroy; override;
-    procedure Add(const AHit: TPasRefHit; const ATag: string = '';
-      ADepth: Integer = 0);
+    procedure Add(const AHit: TPasRefHit; const ATag: string = '');
     function Count: Integer;
     // Own files first, then libraries; by file, line, column.
     function Sorted: TArray<THit>;
@@ -781,8 +779,7 @@ begin
   inherited;
 end;
 
-procedure THitSet.Add(const AHit: TPasRefHit; const ATag: string;
-  ADepth: Integer);
+procedure THitSet.Add(const AHit: TPasRefHit; const ATag: string);
 var
   LKey: string;
   LH: THit;
@@ -804,7 +801,6 @@ begin
   LH.Col := AHit.Col;
   LH.Snippet := AHit.Snippet;
   LH.Tag := ATag;
-  LH.Depth := ADepth;
   LH.Own := FWs.IsOwnFile(AHit.FilePath);
   FList.Add(LH);
 end;
@@ -833,13 +829,18 @@ end;
 // Grouped by file, one trimmed line per row:
 //   uMain.pas
 //     120  LFoo.Bar(1);
+// A tagged row (related) reads `120  [TFoo override]  <line>`, and leaves the
+// line out when it repeats the previous row's: an override chain is one
+// signature written 250 times, and on the client group that was 60% of the
+// answer. ATagOnly: the tag is the whole row (descendants).
 procedure AppendHitsByFile(AWs: TMcpWorkspace; ASb: TStringBuilder;
-  const AHits: TArray<THit>; ALimit: Integer);
+  const AHits: TArray<THit>; ALimit: Integer; ATagOnly: Boolean = False);
 var
-  LFile: string;
+  LFile, LLine, LPrev: string;
   LShown: Integer;
 begin
   LFile := '';
+  LPrev := '';
   LShown := 0;
   for var LH in AHits do
   begin
@@ -850,9 +851,17 @@ begin
       LFile := LH.FilePath;
       ASb.AppendLine(AWs.RelPath(LFile));
     end;
-    if LH.Tag <> '' then
-      ASb.AppendLine(Format('  %d  [%s]  %s', [LH.Line, LH.Tag,
-        CleanLine(LH.Snippet)]))
+    if ATagOnly then
+      ASb.AppendLine(Format('  %d  %s', [LH.Line, LH.Tag]))
+    else if LH.Tag <> '' then
+    begin
+      LLine := CleanLine(LH.Snippet);
+      if LLine = LPrev then
+        ASb.AppendLine(Format('  %d  [%s]', [LH.Line, LH.Tag]))
+      else
+        ASb.AppendLine(Format('  %d  [%s]  %s', [LH.Line, LH.Tag, LLine]));
+      LPrev := LLine;
+    end
     else
       ASb.AppendLine(Format('  %d  %s', [LH.Line, CleanLine(LH.Snippet)]));
     Inc(LShown);
@@ -1110,7 +1119,7 @@ var
   LSet: THitSet;
   LHits: TArray<THit>;
   LSb: TStringBuilder;
-  LLimit, LDm, LTMid, LTSym, LShown: Integer;
+  LLimit, LDm, LTMid, LTSym: Integer;
   LAccepted: Boolean;
 
   // The relation's own identity test, at the declaration site (it normalizes:
@@ -1167,10 +1176,11 @@ begin
         if At(LA, 0) then
         begin
           LAccepted := True;
+          // A direct child's parent is the target itself: named only below.
           for var LH in LA.Nav.FindDescendants(LTMid, LTSym) do
             if LH.Kind = pdkDescendant then
-              LSet.Add(LH.Hit, LH.TypeName + ' <- ' + LH.ParentTypeName,
-                LH.Depth);
+              LSet.Add(LH.Hit, LH.TypeName + IfThen(LH.Depth > 1, ' <- ' +
+                LH.ParentTypeName, ''));
         end;
       end
       else if LRel = 'overrides' then
@@ -1238,31 +1248,10 @@ begin
     LHits := LSet.Sorted;
     LSb.AppendLine(Format('%s of %s (%s:%d): %d', [LRel, LT.Name,
       AWs.RelPath(LT.DeclFile), LT.DeclLine, Length(LHits)]));
-    if LRel = 'descendants' then
-    begin
-      // Hierarchy order: depth, then name.
-      TArray.Sort<THit>(LHits, TComparer<THit>.Construct(
-        function(const L, R: THit): Integer
-        begin
-          Result := L.Depth - R.Depth;
-          if Result = 0 then
-            Result := CompareText(L.Tag, R.Tag);
-        end));
-      LShown := 0;
-      for var LH in LHits do
-      begin
-        if LShown >= LLimit then
-          Break;
-        LSb.AppendLine(Format('%s%s  %s:%d', [StringOfChar(' ', 2 * LH.Depth),
-          LH.Tag, AWs.RelPath(LH.FilePath), LH.Line]));
-        Inc(LShown);
-      end;
-      if Length(LHits) > LShown then
-        LSb.AppendLine(Format('... %d more (raise `limit`)',
-          [Length(LHits) - LShown]));
-    end
-    else
-      AppendHitsByFile(AWs, LSb, LHits, LLimit);
+    // Descendants by file like every other answer, not as an indented tree:
+    // a tree repeats a path on every row (250 rows, 27 tokens each, on the
+    // client group), and `<- parent` keeps the shape.
+    AppendHitsByFile(AWs, LSb, LHits, LLimit, LRel = 'descendants');
     if LSet.Compiled > 0 then
       LSb.AppendLine(Format('(+%d in compiled units without source, not '
         + 'shown)', [LSet.Compiled]));
@@ -1662,7 +1651,11 @@ const
     + 'chain of a method. implementations: classes implementing an interface '
     + 'or one of its methods. assignments: writes to a variable, field or '
     + 'property. creations: TFoo.Create calls of exactly that class. '
-    + 'destructions: Free/Destroy/FreeAndNil of a TFoo.",'
+    + 'destructions: Free/Destroy/FreeAndNil of a TFoo, and a form''s '
+    + 'Release. Grouped by file; '
+    + 'a descendant row names its parent (`<- TParent`) unless that is the '
+    + 'type asked about, and a row whose source line repeats the previous '
+    + 'row''s shows only its [tag].",'
     + '"inputSchema":{"type":"object","properties":{'
     + '"relation":{"type":"string","enum":["descendants","overrides",'
     + '"implementations","assignments","creations","destructions"]},'
