@@ -76,6 +76,24 @@ Check 'source interface' (Block $b 'source {"symbol":"IShape.Area"}') @('declare
 Check 'source unit' (Block $b 'source {"symbol":"uShapes"}') @('is a unit - `outline` shows its structure')
 # A local has no name to find it by; by position it has a source like any other.
 Check 'source local' (Block $b 'source {"file"') @('LShape (var) declared at Shared\uShapes.pas:71', '71    LShape: IShape;')
+# members: by the type declaring each, under its visibility section. Seen from
+# TDerived's own methods: its ancestor's private field (same unit) but not the
+# strict private one; an override, and the property republished, once at the
+# lowest type; the ancestor's overloads beside the descendant's; TObject, a
+# library type, counted.
+Check 'members' (Block $b 'members {"symbol":"TDerived"}') @('TDerived <- TBase <- TObject (AppA\uMembers.pas:31): 8 members', "TDerived  AppA\uMembers.pas`n  protected`n    33  procedure Guarded; override;", '38  property Count;  [type Integer]', "TBase  AppA\uMembers.pas`n  private`n    19  FCount: Integer;", "25  procedure Add(AValue: Integer); overload;`n    26  procedure Add(const AText: string); overload;", '(library ancestors, not listed - `library: true` lists them: TObject ', '(+1 not reachable from its own methods') @('FSecret', '21  procedure Guarded', '27  procedure Reset', '28  property Count')
+Check 'members public' (Block $b 'members {"symbol":"TDerived", "visibility":"public"}') @('5 members, public and published only', '35  procedure Add(AValue: Double); overload;', '(+5 protected or private, not listed') @('Guarded', 'FCount', 'GetCount')
+Check 'members all' (Block $b 'members {"symbol":"TDerived", "visibility":"all"') @('2 fields, every visibility', "  strict private`n    17  FSecret: Integer;`n  private`n    19  FCount: Integer;")
+# An ancestor in another unit: its private field is out of reach, its
+# overridden method listed once.
+Check 'members other unit' (Block $b 'members {"symbol":"TBigCircle"}') @('4 members', "TBigCircle  AppB\uAppB.pas`n  public`n    13  function Area: Double; override;", "TCircle  Shared\uShapes.pas`n  public`n    25  constructor Create(ARadius: Double);", '18  function Describe: string; virtual;', 'TInterfacedObject ', '(+1 not reachable from its own methods') @('23  FRadius', '26  function Area', '17  function Area')
+# A variable: the members of its type that code in its unit can use.
+Check 'members var' (Block $b 'members {"file"') @('LShape (var) is a TShape <- TInterfacedObject <- TObject (Shared\uShapes.pas:15): 2 members', '17  function Area: Double; virtual; abstract;') @('QueryInterface')
+Check 'members streams' (Block $b 'members {"symbol":"TPanelModel"}') @("TPanelModel  AppA\uMembers.pas`n  published`n    44  Source: TComponent;", '45  procedure SourceChange(Sender: TObject);', 'TPersistent ')
+Check 'members library' (Block $b 'members {"symbol":"IShape"') @('IShape <- IInterface (Shared\uShapes.pas:10): 4 members', "IShape  Shared\uShapes.pas`n  12  function Area: Double;", 'function QueryInterface(', 'function _AddRef: Integer; stdcall;') @('(library ancestors')
+Check 'members none match' (Block $b 'members {"symbol":"TCircle", "match"') @('no members named like *Nothing*')
+Check 'members empty' (Block $b 'members {"symbol":"TEmpty"}') @('TEmpty (AppA\uMembers.pas:48): no members') @('(library')
+Check 'members not a type' (Block $b 'members {"symbol":"RunA"}') @('RunA is a procedure - `members` takes a type')
 # "AppA\tuAppA.pas" in JSON is a tab, not a backslash: say so, not "invalid characters in path".
 Check 'control character' (Block $b 'outline {"file":"AppA') @('`file` holds a control character (#9)')
 Check 'references' (Block $b 'references {"symbol":"TShape.Area"}') @('1 references in 1 files', "  RunA`n    22  Writeln(LShape.Describe")
@@ -96,7 +114,7 @@ Check 'destructions' (Block $b 'related {"relation":"destructions"') @("  RunA`n
 # callers: through the virtual method it overrides and the interface method
 # it implements, a named inherited; then level by level to each main block.
 Check 'callers' (Block $b 'callers {"symbol":"TCircle.Area"}') @('callers of TCircle.Area (Shared\uShapes.pas:26) - 3 calls in 3 routines', 'also through TShape.Area (virtual), IShape.Area (interface)', "  RunA`n    22  [via TShape.Area]  Writeln", "  TBigCircle.Area`n    22  Result := 2 * inherited Area;", "  TotalArea`n    75  [via IShape.Area]")
-Check 'callers depth' (Block $b 'callers {"symbol":"TCircle.Area", "depth":3}') @('depth 2: 2 in 2; depth 3: 1 in 1', "AppA\AppA.dpr`n  9  [-> RunA, main block]  RunA;", "  RunB`n    31  [-> TotalArea]", "AppB\AppB.dpr`n  13  [-> RunB, main block]")
+Check 'callers depth' (Block $b 'callers {"symbol":"TCircle.Area", "depth":3}') @('depth 2: 2 in 2; depth 3: 1 in 1', "AppA\AppA.dpr`n  10  [-> RunA, main block]  RunA;", "  RunB`n    31  [-> TotalArea]", "AppB\AppB.dpr`n  13  [-> RunB, main block]")
 # A getter reached through its property; a handler only assigned: not a call,
 # a level that finds nothing, the .dfm note.
 Check 'callers getter' (Block $b 'callers {"symbol":"TShapeBox.GetItem"') @('all through TShapeBox.Item (property read)', "  TShapeBox.BoxClick`n    53  if Item <> nil then", '43  [-> TShapeBox.BoxClick, not a call]  FOnChange := BoxClick;', 'no callers found: TShapeBox.BoxClick', '(TShapeBox.BoxClick: published') @('54  ')
@@ -121,7 +139,8 @@ Check 'strict references unit' (Block $b 'references {"symbol":"uShapes"}') @('3
 Check 'strict descendants' (Block $b 'related {"relation":"descendants"') @('descendants of TShape (Shared\uShapes.pas:15): 3', 'TBigCircle <- TCircle')
 Check 'strict overrides' (Block $b 'related {"relation":"overrides"') @('overrides of TShape.Area (Shared\uShapes.pas:17): 4')
 # Rows of both analyses in one walk: RunA is project A's, the rest project B's.
-Check 'strict callers' (Block $b 'callers {"symbol":"TCircle.Area", "depth":3}') @('3 calls in 3 routines; depth 2: 2 in 2; depth 3: 1 in 1', '22  [via TShape.Area]', '75  [via IShape.Area]', '9  [-> RunA, main block]', '13  [-> RunB, main block]')
+Check 'strict callers' (Block $b 'callers {"symbol":"TCircle.Area", "depth":3}') @('3 calls in 3 routines; depth 2: 2 in 2; depth 3: 1 in 1', '22  [via TShape.Area]', '75  [via IShape.Area]', '10  [-> RunA, main block]', '13  [-> RunB, main block]')
+Check 'strict members' (Block $b 'members {"symbol":"TDerived"}') @('8 members', '19  FCount: Integer;')
 
 # ---- 3. MCP over stdio, with an edit in between ------------------------------------
 Write-Host '--- MCP over stdio'
@@ -157,7 +176,7 @@ try {
     $stdin.WriteLine('{"jsonrpc":"2.0","method":"notifications/initialized"}')
     $r = Rpc 2 'tools/list' '{}'
     $names = ($r.result.tools | ForEach-Object { $_.name }) -join ','
-    Check 'tools/list' $names @('status', 'find', 'definition', 'source', 'references', 'callers', 'related', 'outline', 'diagnostics', 'unit_deps')
+    Check 'tools/list' $names @('status', 'find', 'definition', 'source', 'members', 'references', 'callers', 'related', 'outline', 'diagnostics', 'unit_deps')
     $r = Rpc 3 'tools/call' '{"name":"related","arguments":{"relation":"creations","symbol":"TCircle"}}'
     Check 'call before edit' (ToolText $r) @('creations of TCircle', ': 1')
     if ($r.result.isError) { Write-Host 'FAIL call before edit reported isError'; $script:failures++ }

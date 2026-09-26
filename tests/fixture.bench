@@ -53,3 +53,10 @@ grep \bArea\b
 call source {"symbol":"TCircle.Area"}
 grep function\s+TCircle\.Area\b
 read Shared\uShapes.pas 53 4
+
+== members-derived | What can TDerived's methods use, inherited members included?
+call members {"symbol":"TDerived"}
+also outline {"file":"AppA\\uMembers.pas", "owner":"TDerived"}
+also outline {"file":"AppA\\uMembers.pas", "owner":"TBase"}
+grep \b(TDerived|TBase)\s*=\s*class\b
+read AppA\uMembers.pas 15 25

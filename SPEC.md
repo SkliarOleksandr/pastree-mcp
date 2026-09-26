@@ -41,7 +41,7 @@ PasTree demo and pastree-lsp are the reference and are cited in the code.
 
 Common rules:
 
-- **Target addressing** (definition, source, references, callers, related): `symbol` - a name,
+- **Target addressing** (definition, source, members, references, callers, related): `symbol` - a name,
   optionally qualified from the right (`Bar`, `TFoo.Bar`, `UnitName.TFoo.Bar`;
   generic parameters ignored) - or `file` + `line` + `name` (the identifier
   written on that line; `column` only when it occurs twice). An ambiguous name
@@ -84,6 +84,7 @@ Common rules:
 | `find` | symbol tables of every model, filtered as `ProjectOutline` | Exact, qualified or wildcard. No exact hit falls back to `*query*` and says so. Declaration sites are computed only for the rows shown - on the client group `Create` matches 25,000 symbols. `scope: project` = own units only. |
 | `definition` | `DeclHit`, `GotoImplementation` | For a routine also the implementation (its header line, found by scanning up from the body start `GotoImplementation` returns). `context: N` appends N source lines - of the implementation when there is one. Several matches are all listed; this is the one tool where a list is the answer. |
 | `source` | `DeclRootOf`, `GotoImplementation`, the raw token stream | The exact text of one declaration: a routine's implementation (`part: impl`, the default when it has one), its declaration (`decl`) or both; a type's whole declaration; a constant with its value. The node's span gives both ends - no line count to guess, as `definition context` makes the agent do. The comment directly above comes with it, read from the comment tokens the lexer keeps: comments starting their own line, no blank line between them and the declaration; one longer than 30 lines is named, not shown (in old code it is as often a commented-out earlier version as documentation). Lines come from the model's token stream, so they are numbered like every other answer. `limit` caps each part (300 lines). A routine with no body says why: abstract, an interface method, external. |
+| `members` | `EnumMembersX`, `DeclTypeX`/`SymDeclTypeX`, `XParamSyms`, `IsBarePropertyRedecl` | Every member of a class, record or interface, the inherited ones included: an outline per ancestor - once the ancestors are found - in one call. Rows are grouped by the type declaring them, the type asked about first and then each ancestor as `FindMemberX` climbs, under the visibility section they are written in (`published` for the unnamed first section of a `TPersistent` descendant), one declaration line each; the header is the ancestry, `TDerived <- TBase <- TObject`. The first member of a name met is the one a call binds to, so a later one is what an override or a redeclaration replaces, and is left out - unless every routine of the name met so far says `overload` or `override` (an override replaces one slot: `TStrings.AddStrings(TArray<string>)` is still called on a `TStringList`) and its parameter types are its own. A bare `property Items;` says nothing of its type: `[type TStrings]`. Whose reach: by default the type's own methods - all of its own members, of an ancestor's what Delphi lets them reach (`private` only in the same unit, `strict private` never); for a library type, what any code can use, since no method of it is the agent's to write; a variable, field, property or parameter (an inline `var X := ...` included) lists the members of its type that code in its unit can use. `visibility` public, protected (a descendant in another unit) or all; what it leaves out is counted. A library ancestor of a group type is counted per type, not listed (`library: true` lists it), unless `match` looks for a name: a form's run to `TObject` is 640 members the agent knows. `member_kind` and `match` narrow - `kind` already narrows the target, and one parameter read two ways is one more thing the model gets wrong. `limit` (150) caps the rows; the rest is counted per type. No class helper: one is in effect where it is in scope, and a type asked about has no such place. |
 | `references` | `FindReferences`, `FindUnitReferences`, `FindBuiltinReferences`, `FindDefineReferences` | Rows in compiled units read from a `.dcu` (no source) are counted, not shown. A default array property says that `X[I]` uses it without its name, and that those uses are not in the list (PasTree's search follows names). |
 | `callers` | `FindReferences` per source, `MethodAt`+`FindOverrides`, `FindDescendants`, `FindMemberX`, `GotoBareInherited`, `XDescendsFrom`, `WithTargetTypeX` | `references` folded to the routines the calls sit in, and what a reference search cannot see. A call is written against a *source*: the routine; a virtual method it overrides (the chain climbed from its class, stopping at the root or a `reintroduce`); an interface method it implements - a same-named method of an interface that its class, an ancestor or a descendant lists, or that one extends, when the member that name finds from the listing class is the routine or a method it overrides (`FindImplementations` is not asked: it answers only for the interface a class lists itself); a property it is the getter (reads) or setter (writes) of. Through a virtual slot a row counts only when the receiver's static type may hold an object that runs this implementation (`LSquare.Area` bound to `TShape.Area` never runs `TCircle.Area`; a property read on a class that overrides the getter runs the override), and `inherited X` never dispatches. A bare `inherited;` names nothing: the overrides below the class - for a constructor that is not virtual, the same-named constructors of its descendants - are scanned for one, and `GotoBareInherited` says what it calls. Each reference is classified from the tree: a call, or the routine handed on - `@Foo`, `OnClick := Foo`, a procedure passed as an argument - tagged `[not a call]` and not followed. A function named without parentheses is a call unless assigned to something procedural; as an argument it is taken for a call. `depth` 1-4 follows the routines the calls sit in, own files only (a library routine is shown, not followed), each site once; `limit` (150) caps the rows over all levels, and a level past it is not searched - the answer says so (a getter read 379 times, depth 3 and no cap: 34 s, 81k tokens). Tags: `via X` for a row bound to another source - dropped from the rows and said once above them when every first-level row shares it; `-> X` on a deeper row, the routine of the level above it reaches; overloads of one name told apart by declaration line. A routine searched and found uncalled is named at the end, and a published one (or in the unnamed first section of a `TPersistent` descendant) gets the note that a `.dfm` may bind it (9.5). A destructor points to `related destructions`. |
 | `related` | `TypeAt`+`FindDescendants`, `MethodAt`+`FindOverrides`, `InterfaceMethodAt`+`FindImplementations` / `InterfaceAt`+`FindInterfaceImplementors`, `AssignableAt`+`FindAssignments`, `ClassAt`+`FindCreations`/`FindDestructions` | The `...At` test runs at the declaration site - it normalizes (method to its declaration, alias to its type) and refuses what the relation cannot mean, which becomes an error naming what was needed. Rows are grouped by file like every answer; a descendant names its parent (`<- TParent`) below the first level, and a tagged row whose source line repeats the previous row's (an override chain is one signature) shows only its tag. An indented tree was tried first: it repeats a path per row and cost as much as grep on a 250-class hierarchy. |
@@ -273,11 +274,21 @@ are here so a new tool is not the one that breaks them.
    reach, since it cannot know where a routine ends; a 6-line routine 104
    tokens where `definition context: 25` took 365. One call where there
    were a search and a read.
-3. **`members`** - every member of a type INCLUDING inherited ones, each with
-   its declaring type and visibility (`EnumMembersX`). "What can I call on
-   this object" is currently an outline per ancestor. `visibility` filters
-   (`public` drops the ancestors' private and protected members), `kind`
-   narrows to methods, properties or fields.
+3. **`members`** - done in 0.6.0, section 3. No PasTree change:
+   `EnumMembersX` walks the members the way `FindMemberX` looks one up. The
+   default reach is not "everything": an ancestor's private members, which
+   its own methods cannot use, were 46 of a form's rows, and the VCL behind
+   it 640 more - hence the reach rules and the library count. Measured on the
+   client group (the members questions of the layer 1 bench; the baseline
+   reads each own class declaration of the chain exactly, a lower bound, and
+   `also` is an outline per class, what the server offered before): a form
+   over five own ancestors 1.8k tokens in one call, where the reads cost 3.0k
+   and the five outlines 3.9k - after finding the ancestors, one `= class(`
+   grep per level; a record class over four 2.9k against 4.4k and 17.7k; the
+   107 properties of an interface over three 2.1k against 5.5k; the members of
+   a base form with `Layout` in their name 258 tokens against 1.8k of grep; a
+   variable of the form type, what its unit can call, 1.0k. 50-120 ms a call.
+   A variable's header names its type, which is half of `type_of` (4).
 4. **`type_of`** - the type of an expression or variable at a position, with
    the doc comment of what it resolves to (`WithTargetTypeX`, `XTypeText`,
    `SymDeclTypeX`, `SymDocComment`). For a local or a parameter, the only way
@@ -448,8 +459,8 @@ gap between the answers and the truth.
 ### 9.8 Order
 
 1. Enclosing routine on rows (done, 0.3.0), `source` (done, 0.4.0),
-   `members` - cheap, every task uses them, and every library entry point
-   they need is public.
+   `members` (done, 0.6.0) - cheap, every task uses them, and every library
+   entry point they need is public.
 2. `callers` (done, 0.5.0), `callees`, then `impact`.
 3. `compile`.
 4. Forms (9.5) - the largest gap, and new library work.

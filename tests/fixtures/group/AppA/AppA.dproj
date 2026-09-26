@@ -11,5 +11,6 @@
             <MainSource>MainSource</MainSource>
         </DelphiCompile>
         <DCCReference Include="uAppA.pas"/>
+        <DCCReference Include="uMembers.pas"/>
     </ItemGroup>
 </Project>

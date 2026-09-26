@@ -2334,9 +2334,25 @@ begin
   Result := IntToStr(ACount) + ' ' + AWord + IfThen(ACount = 1, '', 's');
 end;
 
+// Does a class stream - a TPersistent descendant, compiled {$M+}? Its unnamed
+// first section is then published: where a form's components and event
+// handlers sit.
+function StreamsX(AA: TMcpAnalysis; AClass: TSemaXType): Boolean;
+begin
+  for var LDepth := 1 to 64 do
+  begin
+    if not XValid(AClass) then
+      Break;
+    if AA.Proj.Model(AClass.UnitId).Symbols[AClass.Sym].NameLower =
+       'tpersistent' then
+      Exit(True);
+    AClass := AA.Proj.CanonTypeX(AA.Proj.AncestorOfX(AClass));
+  end;
+  Result := False;
+end;
+
 // A method a form's .dfm can bind by name: published - written so, or in the
-// unnamed first section of a class that streams (a TPersistent descendant,
-// compiled {$M+}), where a form's event handlers sit.
+// unnamed first section of a class that streams.
 function IsPublishedMethod(AA: TMcpAnalysis; AMid, ASym: Integer): Boolean;
 var
   LK: TSemaXType;
@@ -2349,15 +2365,7 @@ begin
     svPublished:
       Result := True;
     svDefault:
-      for var LDepth := 1 to 64 do
-      begin
-        if not XValid(LK) then
-          Break;
-        if AA.Proj.Model(LK.UnitId).Symbols[LK.Sym].NameLower = 'tpersistent'
-        then
-          Exit(True);
-        LK := AA.Proj.CanonTypeX(AA.Proj.AncestorOfX(LK));
-      end;
+      Result := StreamsX(AA, LK);
   end;
 end;
 
@@ -3215,6 +3223,612 @@ begin
   end;
 end;
 
+{ ---- members -------------------------------------------------------------------- }
+
+type
+  // Whose reach a members answer lists.
+  TMemberView = (
+    mvOwn,        // the type's own methods: every member of its own, and of
+                  // the ancestors' what they reach - private ones in its unit
+    mvUnit,       // code in one unit holding an object of the type
+    mvPublic,     // any code
+    mvProtected,  // a descendant in another unit
+    mvAll);       // every member, whatever its visibility
+
+  // A member EnumMembersX reports, in the model that declares it; Ctx is the
+  // instantiation frame of the type it was reached through.
+  TMemberSite = record
+    Mid, Sym, Ctx: Integer;
+  end;
+
+  // A type the members are declared in: the one asked about, or an ancestor.
+  TMemberGroup = record
+    Decl: TSemaXType;
+    Name: string;          // TCircle, TList<TFoo>, TOuter.TInner
+    FilePath: string;      // set when a row of it is listed
+    Own: Boolean;          // declared in a group file; a library type is counted
+    Streams: Boolean;      // its unnamed first section is published
+    Count: Integer;        // its members in the answer, listed or counted
+  end;
+
+  TMemberRow = record
+    Group: Integer;
+    FilePath: string;
+    Line, Col: Integer;    // Line 0: no source, a compiled unit
+    Text: string;
+    Tag: string;
+    Vis: TSemaVisibility;
+  end;
+
+  { A name the walk has met. A same-named member of an ancestor is the one an
+    override or a redeclaration replaces, and is not listed - unless every
+    routine of the name met so far keeps the inherited ones (KeepsOverloads)
+    and its parameters are its own: a call by that name still reaches it. }
+  TMemberName = record
+    Struct: TSemaXType;    // the lowest type declaring the name
+    Routines: TArray<TSymId>;
+    Resolved: Boolean;     // Overload and Params are computed
+    Overload: Boolean;
+    Params: string;        // '|integer;|string;|' - the parameter lists met
+  end;
+
+const
+  VIS_NAMES: array[TSemaVisibility] of string = ('', 'strict private',
+    'private', 'strict protected', 'protected', 'public', 'published',
+    'automated');
+
+function SymKey(AMid, ASym: Integer): Int64;
+begin
+  Result := (Int64(AMid) shl 32) or Cardinal(ASym);
+end;
+
+function SameX(const AL, AR: TSemaXType): Boolean;
+begin
+  Result := (AL.UnitId = AR.UnitId) and (AL.Sym = AR.Sym);
+end;
+
+{ Can code of AView reach a member of visibility AVis - declared in the type
+  asked about itself (AOwn, for mvOwn), or in the view's unit (ASameUnit)?
+  Delphi's rules: private and protected reach the whole declaring unit,
+  strict private only the class, protected - strict or not - the
+  descendants' methods too. }
+function MemberVisible(AView: TMemberView; AVis: TSemaVisibility; AOwn,
+  ASameUnit: Boolean): Boolean;
+begin
+  case AVis of
+    svStrictPrivate:
+      Result := (AView = mvAll) or ((AView = mvOwn) and AOwn);
+    svPrivate:
+      Result := (AView = mvAll) or ((AView = mvOwn) and (AOwn or ASameUnit))
+        or ((AView = mvUnit) and ASameUnit);
+    svStrictProtected:
+      Result := AView in [mvOwn, mvProtected, mvAll];
+    svProtected:
+      Result := (AView in [mvOwn, mvProtected, mvAll]) or
+        ((AView = mvUnit) and ASameUnit);
+  else
+    Result := True;   // public, published, automated, an unnamed section
+  end;
+end;
+
+{ Does a routine declaration leave the inherited routines of its name
+  callable - say `overload`, or `override`? An override replaces one slot:
+  TStringList.AddStrings(TStrings) overrides, and TStrings.AddStrings(
+  TArray<string>) is still called on a TStringList. PasTree's sfOverload does
+  not tell: it marks the second and later routines of a name in one scope. }
+function KeepsOverloads(AA: TMcpAnalysis; AMid, ASym: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LNode: Integer;
+begin
+  Result := False;
+  if not AA.Proj.EnsureHydrated(AMid) then
+    Exit;
+  LM := AA.Proj.Model(AMid);
+  LNode := LM.Symbols[ASym].DeclNode;
+  while (LNode <> NIL_NODE) and (LM.Tree.Nodes[LNode].Kind <> nkRoutine) do
+    LNode := LM.Tree.Nodes[LNode].Parent;
+  Result := (LNode <> NIL_NODE) and (HasDirective(LM, LNode, 'overload') or
+    HasDirective(LM, LNode, 'override'));
+end;
+
+// A routine's parameter types, 'integer;string;': what tells an inherited
+// overload from the declaration an override replaces.
+function ParamTypesKey(AA: TMcpAnalysis; AMid, ASym: Integer): string;
+begin
+  Result := '';
+  for var LP in AA.Proj.XParamSyms(AMid, ASym) do
+    Result := Result + LowerCase(AA.Proj.XTypeText(AA.Proj.SymDeclTypeX(AMid,
+      LP))) + ';';
+end;
+
+{ Is the member at ASite, declared in ADecl, hidden by one of its name
+  further down - an override, a redeclaration, a field or method of that
+  name? The walk meets the lowest type's members first. Registers the member
+  when it is not hidden. }
+function MemberHidden(AA: TMcpAnalysis;
+  ANames: TDictionary<string, TMemberName>; const ASite: TMemberSite;
+  const ADecl: TSemaXType): Boolean;
+var
+  LM: TPasSemaModel;
+  LKey, LParams: string;
+  LName: TMemberName;
+  LId: TSymId;
+  LIsRoutine: Boolean;
+begin
+  Result := False;
+  LM := AA.Proj.Model(ASite.Mid);
+  LKey := LM.Symbols[ASite.Sym].NameLower;
+  LIsRoutine := LM.Symbols[ASite.Sym].Kind = skRoutine;
+  LId.Mid := ASite.Mid;
+  LId.Sym := ASite.Sym;
+  if not ANames.TryGetValue(LKey, LName) then
+  begin
+    LName := Default(TMemberName);
+    LName.Struct := ADecl;
+    if LIsRoutine then
+      LName.Routines := [LId];
+    ANames.Add(LKey, LName);
+    Exit;
+  end;
+  if SameX(LName.Struct, ADecl) then
+  begin
+    // Another overload in the same type.
+    if LIsRoutine then
+      LName.Routines := LName.Routines + [LId];
+    LName.Resolved := False;
+    ANames[LKey] := LName;
+    Exit;
+  end;
+  if not LIsRoutine or (Length(LName.Routines) = 0) then
+    Exit(True);
+  if not LName.Resolved then
+  begin
+    LName.Resolved := True;
+    LName.Overload := True;
+    LName.Params := '|';
+    for var LR in LName.Routines do
+    begin
+      LName.Overload := LName.Overload and KeepsOverloads(AA, LR.Mid, LR.Sym);
+      LName.Params := LName.Params + ParamTypesKey(AA, LR.Mid, LR.Sym) + '|';
+    end;
+  end;
+  LParams := ParamTypesKey(AA, ASite.Mid, ASite.Sym);
+  Result := not LName.Overload or (Pos('|' + LParams + '|', LName.Params) > 0);
+  if not Result then
+  begin
+    // An inherited overload. One that keeps none itself hides the rest of
+    // the name further up.
+    LName.Routines := LName.Routines + [LId];
+    LName.Params := LName.Params + LParams + '|';
+    LName.Overload := KeepsOverloads(AA, ASite.Mid, ASite.Sym);
+  end;
+  ANames[LKey] := LName;
+end;
+
+// `member_kind` as KindMatches takes it, '' for none. A plural or a synonym
+// is accepted: the value is the model's guess at a word.
+function MemberKindArg(const AValue: string): string;
+begin
+  Result := LowerCase(AValue);
+  if Result = 'properties' then
+    Result := 'property'
+  else if Result.EndsWith('s') then
+    Result := Copy(Result, 1, Length(Result) - 1);
+  if Result = 'routine' then
+    Result := 'method'
+  else if Result = 'constant' then
+    Result := 'const'
+  else if (Result = 'var') or (Result = 'variable') then
+    Result := 'field';
+  if (Result <> '') and not MatchStr(Result, ['method', 'procedure',
+     'function', 'constructor', 'destructor', 'operator', 'property', 'field',
+     'const', 'type']) then
+    raise EToolError.CreateFmt('`member_kind` is method, property, field, '
+      + 'const or type - or procedure, function, constructor, destructor, '
+      + 'operator (not `%s`)', [AValue]);
+end;
+
+function MemberKindMatches(LM: TPasSemaModel; ASym: Integer;
+  const AKind: string): Boolean;
+begin
+  if AKind = 'field' then
+    Result := LM.Symbols[ASym].Kind in [skField, skVar]   // `class var` too
+  else
+    Result := KindMatches(LM, ASym, AKind);
+end;
+
+// '3 members', '1 property', 'no constants'.
+function MemberNoun(ACount: Integer; const AKind: string): string;
+var
+  LWord: string;
+begin
+  if AKind = '' then
+    LWord := 'member'
+  else if AKind = 'const' then
+    LWord := 'constant'
+  else
+    LWord := AKind;
+  if ACount <> 1 then
+    if LWord = 'property' then
+      LWord := 'properties'
+    else
+      LWord := LWord + 's';
+  if ACount = 0 then
+    Result := 'no ' + LWord
+  else
+    Result := IntToStr(ACount) + ' ' + LWord;
+end;
+
+{ Every member of a type, the inherited ones included (SPEC 9.2.3): what an
+  agent otherwise learns with an outline per ancestor, once it has found the
+  ancestors. EnumMembersX walks them the way FindMemberX looks one up - the
+  type asked about first, then each ancestor - so the first member of a name
+  met is the one a call binds to, and a later one is what an override or a
+  redeclaration replaces. Rows are grouped by the type declaring them, under
+  the visibility section they are written in. A library ancestor of a group
+  type is counted, not listed: the agent knows TForm, and a form's run of
+  ancestors to TObject is some six hundred members. }
+function ToolMembers(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
+var
+  LT: TTarget;
+  LA: TMcpAnalysis;
+  LM, LDM: TPasSemaModel;
+  LVisArg, LKind, LMatch, LMatchLower, LUnitFile, LHead, LHeading,
+    LLastHeading, LIndent, LList: string;
+  LMid, LSym, LLimit, LOwner, LScope, LGroupIdx, LNotVisible, LShown,
+    LLastGroup, LPrevLine: Integer;
+  LView: TMemberView;
+  LStart, LOwnType, LDecl, LX, LNext: TSemaXType;
+  LSites: TList<TMemberSite>;
+  LGroups: TList<TMemberGroup>;
+  LRows: TList<TMemberRow>;
+  LGroupOf: TDictionary<Int64, Integer>;
+  LNames: TDictionary<string, TMemberName>;
+  LSeen: TDictionary<Int64, Boolean>;
+  LGroup: TMemberGroup;
+  LRow: TMemberRow;
+  LHit: TPasRefHit;
+  LSorted: TArray<TMemberRow>;
+  LRemain: TArray<Integer>;
+  LIsVar, LListLibrary, LPass: Boolean;
+  LSb: TStringBuilder;
+begin
+  LVisArg := LowerCase(ArgStr(AArgs, 'visibility'));
+  if LVisArg = '' then
+    LView := mvOwn   // for a variable, mvUnit - below
+  else if LVisArg = 'public' then
+    LView := mvPublic
+  else if LVisArg = 'protected' then
+    LView := mvProtected
+  else if (LVisArg = 'all') or (LVisArg = 'private') then
+    LView := mvAll
+  else
+    raise EToolError.Create('`visibility` is public, protected or all - or '
+      + 'left out: what the type''s own methods (for a variable, code in its '
+      + 'unit) can use');
+  LKind := MemberKindArg(ArgStr(AArgs, 'member_kind'));
+  LMatch := ArgStr(AArgs, 'match');
+  if (LMatch <> '') and (Pos('*', LMatch) = 0) and (Pos('?', LMatch) = 0) then
+    LMatch := '*' + LMatch + '*';
+  LMatchLower := LowerCase(LMatch);
+  LLimit := EnsureRange(ArgInt(AArgs, 'limit', 150), 1, 5000);
+  LT := ResolveOne(AWs, AArgs);
+  case LT.Kind of
+    tkUnit:
+      raise EToolError.CreateFmt('%s is a unit - `outline` lists its '
+        + 'declarations; `members` takes a type', [LT.Name]);
+    tkBuiltin, tkDefine:
+      raise EToolError.CreateFmt('%s is a %s - `members` takes a type',
+        [LT.Name, LT.Head]);
+  end;
+
+  // The analysis the declaring file reports from, else the first holding it.
+  LA := nil;
+  LOwner := AWs.OwnerAnalysis(LT.DeclFile);
+  if (LOwner >= 0) and (LT.Ids[LOwner].Mid >= 0) then
+    LA := AWs.Analyses[LOwner]
+  else
+    for var LCand in AWs.Analyses do
+      if LT.Ids[LCand.Index].Mid >= 0 then
+      begin
+        LA := LCand;
+        Break;
+      end;
+  if LA = nil then
+    raise EToolError.CreateFmt('%s is in no analysis', [LT.Name]);
+  LMid := LT.Ids[LA.Index].Mid;
+  LSym := LT.Ids[LA.Index].Sym;
+  LM := LA.Proj.Model(LMid);
+  // A variable, field, property or parameter: the members of its type, as
+  // code in its unit reaches them - "what can I call on this".
+  LIsVar := LM.Symbols[LSym].Kind in [skVar, skField, skConst, skParam,
+    skProperty];
+  if LM.Symbols[LSym].Kind = skType then
+    LStart := XPlain(LMid, LSym)
+  else if LIsVar then
+  begin
+    // DeclTypeX knows an inline `var X := ...`'s inferred type; SymDeclTypeX
+    // a republished property's.
+    LStart := LA.Proj.DeclTypeX(LMid, LSym);
+    if not XValid(LStart) then
+      LStart := LA.Proj.SymDeclTypeX(LMid, LSym);
+    if not XValid(LStart) then
+      raise EToolError.CreateFmt('%s (%s) has no type the analysis knows',
+        [LT.Name, LT.Head]);
+  end
+  else
+    raise EToolError.CreateFmt('%s is a %s - `members` takes a type, or a '
+      + 'variable, field, property or parameter whose type it lists',
+      [LT.Name, LT.Head]);
+  LOwnType := LA.Proj.CanonTypeX(LStart);
+  if not XValid(LOwnType) then
+    LOwnType := LStart;
+  LUnitFile := LA.Proj.ModelFile(LOwnType.UnitId);
+  // A library type asked about is listed whole; so is every ancestor when
+  // the agent looks for a name.
+  LListLibrary := ArgBool(AArgs, 'library', False) or (LMatch <> '') or
+    not AWs.IsOwnFile(LUnitFile);
+  if LVisArg = '' then
+  begin
+    if LIsVar then
+    begin
+      LView := mvUnit;
+      LUnitFile := LA.Proj.ModelFile(LMid);
+    end
+    // No method of a library type is the agent's to write: what its code
+    // can call.
+    else if not AWs.IsOwnFile(LUnitFile) then
+      LView := mvPublic;
+  end;
+
+  LSites := TList<TMemberSite>.Create;
+  LGroups := TList<TMemberGroup>.Create;
+  LRows := TList<TMemberRow>.Create;
+  LGroupOf := TDictionary<Int64, Integer>.Create;
+  LNames := TDictionary<string, TMemberName>.Create;
+  LSeen := TDictionary<Int64, Boolean>.Create;
+  LSb := TStringBuilder.Create;
+  try
+    // AFromMid -1: no class helper. One is in effect where it is in scope,
+    // and a type asked about has no such place.
+    LA.Proj.EnumMembersX(-1, LStart,
+      procedure(AMid, ASym, ACtx: Integer)
+      var
+        LNew: TMemberSite;
+      begin
+        LNew.Mid := AMid;
+        LNew.Sym := ASym;
+        LNew.Ctx := ACtx;
+        LSites.Add(LNew);
+      end);
+    LNotVisible := 0;
+    for var LSite in LSites do
+    begin
+      if LSeen.ContainsKey(SymKey(LSite.Mid, LSite.Sym)) then
+        Continue;
+      LSeen.Add(SymKey(LSite.Mid, LSite.Sym), True);
+      LDM := LA.Proj.Model(LSite.Mid);
+      if not (LDM.Symbols[LSite.Sym].Kind in [skField, skVar, skConst,
+         skRoutine, skProperty, skType]) then
+        Continue;   // an enumeration's values, a generic parameter
+      LScope := LDM.Symbols[LSite.Sym].Scope;
+      if (LScope = NIL_SCOPE) or (LScope >= LDM.Scopes.Count) or
+         (LDM.Scopes[LScope].Kind <> sckStruct) or
+         (LDM.Scopes[LScope].StructSym = NIL_SYM) then
+        Continue;
+      LDecl := XPlain(LSite.Mid, LDM.Scopes[LScope].StructSym);
+      if not LGroupOf.TryGetValue(SymKey(LDecl.UnitId, LDecl.Sym), LGroupIdx)
+      then
+      begin
+        LGroup := Default(TMemberGroup);
+        LGroup.Decl := LDecl;
+        LX := LDecl;
+        LX.Inst := LSite.Ctx;
+        if LSite.Ctx <> NIL_INST then
+          LGroup.Name := LA.Proj.XTypeText(LX)
+        else
+          LGroup.Name := QualifiedName(LDM, LDecl.Sym);
+        LGroup.Own := AWs.IsOwnFile(LA.Proj.ModelFile(LDecl.UnitId));
+        LGroup.Streams := IsKindX(LA, LDecl, nkClassType) and
+          StreamsX(LA, LDecl);
+        LGroupIdx := LGroups.Count;
+        LGroups.Add(LGroup);
+        LGroupOf.Add(SymKey(LDecl.UnitId, LDecl.Sym), LGroupIdx);
+      end;
+      LPass := ((LKind = '') or MemberKindMatches(LDM, LSite.Sym, LKind)) and
+        ((LMatchLower = '') or WildMatch(LMatchLower,
+        LDM.Symbols[LSite.Sym].NameLower));
+      // Out of reach does not hide: the next member of its name up is the
+      // one a call from the view binds to.
+      if not MemberVisible(LView, LDM.Symbols[LSite.Sym].Visibility,
+         SameX(LDecl, LOwnType), SameText(LA.Proj.ModelFile(LSite.Mid),
+         LUnitFile)) then
+      begin
+        if LPass and (LGroups[LGroupIdx].Own or LListLibrary) and
+           not LNames.ContainsKey(LDM.Symbols[LSite.Sym].NameLower) then
+          Inc(LNotVisible);
+        Continue;
+      end;
+      if MemberHidden(LA, LNames, LSite, LDecl) or not LPass then
+        Continue;
+      LGroup := LGroups[LGroupIdx];
+      Inc(LGroup.Count);
+      if LGroup.Own or LListLibrary then
+      begin
+        if (LGroup.FilePath = '') and LA.Nav.DeclHit(LDecl.UnitId, LDecl.Sym,
+           LHit) then
+          LGroup.FilePath := LHit.FilePath;
+        if LGroup.FilePath = '' then
+          LGroup.FilePath := LA.Proj.ModelFile(LDecl.UnitId);
+        LRow := Default(TMemberRow);
+        LRow.Group := LGroupIdx;
+        LRow.Vis := LDM.Symbols[LSite.Sym].Visibility;
+        if LA.Nav.DeclHit(LSite.Mid, LSite.Sym, LHit) and
+           not SameText(TPath.GetExtension(LHit.FilePath), '.dcu') then
+        begin
+          LRow.FilePath := LHit.FilePath;
+          LRow.Line := LHit.Line;
+          LRow.Col := LHit.Col;
+          LRow.Text := CleanLine(LHit.Snippet);
+        end
+        else
+          LRow.Text := HeadOf(LDM, LSite.Sym) + ' ' +
+            LDM.Symbols[LSite.Sym].Name;
+        // `property Items;` republishes an inherited property, and its line
+        // says nothing of the type.
+        if LA.Proj.IsBarePropertyRedecl(LSite.Mid, LSite.Sym) then
+        begin
+          LX := LA.Proj.SymDeclTypeX(LSite.Mid, LSite.Sym);
+          if XValid(LX) then
+            LRow.Tag := 'type ' + LA.Proj.XTypeText(LX);
+        end;
+        LRows.Add(LRow);
+      end;
+      LGroups[LGroupIdx] := LGroup;
+    end;
+
+    // The ancestry, TDerived <- TBase <- TObject, even where no row is.
+    LList := '';
+    LX := LStart;
+    for var LDepth := 1 to 64 do
+    begin
+      if not XValid(LX) then
+        Break;
+      LList := LList + IfThen(LList <> '', ' <- ', '') + LA.Proj.XTypeText(LX);
+      LNext := LA.Proj.AncestorOfX(LX);
+      if SameX(LNext, LX) then
+        Break;
+      LX := LNext;
+    end;
+    if LIsVar then
+    begin
+      LHead := Format('%s (%s) is a %s', [LT.Name, LT.Head, LList]);
+      if LA.Nav.DeclHit(LOwnType.UnitId, LOwnType.Sym, LHit) then
+        LHead := LHead + Format(' (%s:%d)', [AWs.RelPath(LHit.FilePath),
+          LHit.Line]);
+    end
+    else
+      LHead := Format('%s (%s:%d)', [LList, AWs.RelPath(LT.DeclFile),
+        LT.DeclLine]);
+    LHead := LHead + ': ' + MemberNoun(LRows.Count, LKind);
+    if LMatch <> '' then
+      LHead := LHead + ' named like ' + LMatch;
+    case LView of
+      mvPublic:
+        LHead := LHead + ', public and published only';
+      mvProtected:
+        LHead := LHead + ', as a descendant in another unit sees them';
+      mvAll:
+        LHead := LHead + ', every visibility';
+    end;
+    LSb.AppendLine(LHead);
+
+    LSorted := LRows.ToArray;
+    TArray.Sort<TMemberRow>(LSorted, TComparer<TMemberRow>.Construct(
+      function(const L, R: TMemberRow): Integer
+      begin
+        Result := L.Group - R.Group;
+        if Result = 0 then
+          Result := L.Line - R.Line;
+        if Result = 0 then
+          Result := L.Col - R.Col;
+        if Result = 0 then
+          Result := CompareText(L.Text, R.Text);
+      end));
+    //   TCircle  Shared\uShapes.pas
+    //     public
+    //       25  constructor Create(ARadius: Double);
+    LShown := 0;
+    LLastGroup := -1;
+    LLastHeading := '';
+    LPrevLine := -1;
+    for var LR in LSorted do
+    begin
+      if LShown >= LLimit then
+        Break;
+      Inc(LShown);
+      if LR.Group <> LLastGroup then
+      begin
+        LSb.AppendLine(LGroups[LR.Group].Name + '  ' +
+          AWs.RelPath(LGroups[LR.Group].FilePath));
+        LLastGroup := LR.Group;
+        LLastHeading := '';
+        LPrevLine := -1;
+      end;
+      if (LR.Vis = svDefault) and LGroups[LR.Group].Streams then
+        LHeading := 'published'
+      else
+        LHeading := VIS_NAMES[LR.Vis];
+      if (LHeading <> '') and (LHeading <> LLastHeading) then
+        LSb.AppendLine('  ' + LHeading);
+      LLastHeading := LHeading;
+      // `FA, FB: Integer;` - one line for two members.
+      if (LR.Line > 0) and (LR.Line = LPrevLine) and (LR.Tag = '') then
+        Continue;
+      LPrevLine := LR.Line;
+      LIndent := IfThen(LHeading <> '', '    ', '  ');
+      if LR.Line > 0 then
+        LSb.Append(Format('%s%d  %s', [LIndent, LR.Line, LR.Text]))
+      else
+        LSb.Append(LIndent + LR.Text);
+      if LR.Tag <> '' then
+        LSb.Append('  [' + LR.Tag + ']');
+      if (LR.FilePath <> '') and not SameText(LR.FilePath,
+         LGroups[LR.Group].FilePath) then
+        LSb.Append('  [in ' + AWs.RelPath(LR.FilePath) + ']');
+      LSb.AppendLine;
+    end;
+    if Length(LSorted) > LShown then
+    begin
+      SetLength(LRemain, LGroups.Count);
+      for var LIdx := LShown to High(LSorted) do
+        Inc(LRemain[LSorted[LIdx].Group]);
+      LList := '';
+      for var LIdx := 0 to High(LRemain) do
+        if LRemain[LIdx] > 0 then
+          LList := LList + IfThen(LList <> '', ', ', '') + Format('%s %d',
+            [LGroups[LIdx].Name, LRemain[LIdx]]);
+      LSb.AppendLine(Format('... %d more (raise `limit`, or narrow with '
+        + '`match` or `member_kind`): %s', [Length(LSorted) - LShown, LList]));
+    end;
+    LList := '';
+    for var LG in LGroups do
+      if not LG.Own and not LListLibrary and (LG.Count > 0) then
+        LList := LList + IfThen(LList <> '', ', ', '') + Format('%s %d',
+          [LG.Name, LG.Count]);
+    if LList <> '' then
+      LSb.AppendLine('(library ancestors, not listed - `library: true` lists '
+        + 'them: ' + LList + ')');
+    if LNotVisible > 0 then
+      case LView of
+        mvOwn:
+          LSb.AppendLine(Format('(+%d not reachable from its own methods: '
+            + 'ancestors'' private members - `visibility: all` lists them)',
+            [LNotVisible]));
+        mvUnit:
+          LSb.AppendLine(Format('(+%d not reachable from code in %s: '
+            + 'protected or private - `visibility: protected` or `all` lists '
+            + 'them)', [LNotVisible, UnitNameOfFile(LUnitFile)]));
+        mvPublic:
+          LSb.AppendLine(Format('(+%d protected or private, not listed - '
+            + '`visibility: protected` or `all` lists them)', [LNotVisible]));
+        mvProtected:
+          LSb.AppendLine(Format('(+%d private, not listed - `visibility: '
+            + 'all` lists them)', [LNotVisible]));
+      end;
+    Result := LSb.ToString.TrimRight;
+  finally
+    LSb.Free;
+    LSeen.Free;
+    LNames.Free;
+    LGroupOf.Free;
+    LRows.Free;
+    LGroups.Free;
+    LSites.Free;
+  end;
+end;
+
 // The analysis + model of an own or library file, hydrated.
 function ModelOfFile(AWs: TMcpWorkspace; const AFile: string;
   out AA: TMcpAnalysis; out AMid: Integer): Boolean;
@@ -3609,6 +4223,32 @@ const
     + '"limit":{"type":"integer","description":"Max lines per part (default '
     + '300)"}}}},' +
 
+    '{"name":"members","description":"What can be used on a class, record '
+    + 'or interface, inherited members included - instead of an outline per '
+    + 'ancestor: each member under the type that declares it (the type asked '
+    + 'about first, then its ancestors) and its visibility section, with its '
+    + 'declaration line. An override or a redeclaration is listed once, at '
+    + 'the lowest type declaring it. By default what the type''s own methods '
+    + 'can use (ancestors'' private members left out); of a type from outside '
+    + 'the group, what any code can use. A variable, field, property or '
+    + 'parameter lists the members of its type that code in its unit can '
+    + 'use. Ancestors from outside the group (VCL, RTL) are counted, not '
+    + 'listed, unless `library` or `match` is given or the type is one '
+    + 'itself.",'
+    + '"inputSchema":{"type":"object","properties":{' + TARGET_PROPS + ','
+    + '"visibility":{"type":"string","enum":["public","protected","all"],'
+    + '"description":"public: what any code can use; protected: what a '
+    + 'descendant in another unit can use; all: every member, private ones '
+    + 'included"},'
+    + '"member_kind":{"type":"string","description":"Only these members: '
+    + 'method, property, field, const, type - or procedure, function, '
+    + 'constructor, destructor"},'
+    + '"match":{"type":"string","description":"Only members whose name '
+    + 'matches: wildcards (*Save*) or a part of the name"},'
+    + '"library":{"type":"boolean","description":"List the members of '
+    + 'ancestors outside the group too (default false: counted)"},'
+    + '"limit":{"type":"integer","description":"Max rows (default 150)"}}}},' +
+
     '{"name":"references","description":"Every use of a symbol across all '
     + 'projects of the group, by resolved identity rather than text: '
     + 'same-named unrelated symbols, comments and strings are not in it. '
@@ -3701,7 +4341,9 @@ begin
     + '`find` locates declarations, `definition` jumps to declaration and '
     + 'implementation, `source` gives the exact text of one declaration (a '
     + 'routine''s body, a whole type) instead of a file read at a guessed '
-    + 'offset, `references` lists real uses (resolved identity, not '
+    + 'offset, `members` what a class can do - its members and the inherited '
+    + 'ones, by the type declaring each, `references` lists real uses '
+    + '(resolved identity, not '
     + 'text), `callers` who calls a routine (through the virtual or '
     + 'interface method it implements too, to a `depth`), `related` answers '
     + 'hierarchy/override/implementation/assignment/'
@@ -3753,6 +4395,8 @@ begin
       Result := ToolDefinition(AWs, AArgs)
     else if AName = 'source' then
       Result := ToolSource(AWs, AArgs)
+    else if AName = 'members' then
+      Result := ToolMembers(AWs, AArgs)
     else if AName = 'references' then
       Result := ToolReferences(AWs, AArgs)
     else if AName = 'callers' then
