@@ -1,10 +1,10 @@
 unit uMembers;
 
-// Fixture for `members` in tests\smoke.ps1: a hierarchy in one unit - what a
-// descendant's methods reach of its ancestor's private, strict and protected
-// members - overloads across the two, a property republished, a streaming
-// class's unnamed first section and a record with no members. The smoke test
-// pins line numbers of this file.
+// Fixture for `members` and `callees` in tests\smoke.ps1: a hierarchy in one
+// unit - what a descendant reaches of its ancestor's private, strict and
+// protected members - overloads across the two, a property republished, a
+// streaming class, an empty record and a routine calling through a getter.
+// The smoke test pins line numbers of this file.
 
 interface
 
@@ -46,6 +46,19 @@ type
   end;
 
   TEmpty = record
+  end;
+
+  // For `callees`: a routine reaching others through a property's getter, a
+  // virtual method the receiver's type may override, an overload, a nested
+  // routine and a method pointer.
+  TRunner = class
+  private
+    FBase: TBase;
+    FOnDone: TNotifyEvent;
+    function GetBase: TBase;
+  public
+    procedure Run;
+    property Base: TBase read GetBase;
   end;
 
 implementation
@@ -90,6 +103,51 @@ end;
 
 procedure TPanelModel.SourceChange(Sender: TObject);
 begin
+end;
+
+function TRunner.GetBase: TBase;
+begin
+  if FBase = nil then
+    FBase := TDerived.Create;
+  Result := FBase;
+end;
+
+procedure TRunner.Run;
+
+  procedure Finish;
+  begin
+    if Assigned(FOnDone) then
+      FOnDone(Self);
+  end;
+
+begin
+  Base.Reset;
+  Base.Add('done');
+  Finish;
+end;
+
+type
+  // An indexed property written runs its setter, and read its getter.
+  TSlots = class
+  private
+    function GetSlot(I: Integer): TBase;
+    procedure SetSlot(I: Integer; AValue: TBase);
+  public
+    property Slots[I: Integer]: TBase read GetSlot write SetSlot;
+  end;
+
+function TSlots.GetSlot(I: Integer): TBase;
+begin
+  Result := nil;
+end;
+
+procedure TSlots.SetSlot(I: Integer; AValue: TBase);
+begin
+end;
+
+procedure FillSlots(ASlots: TSlots);
+begin
+  ASlots.Slots[0] := ASlots.Slots[1];
 end;
 
 end.

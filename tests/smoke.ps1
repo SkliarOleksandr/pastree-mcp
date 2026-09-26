@@ -125,6 +125,25 @@ Check 'callers inherited' (Block $b 'callers {"symbol":"TShapeBox.Changed"}') @(
 Check 'callers override' (Block $b 'callers {"symbol":"TBigBox.Changed"}') @('all through TShapeBox.Changed (virtual)', "  TShapeBox.SetItem`n    44  Changed;") @('59  ')
 Check 'callers none' (Block $b 'callers {"symbol":"NeverCalled"}') @('callers of NeverCalled (AppB\uBoxes.pas:31) - none found')
 Check 'callers not a routine' (Block $b 'callers {"symbol":"TCircle"}') @('TCircle is a class - `callers` takes a routine')
+# callees: each routine a body reaches, at its declaration. A virtual call on
+# a TShape may run every override below it (project B's too); a property
+# write to a field calls nothing.
+Check 'callees' (Block $b 'callees {"symbol":"RunA"}') @('callees of RunA (AppA\uAppA.pas:15-26) - 4 calls reaching 7 routines', "  TShape`n    17  [at 22]  function Area: Double; virtual; abstract;", "  TCircle`n    25  [at 19]  constructor Create(ARadius: Double);`n    26  [at 22 via TShape.Area]  function Area: Double; override;", "AppB\uAppB.pas`n  TBigCircle`n    13  [at 22 via TShape.Area]", '[at 24]  procedure FreeAndNil(', '(built-ins called: Writeln)') @('property Radius', 'library routine')
+# An interface call: every method implementing it, overrides included.
+Check 'callees interface' (Block $b 'callees {"symbol":"TotalArea"}') @('1 call reaching 5 routines', "  IShape`n    12  [at 75]  function Area: Double;", '17  [at 75 via IShape.Area]', '26  [at 75 via IShape.Area]', '35  [at 75 via IShape.Area]', "  TBigCircle`n    13  [at 75 via IShape.Area]")
+# Through a property to its getter and setter; then what the setter calls: a
+# handler handed on, a virtual method and the override the class may run.
+Check 'callees depth' (Block $b 'callees {"symbol":"TShapeBox.BoxClick", "depth":2}') @('2 calls reaching 2 routines; depth 2: 1 call reaching 3', '17  [at 53 via TShapeBox.Item]  function GetItem: TObject;', '18  [at 54 via TShapeBox.Item]  procedure SetItem(AValue: TObject);', 'depth 2 - what those call:', '20  [TShapeBox.SetItem at 44]  procedure Changed; virtual;', '22  [TShapeBox.SetItem at 43, not a call]', '28  [TShapeBox.SetItem at 44 via TShapeBox.Changed]', 'calling nothing: TShapeBox.GetItem')
+Check 'callees inherited' (Block $b 'callees {"symbol":"TBigBox.Changed"}') @("  TShapeBox`n    20  [at 59]  procedure Changed; virtual;") @('via')
+# A getter, then a virtual call on what it returns; an overload; a nested
+# routine, which calls through a method pointer.
+Check 'callees runner' (Block $b 'callees {"symbol":"TRunner.Run"') @('5 calls reaching 5 routines', '58  [at 124, 125 via TRunner.Base]  function GetBase: TBase;', '36  [at 124 via TBase.Reset]  procedure Reset; override;', '26  [at 125]  procedure Add(const AText: string); overload;', "  TRunner.Run`n    117  [at 126]  procedure Finish;", '[TDerived.Reset at 101]  procedure Reset; virtual;', '[TBase.Add at 82]  procedure Add(AValue: Integer); overload;', '[TRunner.GetBase at 111]  constructor Create;', 'FOnDone (TRunner.Run.Finish at 120)')
+# An indexed property: written, its setter runs - from both ends.
+Check 'callees indexed' (Block $b 'callees {"symbol":"FillSlots"}') @('2 calls reaching 2 routines', '133  [at 150 via TSlots.Slots]  function GetSlot(I: Integer): TBase;', '134  [at 150 via TSlots.Slots]  procedure SetSlot(I: Integer; AValue: TBase);')
+Check 'callers indexed' (Block $b 'callers {"symbol":"TSlots.SetSlot"}') @('1 call in 1 routine', 'all through TSlots.Slots (property write)', "  FillSlots`n    150  ASlots.Slots[0] := ASlots.Slots[1];")
+Check 'callees none' (Block $b 'callees {"symbol":"NeverCalled"}') @('callees of NeverCalled (AppB\uBoxes.pas:62-64) - none found')
+Check 'callees abstract' (Block $b 'callees {"symbol":"TShape.Area"}') @('TShape.Area: abstract, no body')
+Check 'callees not a routine' (Block $b 'callees {"symbol":"TCircle"}') @('TCircle is a class - `callees` takes a routine')
 Check 'outline' (Block $b 'outline {"file":"Shared') @('21  type TCircle = class', '27    property Radius: Double', '53  function TCircle.Area: Double', '40 implementation')
 Check 'unit_deps' (Block $b 'unit_deps') @('uShapes is used by 3 units', 'AppB\uAppB.pas:8')
 Check 'diagnostics' (Block $b 'diagnostics') @('no diagnostics')
@@ -141,6 +160,9 @@ Check 'strict overrides' (Block $b 'related {"relation":"overrides"') @('overrid
 # Rows of both analyses in one walk: RunA is project A's, the rest project B's.
 Check 'strict callers' (Block $b 'callers {"symbol":"TCircle.Area", "depth":3}') @('3 calls in 3 routines; depth 2: 2 in 2; depth 3: 1 in 1', '22  [via TShape.Area]', '75  [via IShape.Area]', '10  [-> RunA, main block]', '13  [-> RunB, main block]')
 Check 'strict members' (Block $b 'members {"symbol":"TDerived"}') @('8 members', '19  FCount: Integer;')
+# The implementations of one call, merged from both analyses: TBigCircle is
+# project B's alone.
+Check 'strict callees' (Block $b 'callees {"symbol":"TotalArea"}') @('1 call reaching 5 routines', "  TBigCircle`n    13  [at 75 via IShape.Area]")
 
 # ---- 3. MCP over stdio, with an edit in between ------------------------------------
 Write-Host '--- MCP over stdio'
@@ -176,7 +198,7 @@ try {
     $stdin.WriteLine('{"jsonrpc":"2.0","method":"notifications/initialized"}')
     $r = Rpc 2 'tools/list' '{}'
     $names = ($r.result.tools | ForEach-Object { $_.name }) -join ','
-    Check 'tools/list' $names @('status', 'find', 'definition', 'source', 'members', 'references', 'callers', 'related', 'outline', 'diagnostics', 'unit_deps')
+    Check 'tools/list' $names @('status', 'find', 'definition', 'source', 'members', 'references', 'callers', 'callees', 'related', 'outline', 'diagnostics', 'unit_deps')
     $r = Rpc 3 'tools/call' '{"name":"related","arguments":{"relation":"creations","symbol":"TCircle"}}'
     Check 'call before edit' (ToolText $r) @('creations of TCircle', ': 1')
     if ($r.result.isError) { Write-Host 'FAIL call before edit reported isError'; $script:failures++ }

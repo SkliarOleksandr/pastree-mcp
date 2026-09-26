@@ -41,7 +41,7 @@ PasTree demo and pastree-lsp are the reference and are cited in the code.
 
 Common rules:
 
-- **Target addressing** (definition, source, members, references, callers, related): `symbol` - a name,
+- **Target addressing** (definition, source, members, references, callers, callees, related): `symbol` - a name,
   optionally qualified from the right (`Bar`, `TFoo.Bar`, `UnitName.TFoo.Bar`;
   generic parameters ignored) - or `file` + `line` + `name` (the identifier
   written on that line; `column` only when it occurs twice). An ambiguous name
@@ -67,7 +67,8 @@ Common rules:
   routine or type (a `uses` clause) stays at the file level. `diagnostics`
   shows no source line, so each of its rows ends `(in TFoo.Save)`, header
   lines included. The declaration relations (`descendants`, `overrides`,
-  `implementations`) get none: their `[tag]` names the type. The name comes
+  `implementations`) get none: their `[tag]` names the type. A `callees`
+  row is a declaration too, and sits under its type. The name comes
   from the public tree - the nearest `nkRoutine` or `nkTypeDecl` ancestor,
   the climb PasTree's private `RTEnclosingRoutine` makes - once per file per
   call.
@@ -87,6 +88,7 @@ Common rules:
 | `members` | `EnumMembersX`, `DeclTypeX`/`SymDeclTypeX`, `XParamSyms`, `IsBarePropertyRedecl` | Every member of a class, record or interface, the inherited ones included: an outline per ancestor - once the ancestors are found - in one call. Rows are grouped by the type declaring them, the type asked about first and then each ancestor as `FindMemberX` climbs, under the visibility section they are written in (`published` for the unnamed first section of a `TPersistent` descendant), one declaration line each; the header is the ancestry, `TDerived <- TBase <- TObject`. The first member of a name met is the one a call binds to, so a later one is what an override or a redeclaration replaces, and is left out - unless every routine of the name met so far says `overload` or `override` (an override replaces one slot: `TStrings.AddStrings(TArray<string>)` is still called on a `TStringList`) and its parameter types are its own. A bare `property Items;` says nothing of its type: `[type TStrings]`. Whose reach: by default the type's own methods - all of its own members, of an ancestor's what Delphi lets them reach (`private` only in the same unit, `strict private` never); for a library type, what any code can use, since no method of it is the agent's to write; a variable, field, property or parameter (an inline `var X := ...` included) lists the members of its type that code in its unit can use. `visibility` public, protected (a descendant in another unit) or all; what it leaves out is counted. A library ancestor of a group type is counted per type, not listed (`library: true` lists it), unless `match` looks for a name: a form's run to `TObject` is 640 members the agent knows. `member_kind` and `match` narrow - `kind` already narrows the target, and one parameter read two ways is one more thing the model gets wrong. `limit` (150) caps the rows; the rest is counted per type. No class helper: one is in effect where it is in scope, and a type asked about has no such place. |
 | `references` | `FindReferences`, `FindUnitReferences`, `FindBuiltinReferences`, `FindDefineReferences` | Rows in compiled units read from a `.dcu` (no source) are counted, not shown. A default array property says that `X[I]` uses it without its name, and that those uses are not in the list (PasTree's search follows names). |
 | `callers` | `FindReferences` per source, `MethodAt`+`FindOverrides`, `FindDescendants`, `FindMemberX`, `GotoBareInherited`, `XDescendsFrom`, `WithTargetTypeX` | `references` folded to the routines the calls sit in, and what a reference search cannot see. A call is written against a *source*: the routine; a virtual method it overrides (the chain climbed from its class, stopping at the root or a `reintroduce`); an interface method it implements - a same-named method of an interface that its class, an ancestor or a descendant lists, or that one extends, when the member that name finds from the listing class is the routine or a method it overrides (`FindImplementations` is not asked: it answers only for the interface a class lists itself); a property it is the getter (reads) or setter (writes) of. Through a virtual slot a row counts only when the receiver's static type may hold an object that runs this implementation (`LSquare.Area` bound to `TShape.Area` never runs `TCircle.Area`; a property read on a class that overrides the getter runs the override), and `inherited X` never dispatches. A bare `inherited;` names nothing: the overrides below the class - for a constructor that is not virtual, the same-named constructors of its descendants - are scanned for one, and `GotoBareInherited` says what it calls. Each reference is classified from the tree: a call, or the routine handed on - `@Foo`, `OnClick := Foo`, a procedure passed as an argument - tagged `[not a call]` and not followed. A function named without parentheses is a call unless assigned to something procedural; as an argument it is taken for a call. `depth` 1-4 follows the routines the calls sit in, own files only (a library routine is shown, not followed), each site once; `limit` (150) caps the rows over all levels, and a level past it is not searched - the answer says so (a getter read 379 times, depth 3 and no cap: 34 s, 81k tokens). Tags: `via X` for a row bound to another source - dropped from the rows and said once above them when every first-level row shares it; `-> X` on a deeper row, the routine of the level above it reaches; overloads of one name told apart by declaration line. A routine searched and found uncalled is named at the end, and a published one (or in the unnamed first section of a `TPersistent` descendant) gets the note that a `.dfm` may bind it (9.5). A destructor points to `related destructions`. |
+| `callees` | the body's `RefMap`/`ExtRefMap`, `RefUse`, `PropertyRedeclPrev`, `GotoBareInherited`, `FindMemberX` over a class index (`AncestorOfX`, `ListedInterfaces`) built once per call | What a routine calls - `callers` from the other end. The body is walked from the tree - its block, its local declarations and anonymous methods, not its nested routines, which are callees of their own - and each name is taken for what it binds to: the overload the compiler chose (PasTree writes it into the maps), a property's getter or setter for a read or a write (a republished `property X;` takes its ancestor's), what a bare `inherited;` runs; a routine handed on (`OnClick := Foo`, `@Foo`) is `[not a call]`, classified as in `callers`. One row per routine reached, at its declaration line, grouped by file under its type, with the lines of its calls: `[at 19, 31]`. A virtual call made on an object - not on a type name, not `inherited X` - adds what that object may run: for its static class and every class below, the method the slot finds there, its own or the nearest ancestor's - so an override between the method's class and the object's is found (a property's accessor binds where the property is declared), not only those below. An interface call: the same over every class taking the interface on, listing it or one extending it. `[via X]` names what the call is written against. More than 10 such methods, merged over the analyses, are counted, not listed: a base class's hook called on Self has a dozen or two in a real group. Calls through a method pointer or a procedural variable are named - what they run is assigned at run time - and built-ins listed once. `depth` 1-4 follows the routines reached, own files and with a body, each once; a row below the first level names its caller, `[TFoo.Load at 40]`; `limit` (150) caps the rows over all levels. Not seen: a record's operators and implicit conversions, a for-in's enumerator, `X[I]` over a default array property, a method resolution clause (`procedure IFoo.Bar = Baz`). |
 | `related` | `TypeAt`+`FindDescendants`, `MethodAt`+`FindOverrides`, `InterfaceMethodAt`+`FindImplementations` / `InterfaceAt`+`FindInterfaceImplementors`, `AssignableAt`+`FindAssignments`, `ClassAt`+`FindCreations`/`FindDestructions` | The `...At` test runs at the declaration site - it normalizes (method to its declaration, alias to its type) and refuses what the relation cannot mean, which becomes an error naming what was needed. Rows are grouped by file like every answer; a descendant names its parent (`<- TParent`) below the first level, and a tagged row whose source line repeats the previous row's (an override chain is one signature) shows only its tag. An indented tree was tried first: it repeats a path per row and cost as much as grep on a 250-class hierarchy. |
 | `outline` | `PasModuleOutline` | Sections, uses, includes, types with members, routines with signatures, each with its line. `owner` and `section` filter; `members: false` keeps only types and bodies. |
 | `diagnostics` | model `Diags` | Own units by default. Each unit reports from ONE analysis - its owner (section 4) - so a unit analyzed under two configurations does not report twice. Over the limit, a per-file count comes first. |
@@ -337,7 +339,22 @@ are here so a new tool is not the one that breaks them.
    hiding another that is not a constructor, an interface method a
    resolution clause maps to a differently named method in another unit.
 
-   `callees` is next: the same classification from the other end.
+   `callees` - done in 0.7.0, section 3. No PasTree change: the maps the
+   completion engine's `CalleeSyms` reads are the model's own. Measured on the
+   client group (the callees questions of the layer 1 bench; the baseline
+   reads the body exactly, which resolves nothing, and `also` is the body's
+   `source` with `related overrides` for a virtual call - for depth 2 the
+   `source` of each routine called too): depth 1 costs about what the body
+   costs - a 32-line method 734 tokens against 653, a 301-line form handler
+   3.6k against 3.8k - with each call bound to its declaration and each
+   virtual or interface call to what it may run: the saving is the lookups
+   an agent does not make. Depth 2 saves calls, not always tokens: one call
+   where the sources of 13 routines took 15, at 5.5k tokens against 3.0k for
+   a method whose base-class hooks fan out; a getter chain three deep, 306
+   tokens against 3.2k in six calls. 0.2-0.4 s a call, most of it the class
+   index the first dispatch builds. The dispatch search counted classes
+   examined first and gave up past 100, which hid a two-override list under
+   a 250-class tree: it now examines up to 5,000 and caps the methods found.
 2. **Access kind on references.** Each row tagged `read`, `write`, `var`
    (passed to a `var`/`out` parameter), `addr` (`@X`) or `call`; `access`
    filters. "Who changes `FState`" is then one call; `related assignments`
@@ -461,7 +478,7 @@ gap between the answers and the truth.
 1. Enclosing routine on rows (done, 0.3.0), `source` (done, 0.4.0),
    `members` (done, 0.6.0) - cheap, every task uses them, and every library
    entry point they need is public.
-2. `callers` (done, 0.5.0), `callees`, then `impact`.
+2. `callers` (done, 0.5.0), `callees` (done, 0.7.0), then `impact`.
 3. `compile`.
 4. Forms (9.5) - the largest gap, and new library work.
 5. `rename_plan`, `change_plan`.

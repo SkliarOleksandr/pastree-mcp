@@ -2261,15 +2261,21 @@ begin
   end;
 end;
 
-// Is ANode a use that writes it - the target of an assignment? A property
-// reference that is not, reads it: a property cannot be passed to a `var`
-// parameter.
+// Is ANode a use that writes it - the target of an assignment, indexed or
+// not (`Items[I] := X` runs the setter)? A property reference that is not,
+// reads it: a property cannot be passed to a `var` parameter.
 function IsAssignTarget(LM: TPasSemaModel; ANode: Integer): Boolean;
 var
   LE, LP: Integer;
 begin
   LE := DesignatorOf(LM, ANode);
   LP := LM.Tree.Nodes[LE].Parent;
+  if (LP <> NIL_NODE) and (LM.Tree.Nodes[LP].Kind = nkIndex) and
+     (LM.Tree.Nodes[LP].FirstChild = LE) then
+  begin
+    LE := LP;
+    LP := LM.Tree.Nodes[LE].Parent;
+  end;
   Result := (LP <> NIL_NODE) and (LM.Tree.Nodes[LP].Kind = nkAssign) and
     (LM.Tree.Nodes[LP].FirstChild = LE);
 end;
@@ -3282,6 +3288,21 @@ begin
   Result := (Int64(AMid) shl 32) or Cardinal(ASym);
 end;
 
+// The analysis that reads a target the way diagnostics report it - the
+// owner of its declaring file - else the first holding it; nil for none.
+function ReportingAnalysis(AWs: TMcpWorkspace; const AT: TTarget): TMcpAnalysis;
+var
+  LOwner: Integer;
+begin
+  LOwner := AWs.OwnerAnalysis(AT.DeclFile);
+  if (LOwner >= 0) and (AT.Ids[LOwner].Mid >= 0) then
+    Exit(AWs.Analyses[LOwner]);
+  for var LA in AWs.Analyses do
+    if AT.Ids[LA.Index].Mid >= 0 then
+      Exit(LA);
+  Result := nil;
+end;
+
 function SameX(const AL, AR: TSemaXType): Boolean;
 begin
   Result := (AL.UnitId = AR.UnitId) and (AL.Sym = AR.Sym);
@@ -3476,8 +3497,8 @@ var
   LM, LDM: TPasSemaModel;
   LVisArg, LKind, LMatch, LMatchLower, LUnitFile, LHead, LHeading,
     LLastHeading, LIndent, LList: string;
-  LMid, LSym, LLimit, LOwner, LScope, LGroupIdx, LNotVisible, LShown,
-    LLastGroup, LPrevLine: Integer;
+  LMid, LSym, LLimit, LScope, LGroupIdx, LNotVisible, LShown, LLastGroup,
+    LPrevLine: Integer;
   LView: TMemberView;
   LStart, LOwnType, LDecl, LX, LNext: TSemaXType;
   LSites: TList<TMemberSite>;
@@ -3523,18 +3544,7 @@ begin
         [LT.Name, LT.Head]);
   end;
 
-  // The analysis the declaring file reports from, else the first holding it.
-  LA := nil;
-  LOwner := AWs.OwnerAnalysis(LT.DeclFile);
-  if (LOwner >= 0) and (LT.Ids[LOwner].Mid >= 0) then
-    LA := AWs.Analyses[LOwner]
-  else
-    for var LCand in AWs.Analyses do
-      if LT.Ids[LCand.Index].Mid >= 0 then
-      begin
-        LA := LCand;
-        Break;
-      end;
+  LA := ReportingAnalysis(AWs, LT);
   if LA = nil then
     raise EToolError.CreateFmt('%s is in no analysis', [LT.Name]);
   LMid := LT.Ids[LA.Index].Mid;
@@ -3826,6 +3836,1121 @@ begin
     LRows.Free;
     LGroups.Free;
     LSites.Free;
+  end;
+end;
+
+{ ---- callees -------------------------------------------------------------------- }
+
+const
+  // The implementations of one call listed at most: a call on a TPersistent
+  // may run any of hundreds of Assign overrides, and a list of them answers
+  // nothing - their count does. A base class's hook, called on Self, has a
+  // dozen or two overrides in a real group; a polymorphic call in its own
+  // code, a handful.
+  MAX_DISPATCH_ROWS = 10;
+  // Classes one dispatch search looks at, whatever it finds.
+  MAX_DISPATCH_CLASSES = 5000;
+
+type
+  // One call a routine of the walk makes to the routine of a row.
+  TCalleeUse = record
+    Caller: string;        // the routine of the walk it is in; '' the target
+    Line: Integer;         // in that routine's body
+    Via: string;           // what a dispatched call is written against
+    Call: Boolean;         // a call - not the routine handed on
+  end;
+
+  // A routine the calls of one level reach, at its declaration.
+  TCalleeRow = record
+    Hit: THit;             // the declaration: its file, line and text
+    T: TTarget;            // for the next level
+    Calls: TArray<TCalleeUse>;
+  end;
+
+// The implementation of routine (AMid, ASym): the declaration itself when it
+// has a body, else the routine around the first statement GotoImplementation
+// finds. False for none - abstract, an interface method, external.
+function RoutineImpl(AA: TMcpAnalysis; AMid, ASym: Integer; out AImplMid,
+  ARoutine: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LDm, LFileId: Integer;
+  LHit: TPasRefHit;
+  LNavT: TPasNavTarget;
+begin
+  Result := False;
+  AImplMid := -1;
+  ARoutine := NIL_NODE;
+  if not AA.Proj.EnsureHydrated(AMid) then
+    Exit;
+  LM := AA.Proj.Model(AMid);
+  if LM.Symbols[ASym].DeclNode = NIL_NODE then
+    Exit;
+  ARoutine := LM.Tree.DeclRootOf(LM.Symbols[ASym].DeclNode);
+  if (ARoutine = NIL_NODE) or (LM.Tree.Nodes[ARoutine].Kind <> nkRoutine) then
+    Exit;
+  if HasBody(LM, ARoutine) then
+  begin
+    AImplMid := AMid;
+    Exit(True);
+  end;
+  ARoutine := NIL_NODE;
+  if not AA.Nav.DeclHit(AMid, ASym, LHit) then
+    Exit;
+  LDm := AA.Nav.ModelIdOf(LHit.FilePath);
+  if LDm < 0 then
+    LDm := AMid;
+  if not AA.Nav.GotoImplementation(LDm, LHit.Line, LHit.Col, LNavT) or
+     not AA.Proj.EnsureHydrated(LNavT.UnitId) then
+    Exit;
+  LM := AA.Proj.Model(LNavT.UnitId);
+  LFileId := FileIdOf(LM, LNavT.FilePath);
+  if LFileId < 0 then
+    Exit;
+  ARoutine := RoutineNodeAt(LM, LFileId, LNavT.Line, LNavT.Col);
+  AImplMid := LNavT.UnitId;
+  Result := (ARoutine <> NIL_NODE) and HasBody(LM, ARoutine);
+end;
+
+// A routine's body: its local declarations and its begin-end block.
+function BodyNodeOf(LM: TPasSemaModel; ARoutine: Integer): Integer;
+begin
+  Result := LM.Tree.Nodes[ARoutine].FirstChild;
+  while (Result <> NIL_NODE) and (LM.Tree.Nodes[Result].Kind <> nkRoutineBody) do
+    Result := LM.Tree.Nodes[Result].NextSibling;
+end;
+
+// Is the call at ANode made on a type name - `TFoo.Create(...)`,
+// `TFoo.ClassMethod` - where the class, and so the implementation, is fixed?
+function CalledOnType(LM: TPasSemaModel; AMid, ANode: Integer;
+  AA: TMcpAnalysis): Boolean;
+var
+  LP, LBMid, LBSym: Integer;
+begin
+  LP := LM.Tree.Nodes[ANode].Parent;
+  Result := (LP <> NIL_NODE) and (LM.Tree.Nodes[LP].Kind = nkMember) and
+    (LM.Tree.Nodes[LP].FirstChild <> ANode) and AA.Proj.DesignatorSymX(AMid,
+    LM.Tree.Nodes[LP].FirstChild, LBMid, LBSym) and
+    (AA.Proj.Model(LBMid).Symbols[LBSym].Kind = skType);
+end;
+
+// The class of the object a call at ANode is made on: the static type of
+// `Obj` in `Obj.Foo`, Self's for a bare `Foo`. XNil when it is not a class,
+// or a `with` supplies the object.
+function ReceiverClassX(AA: TMcpAnalysis; LM: TPasSemaModel; AMid,
+  ANode: Integer): TSemaXType;
+var
+  LP, LK: Integer;
+begin
+  Result := XNil;
+  LP := LM.Tree.Nodes[ANode].Parent;
+  if (LP <> NIL_NODE) and (LM.Tree.Nodes[LP].Kind = nkMember) and
+     (LM.Tree.Nodes[LP].FirstChild <> ANode) then
+    Result := AA.Proj.WithTargetTypeX(AMid, LM.Tree.Nodes[LP].FirstChild)
+  else if not InWithBody(LM, ANode) then
+  begin
+    LK := AA.Proj.StructSymOfNode(LM, ANode);
+    if LK <> NIL_SYM then
+      Result := XPlain(AMid, LK);
+  end;
+  if XValid(Result) then
+    Result := AA.Proj.CanonTypeX(Result);
+  if not IsKindX(AA, Result, nkClassType) then
+    Result := XNil;
+end;
+
+// The method a property access runs: its getter for a read, its setter for a
+// write - through a republishing `property Items;` to the declaration that
+// names one. False for a field accessor, or none.
+function PropertyAccessor(AA: TMcpAnalysis; APMid, APSym: Integer;
+  AWrite: Boolean; out AMid, ASym: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LDecl, LChild, LPrevMid, LPrevSym: Integer;
+begin
+  Result := False;
+  AMid := -1;
+  ASym := NIL_SYM;
+  for var LDepth := 1 to 16 do
+  begin
+    if not AA.Proj.EnsureHydrated(APMid) then
+      Exit;
+    LM := AA.Proj.Model(APMid);
+    if LM.Symbols[APSym].DeclNode = NIL_NODE then
+      Exit;
+    LDecl := LM.Tree.Nodes[LM.Symbols[APSym].DeclNode].Parent;
+    if (LDecl = NIL_NODE) or (LM.Tree.Nodes[LDecl].Kind <> nkPropertyDecl) then
+      Exit;
+    LChild := LM.Tree.Nodes[LDecl].FirstChild;
+    while LChild <> NIL_NODE do
+    begin
+      if (LM.Tree.Nodes[LChild].Kind = nkPropSpec) and
+         LM.Tree.NodeTextEquals(LChild, IfThen(AWrite, 'write', 'read')) then
+        Exit(AA.Proj.DesignatorSymX(APMid, LM.Tree.Nodes[LChild].FirstChild,
+          AMid, ASym) and (AA.Proj.Model(AMid).Symbols[ASym].Kind =
+          skRoutine));
+      LChild := LM.Tree.Nodes[LChild].NextSibling;
+    end;
+    // No such specifier: a republished property takes its ancestor's.
+    if not AA.Proj.PropertyRedeclPrev(APMid, APSym, LPrevMid, LPrevSym) then
+      Exit;
+    APMid := LPrevMid;
+    APSym := LPrevSym;
+  end;
+end;
+
+function IsInterfaceMethodSym(AA: TMcpAnalysis; AMid, ASym: Integer): Boolean;
+var
+  LM: TPasSemaModel;
+  LScope: Integer;
+begin
+  LM := AA.Proj.Model(AMid);
+  LScope := LM.Symbols[ASym].Scope;
+  Result := (LScope <> NIL_SCOPE) and (LScope < LM.Scopes.Count) and
+    (LM.Scopes[LScope].Kind = sckStruct) and
+    (LM.Scopes[LScope].StructSym <> NIL_SYM) and
+    (LM.Symbols[LM.Scopes[LScope].StructSym].TypeCat = tcInterface);
+end;
+
+// A row's uses as its tag: 'at 19, 31', 'at 22 via TShape.Area',
+// 'TFoo.Load at 40; at 12, not a call'.
+function UsesTag(const AUses: TArray<TCalleeUse>): string;
+var
+  LSorted: TArray<TCalleeUse>;
+  LGroup: string;
+begin
+  LSorted := Copy(AUses);
+  TArray.Sort<TCalleeUse>(LSorted, TComparer<TCalleeUse>.Construct(
+    function(const L, R: TCalleeUse): Integer
+    begin
+      Result := CompareText(L.Caller, R.Caller);
+      if Result = 0 then
+        Result := CompareText(L.Via, R.Via);
+      if Result = 0 then
+        Result := Ord(R.Call) - Ord(L.Call);
+      if Result = 0 then
+        Result := L.Line - R.Line;
+    end));
+  Result := '';
+  LGroup := '';
+  for var LIdx := 0 to High(LSorted) do
+  begin
+    if (LIdx = 0) or (LSorted[LIdx].Caller <> LSorted[LIdx - 1].Caller) or
+       (LSorted[LIdx].Via <> LSorted[LIdx - 1].Via) or
+       (LSorted[LIdx].Call <> LSorted[LIdx - 1].Call) then
+      LGroup := IfThen(LSorted[LIdx].Caller <> '', LSorted[LIdx].Caller + ' ',
+        '') + 'at ' + IntToStr(LSorted[LIdx].Line)
+    else if LSorted[LIdx].Line <> LSorted[LIdx - 1].Line then
+      LGroup := LGroup + ', ' + IntToStr(LSorted[LIdx].Line);
+    if (LIdx = High(LSorted)) or
+       (LSorted[LIdx + 1].Caller <> LSorted[LIdx].Caller) or
+       (LSorted[LIdx + 1].Via <> LSorted[LIdx].Via) or
+       (LSorted[LIdx + 1].Call <> LSorted[LIdx].Call) then
+    begin
+      if LSorted[LIdx].Via <> '' then
+        LGroup := LGroup + ' via ' + LSorted[LIdx].Via;
+      if not LSorted[LIdx].Call then
+        LGroup := LGroup + ', not a call';
+      Result := IfThen(Result = '', LGroup, Result + '; ' + LGroup);
+    end;
+  end;
+end;
+
+procedure AddToIndex(AIndex: TObjectDictionary<string, TList<TSemaXType>>;
+  const AKey: string; const AX: TSemaXType);
+var
+  LList: TList<TSemaXType>;
+begin
+  if not AIndex.TryGetValue(AKey, LList) then
+  begin
+    LList := TList<TSemaXType>.Create;
+    AIndex.Add(AKey, LList);
+  end;
+  LList.Add(AX);
+end;
+
+type
+  { What one routine calls, level by level (SPEC 9.3.1) - `callers` from the
+    other end. A call is what a name in the body binds to - the overload the
+    compiler chose, a property's getter or setter - and what a bare
+    `inherited;` runs. Through a virtual method it may also run an override
+    in the class of the object it is made on, or below; through an interface,
+    a method implementing it. Each routine is walked in the analysis its
+    file reports from; a dispatch is searched in every analysis holding the
+    method, and rows merge by declaration site. }
+  TCalleeWalk = class
+  private
+    FWs: TMcpWorkspace;
+    FEnclosing: TEnclosing;
+    FNodes: TList<TCallNode>;
+    FNodeOf: TDictionary<string, Integer>;      // declaration site -> node
+    FRows: TList<TCalleeRow>;                   // the level being searched
+    FRowOf: TDictionary<string, Integer>;       // declaration site -> row
+    FTargets: TDictionary<string, TTarget>;     // analysis:model:symbol
+    // Per analysis, built the first time a dispatch asks: the classes below
+    // each class, and the classes taking each interface on.
+    FChildren: TObjectDictionary<string, TList<TSemaXType>>;
+    FImplementors: TObjectDictionary<string, TList<TSemaXType>>;
+    FIndexed: TDictionary<Integer, Boolean>;
+    FDispatchable: TDictionary<string, Boolean>;
+    FBuiltins: TStringList;
+    FValueCalls: TStringList;                   // through a procedural value
+    FCompiled: TStringList;
+    FNotes: TStringList;
+    function XKey(AA: TMcpAnalysis; const AX: TSemaXType): string;
+    procedure BuildIndex(AA: TMcpAnalysis);
+    function TargetOf(AA: TMcpAnalysis; AMid, ASym: Integer): TTarget;
+    function HasImpl(const AT: TTarget): Boolean;
+    function IsDispatchable(AA: TMcpAnalysis; AMid, ASym: Integer): Boolean;
+    function DeclaresImpl(AA: TMcpAnalysis; const AClass: TSemaXType;
+      const AName, AParams: string; AArity: Integer; out AId: TSymId): Boolean;
+    function ImplOf(AA: TMcpAnalysis; AClass: TSemaXType;
+      const AStop: TSemaXType; const AName, AParams: string; AArity: Integer;
+      out AId: TSymId): Boolean;
+    procedure AddDispatchTargets(AA: TMcpAnalysis; AMid, ASym: Integer;
+      AIface: Boolean; const ABase: TSemaXType; AList: TList<TSymId>);
+    procedure AddUse(AA: TMcpAnalysis; AMid, ASym: Integer;
+      const AUse: TCalleeUse);
+    procedure AddDispatched(AA: TMcpAnalysis; AMid, ASym: Integer;
+      AReceiver: TSemaXType; const AUse: TCalleeUse);
+    function Walk(const ANode: TCallNode): Integer;
+  public
+    constructor Create(AWs: TMcpWorkspace);
+    destructor Destroy; override;
+    function Answer(const ATarget: TTarget; ADepth, ALimit: Integer): string;
+  end;
+
+constructor TCalleeWalk.Create(AWs: TMcpWorkspace);
+begin
+  inherited Create;
+  FWs := AWs;
+  FEnclosing := TEnclosing.Create(AWs);
+  FNodes := TList<TCallNode>.Create;
+  FNodeOf := TDictionary<string, Integer>.Create;
+  FRows := TList<TCalleeRow>.Create;
+  FRowOf := TDictionary<string, Integer>.Create;
+  FTargets := TDictionary<string, TTarget>.Create;
+  FChildren := TObjectDictionary<string, TList<TSemaXType>>.Create(
+    [doOwnsValues]);
+  FImplementors := TObjectDictionary<string, TList<TSemaXType>>.Create(
+    [doOwnsValues]);
+  FIndexed := TDictionary<Integer, Boolean>.Create;
+  FDispatchable := TDictionary<string, Boolean>.Create;
+  FBuiltins := TStringList.Create;
+  FValueCalls := TStringList.Create;
+  FCompiled := TStringList.Create;
+  FNotes := TStringList.Create;
+end;
+
+destructor TCalleeWalk.Destroy;
+begin
+  FNotes.Free;
+  FCompiled.Free;
+  FValueCalls.Free;
+  FBuiltins.Free;
+  FDispatchable.Free;
+  FIndexed.Free;
+  FImplementors.Free;
+  FChildren.Free;
+  FTargets.Free;
+  FRowOf.Free;
+  FRows.Free;
+  FNodeOf.Free;
+  FNodes.Free;
+  FEnclosing.Free;
+  inherited;
+end;
+
+function TCalleeWalk.XKey(AA: TMcpAnalysis; const AX: TSemaXType): string;
+begin
+  Result := Format('%d:%d:%d', [AA.Index, AX.UnitId, AX.Sym]);
+end;
+
+// Every class of the analysis under its parent, and under each interface it
+// takes on (ListedInterfaces: its own list and what those extend) - one pass
+// over the symbol tables. The navigator's searches rehydrate every model
+// holding a row; this reads what survives demotion.
+procedure TCalleeWalk.BuildIndex(AA: TMcpAnalysis);
+var
+  LM: TPasSemaModel;
+  LX, LP: TSemaXType;
+begin
+  if FIndexed.ContainsKey(AA.Index) then
+    Exit;
+  FIndexed.Add(AA.Index, True);
+  for var LMid := 0 to AA.Proj.ModelCount - 1 do
+  begin
+    LM := AA.Proj.Model(LMid);
+    for var LSym := 0 to LM.SymCount - 1 do
+    begin
+      if (LM.Symbols[LSym].Kind <> skType) or
+         (LM.Symbols[LSym].TypeCat <> tcClass) or
+         (sfForward in LM.Symbols[LSym].Flags) then
+        Continue;
+      LX := XPlain(LMid, LSym);
+      if not IsKindX(AA, LX, nkClassType) then
+        Continue;   // an alias, a class reference
+      LP := AA.Proj.CanonTypeX(AA.Proj.AncestorOfX(LX));
+      if XValid(LP) and not SameX(LP, LX) then
+        AddToIndex(FChildren, XKey(AA, LP), LX);
+      for var LI in ListedInterfaces(AA, LX) do
+        AddToIndex(FImplementors, XKey(AA, LI), LX);
+    end;
+  end;
+end;
+
+// (AMid, ASym) as a target: its declaration site, and - for one of the
+// group's own files, the only ones followed - its identity in every analysis.
+// Mapping a library routine would rehydrate its unit once per analysis.
+// DeclFile '' when it has no declaration.
+function TCalleeWalk.TargetOf(AA: TMcpAnalysis; AMid, ASym: Integer): TTarget;
+var
+  LKey: string;
+begin
+  LKey := Format('%d:%d:%d', [AA.Index, AMid, ASym]);
+  if FTargets.TryGetValue(LKey, Result) then
+    Exit;
+  Result := Default(TTarget);
+  Result.Ids := NewIds(FWs);
+  if not FillSymbolTarget(FWs, AA, AMid, ASym, Result) then
+    Result.DeclFile := ''
+  else if Result.Own then
+    MapToOthers(FWs, Result);
+  FTargets.Add(LKey, Result);
+end;
+
+function TCalleeWalk.HasImpl(const AT: TTarget): Boolean;
+var
+  LA: TMcpAnalysis;
+  LIMid, LRoutine: Integer;
+begin
+  LA := ReportingAnalysis(FWs, AT);
+  Result := (LA <> nil) and (AT.Ids[LA.Index].Sym >= 0) and RoutineImpl(LA,
+    AT.Ids[LA.Index].Mid, AT.Ids[LA.Index].Sym, LIMid, LRoutine);
+end;
+
+// Can a call of (AMid, ASym) run another implementation - is it virtual,
+// dynamic, an override or a message method?
+function TCalleeWalk.IsDispatchable(AA: TMcpAnalysis; AMid,
+  ASym: Integer): Boolean;
+var
+  LKey: string;
+  LM: TPasSemaModel;
+  LNode: Integer;
+begin
+  LKey := Format('%d:%d:%d', [AA.Index, AMid, ASym]);
+  if FDispatchable.TryGetValue(LKey, Result) then
+    Exit;
+  Result := False;
+  if AA.Proj.EnsureHydrated(AMid) then
+  begin
+    LM := AA.Proj.Model(AMid);
+    LNode := LM.Symbols[ASym].DeclNode;
+    while (LNode <> NIL_NODE) and (LM.Tree.Nodes[LNode].Kind <> nkRoutine) do
+      LNode := LM.Tree.Nodes[LNode].Parent;
+    Result := (LNode <> NIL_NODE) and (HasDirective(LM, LNode, 'virtual') or
+      HasDirective(LM, LNode, 'dynamic') or HasDirective(LM, LNode,
+      'override') or HasDirective(LM, LNode, 'abstract') or
+      HasDirective(LM, LNode, 'message'));
+  end;
+  FDispatchable.Add(LKey, Result);
+end;
+
+{ Does class AClass itself declare the implementation of a slot - the
+  routine named AName with parameter types AParams? Or, the only one of the
+  name, with as many parameters and saying `override`: a generic ancestor's
+  types read differently from the descendant's (`Foo(A: T)` and
+  `Foo(A: Integer)`). }
+function TCalleeWalk.DeclaresImpl(AA: TMcpAnalysis; const AClass: TSemaXType;
+  const AName, AParams: string; AArity: Integer; out AId: TSymId): Boolean;
+var
+  LM: TPasSemaModel;
+  LSym, LCount, LNode: Integer;
+  LOnly: TSymId;
+begin
+  Result := False;
+  AId.Mid := -1;
+  AId.Sym := -1;
+  LOnly := AId;
+  LM := AA.Proj.Model(AClass.UnitId);
+  if LM.Symbols[AClass.Sym].MemberScope = NIL_SCOPE then
+    Exit;
+  LCount := 0;
+  LSym := LM.FindLocal(LM.Symbols[AClass.Sym].MemberScope, AName);
+  while LSym <> NIL_SYM do
+  begin
+    if LM.Symbols[LSym].Kind = skRoutine then
+    begin
+      AId.Mid := AClass.UnitId;
+      AId.Sym := LSym;
+      if ParamTypesKey(AA, AClass.UnitId, LSym) = AParams then
+        Exit(True);
+      Inc(LCount);
+      LOnly := AId;
+    end;
+    LSym := LM.Symbols[LSym].NextOverload;
+  end;
+  AId.Mid := -1;
+  AId.Sym := -1;
+  if (LCount <> 1) or (Length(AA.Proj.XParamSyms(LOnly.Mid, LOnly.Sym)) <>
+     AArity) or not AA.Proj.EnsureHydrated(LOnly.Mid) then
+    Exit;
+  LM := AA.Proj.Model(LOnly.Mid);
+  LNode := LM.Symbols[LOnly.Sym].DeclNode;
+  while (LNode <> NIL_NODE) and (LM.Tree.Nodes[LNode].Kind <> nkRoutine) do
+    LNode := LM.Tree.Nodes[LNode].Parent;
+  Result := (LNode <> NIL_NODE) and HasDirective(LM, LNode, 'override');
+  if Result then
+    AId := LOnly;
+end;
+
+// The implementation an object of exactly class AClass runs for the slot:
+// its own, or the nearest ancestor's below AStop - the class of the method
+// the call binds to, which runs when none is found.
+function TCalleeWalk.ImplOf(AA: TMcpAnalysis; AClass: TSemaXType;
+  const AStop: TSemaXType; const AName, AParams: string; AArity: Integer;
+  out AId: TSymId): Boolean;
+begin
+  for var LDepth := 1 to 64 do
+  begin
+    if not XValid(AClass) or (XValid(AStop) and SameX(AClass, AStop)) then
+      Break;
+    if DeclaresImpl(AA, AClass, AName, AParams, AArity, AId) then
+      Exit(True);
+    AClass := AA.Proj.CanonTypeX(AA.Proj.AncestorOfX(AClass));
+  end;
+  AId.Mid := -1;
+  AId.Sym := -1;
+  Result := False;
+end;
+
+type
+  // A class of a dispatch search, and the implementation its objects run.
+  TDispatchItem = record
+    Cls: TSemaXType;
+    Impl: TSymId;          // Mid -1: the method the call binds to
+  end;
+
+{ The other methods a call of (AMid, ASym) may run, into AList. For a virtual
+  method: what an object of class ABase, or of a class below it, runs for
+  the slot - an override between the method's class and ABase included, as
+  a property's accessor binds where the property is declared. For an
+  interface method: what each class taking the interface on - listing it or
+  one extending it - and each class below that runs for it. Down the class
+  tree once: a class not declaring the slot runs its parent's. Matched by
+  name and parameter types, as dcc pairs them; a method resolution clause
+  (`procedure IFoo.Bar = Baz`) is not read. }
+procedure TCalleeWalk.AddDispatchTargets(AA: TMcpAnalysis; AMid,
+  ASym: Integer; AIface: Boolean; const ABase: TSemaXType;
+  AList: TList<TSymId>);
+var
+  LM: TPasSemaModel;
+  LName, LParams, LKey: string;
+  LArity, LHead: Integer;
+  LStop: TSemaXType;
+  LRoots: TList<TSemaXType>;
+  LKids: TList<TSemaXType>;
+  LQueue: TList<TDispatchItem>;
+  LSeen, LFound: TDictionary<string, Boolean>;
+  LItem, LNew: TDispatchItem;
+begin
+  BuildIndex(AA);
+  LM := AA.Proj.Model(AMid);
+  LName := LM.Symbols[ASym].NameLower;
+  LParams := ParamTypesKey(AA, AMid, ASym);
+  LArity := Length(AA.Proj.XParamSyms(AMid, ASym));
+  LRoots := TList<TSemaXType>.Create;
+  LQueue := TList<TDispatchItem>.Create;
+  LSeen := TDictionary<string, Boolean>.Create;
+  LFound := TDictionary<string, Boolean>.Create;
+  try
+    LStop := XNil;
+    if AIface then
+    begin
+      if FImplementors.TryGetValue(XKey(AA, XPlain(AMid,
+         LM.Scopes[LM.Symbols[ASym].Scope].StructSym)), LKids) then
+        LRoots.AddRange(LKids);
+    end
+    else
+    begin
+      LStop := OwnerClassX(AA, AMid, ASym);
+      LRoots.Add(ABase);
+    end;
+    for var LC in LRoots do
+    begin
+      LKey := XKey(AA, LC);
+      if LSeen.ContainsKey(LKey) then
+        Continue;
+      LSeen.Add(LKey, True);
+      LNew.Cls := LC;
+      ImplOf(AA, LC, LStop, LName, LParams, LArity, LNew.Impl);
+      LQueue.Add(LNew);
+    end;
+    LHead := 0;
+    while (LHead < LQueue.Count) and (LHead < MAX_DISPATCH_CLASSES) do
+    begin
+      LItem := LQueue[LHead];
+      Inc(LHead);
+      if (LItem.Impl.Mid >= 0) and ((LItem.Impl.Mid <> AMid) or
+         (LItem.Impl.Sym <> ASym)) then
+      begin
+        LKey := Format('%d:%d', [LItem.Impl.Mid, LItem.Impl.Sym]);
+        if not LFound.ContainsKey(LKey) then
+        begin
+          LFound.Add(LKey, True);
+          AList.Add(LItem.Impl);
+        end;
+      end;
+      if FChildren.TryGetValue(XKey(AA, LItem.Cls), LKids) then
+        for var LK in LKids do
+        begin
+          LKey := XKey(AA, LK);
+          if LSeen.ContainsKey(LKey) then
+            Continue;
+          LSeen.Add(LKey, True);
+          LNew.Cls := LK;
+          if not DeclaresImpl(AA, LK, LName, LParams, LArity, LNew.Impl) then
+            LNew.Impl := LItem.Impl;
+          LQueue.Add(LNew);
+        end;
+    end;
+  finally
+    LFound.Free;
+    LSeen.Free;
+    LQueue.Free;
+    LRoots.Free;
+  end;
+end;
+
+procedure TCalleeWalk.AddUse(AA: TMcpAnalysis; AMid, ASym: Integer;
+  const AUse: TCalleeUse);
+var
+  LT: TTarget;
+  LKey: string;
+  LIdx: Integer;
+  LRow: TCalleeRow;
+begin
+  LT := TargetOf(AA, AMid, ASym);
+  if LT.DeclFile = '' then
+    Exit;
+  // PasTree reads a unit with no source from its .dcu: a name, no line.
+  if SameText(TPath.GetExtension(LT.DeclFile), '.dcu') then
+  begin
+    if FCompiled.IndexOf(LT.Name) < 0 then
+      FCompiled.Add(LT.Name);
+    Exit;
+  end;
+  LKey := SiteKey(LT.DeclFile, LT.DeclLine, LT.DeclCol);
+  if not FRowOf.TryGetValue(LKey, LIdx) then
+  begin
+    LRow := Default(TCalleeRow);
+    LRow.T := LT;
+    LRow.Hit.FilePath := LT.DeclFile;
+    LRow.Hit.Line := LT.DeclLine;
+    LRow.Hit.Col := LT.DeclCol;
+    LRow.Hit.Snippet := LT.Snippet;
+    LRow.Hit.Own := LT.Own;
+    LIdx := FRows.Count;
+    FRows.Add(LRow);
+    FRowOf.Add(LKey, LIdx);
+  end;
+  LRow := FRows[LIdx];
+  for var LU in LRow.Calls do
+    if (LU.Caller = AUse.Caller) and (LU.Line = AUse.Line) and
+       (LU.Via = AUse.Via) and (LU.Call = AUse.Call) then
+      Exit;
+  LRow.Calls := LRow.Calls + [AUse];
+  FRows[LIdx] := LRow;
+end;
+
+// What else a call of (AMid, ASym), on an object of class AReceiver, may run:
+// overrides for a virtual method, implementations for an interface method.
+procedure TCalleeWalk.AddDispatched(AA: TMcpAnalysis; AMid, ASym: Integer;
+  AReceiver: TSemaXType; const AUse: TCalleeUse);
+var
+  LT, LBaseT: TTarget;
+  LUse: TCalleeUse;
+  LList, LIds: TList<TSymId>;
+  LOf: TList<TMcpAnalysis>;
+  LKeys: TDictionary<string, Boolean>;
+  LIface: Boolean;
+  LBase: TSemaXType;
+  LMid, LSym: Integer;
+  LNote, LKey: string;
+begin
+  LIface := IsInterfaceMethodSym(AA, AMid, ASym);
+  if not LIface and not IsDispatchable(AA, AMid, ASym) then
+    Exit;
+  LT := TargetOf(AA, AMid, ASym);
+  if LT.DeclFile = '' then
+    Exit;
+  // A receiver the method is not a member of is none the walk can use.
+  if XValid(AReceiver) and not AA.Proj.XDescendsFrom(AReceiver,
+     OwnerClassX(AA, AMid, ASym)) then
+    AReceiver := XNil;
+  LBaseT := Default(TTarget);
+  if XValid(AReceiver) then
+    LBaseT := TargetOf(AA, AReceiver.UnitId, AReceiver.Sym);
+  LUse := AUse;
+  LUse.Via := LT.Name;
+  LList := TList<TSymId>.Create;
+  LIds := TList<TSymId>.Create;
+  LOf := TList<TMcpAnalysis>.Create;
+  LKeys := TDictionary<string, Boolean>.Create;
+  try
+    // Every analysis' methods, merged before they are counted: a group has
+    // classes one analysis holds and another does not. By model file and
+    // declaration node, which needs no text - positions come for the rows
+    // listed only.
+    for var LA in FWs.Analyses do
+    begin
+      LMid := LT.Ids[LA.Index].Mid;
+      LSym := LT.Ids[LA.Index].Sym;
+      if (LMid < 0) or (LSym < 0) then
+        Continue;
+      LList.Clear;
+      if LIface then
+        AddDispatchTargets(LA, LMid, LSym, True, XNil, LList)
+      else
+      begin
+        LBase := XNil;
+        if (LBaseT.DeclFile <> '') and (LBaseT.Ids[LA.Index].Sym >= 0) then
+          LBase := XPlain(LBaseT.Ids[LA.Index].Mid, LBaseT.Ids[LA.Index].Sym);
+        if not XValid(LBase) then
+          LBase := OwnerClassX(LA, LMid, LSym);
+        if XValid(LBase) then
+          AddDispatchTargets(LA, LMid, LSym, False, LBase, LList);
+      end;
+      for var LId in LList do
+      begin
+        LKey := LowerCase(LA.Proj.ModelFile(LId.Mid)) + '|' + IntToStr(
+          LA.Proj.Model(LId.Mid).Symbols[LId.Sym].DeclNode);
+        if LA.Proj.Model(LId.Mid).Symbols[LId.Sym].DeclNode = NIL_NODE then
+          LKey := LKey + '|' + IntToStr(LId.Sym);   // a compiled unit's
+        if LKeys.ContainsKey(LKey) then
+          Continue;
+        LKeys.Add(LKey, True);
+        LIds.Add(LId);
+        LOf.Add(LA);
+      end;
+    end;
+    if LIds.Count > MAX_DISPATCH_ROWS then
+    begin
+      LNote := Format('%s: %d other methods may run for it - not listed; '
+        + '`related %s` lists them', [LT.Name, LIds.Count, IfThen(LIface,
+        'implementations', 'overrides')]);
+      if FNotes.IndexOf(LNote) < 0 then
+        FNotes.Add(LNote);
+      Exit;
+    end;
+    for var LIdx := 0 to LIds.Count - 1 do
+      AddUse(LOf[LIdx], LIds[LIdx].Mid, LIds[LIdx].Sym, LUse);
+  finally
+    LKeys.Free;
+    LOf.Free;
+    LIds.Free;
+    LList.Free;
+  end;
+end;
+
+// The calls in one routine's body - its nested routines are routines of
+// their own - as uses of the level's rows. The count of calls; -1 when it
+// has no body.
+function TCalleeWalk.Walk(const ANode: TCallNode): Integer;
+var
+  LA: TMcpAnalysis;
+  LIM, LBM: TPasSemaModel;
+  LRMid, LRSym, LIMid, LRoutine, LBody, LBlock, LN, LChild, LBMid, LBSym,
+    LFileId, LLine, LCol, LAMid, LASym, LE, LP, LTMid: Integer;
+  LStack: TStack<Integer>;
+  LExt: TPasExtRef;
+  LUse: TCalleeUse;
+  LRef: TRefUse;
+  LX: TSemaXType;
+  LTo: TPasNavTarget;
+  LName: string;
+begin
+  Result := -1;
+  LA := ReportingAnalysis(FWs, ANode.T);
+  if LA = nil then
+    Exit;
+  LRMid := ANode.T.Ids[LA.Index].Mid;
+  LRSym := ANode.T.Ids[LA.Index].Sym;
+  if (LRSym < 0) or not RoutineImpl(LA, LRMid, LRSym, LIMid, LRoutine) then
+    Exit;
+  LIM := LA.Proj.Model(LIMid);
+  LBody := BodyNodeOf(LIM, LRoutine);
+  if LBody = NIL_NODE then
+    Exit;
+  Result := 0;
+  LUse := Default(TCalleeUse);
+  if ANode.Level > 0 then
+    LUse.Caller := ANode.Name;
+  LStack := TStack<Integer>.Create;
+  try
+    LStack.Push(LBody);
+    while LStack.Count > 0 do
+    begin
+      LN := LStack.Pop;
+      if (LN <> LBody) and (LIM.Tree.Nodes[LN].Kind = nkRoutine) then
+        Continue;
+      LChild := LIM.Tree.Nodes[LN].FirstChild;
+      while LChild <> NIL_NODE do
+      begin
+        LStack.Push(LChild);
+        LChild := LIM.Tree.Nodes[LChild].NextSibling;
+      end;
+      if LIM.Tree.Nodes[LN].Kind <> nkIdent then
+        Continue;
+      if (LN < Length(LIM.RefMap)) and (LIM.RefMap[LN] <> NIL_SYM) then
+      begin
+        LBMid := LIMid;
+        LBSym := LIM.RefMap[LN];
+      end
+      else if LIM.ExtRefMap.TryGetValue(LN, LExt) then
+      begin
+        LBMid := LExt.UnitId;
+        LBSym := LExt.Sym;
+      end
+      else
+        Continue;
+      if (LBMid < 0) or (LBSym < 0) or not VisPos(LIM,
+         LIM.Tree.NodeLeftmostVis(LN), LFileId, LLine, LCol) then
+        Continue;
+      LBM := LA.Proj.Model(LBMid);
+      LUse.Line := LLine;
+      LUse.Via := '';
+      LUse.Call := True;
+      case LBM.Symbols[LBSym].Kind of
+        skRoutine:
+          begin
+            if sfBuiltin in LBM.Symbols[LBSym].Flags then
+            begin
+              LName := LBM.Symbols[LBSym].Name;
+              if not MatchText(LName, ['Exit', 'Break', 'Continue']) and
+                 (FBuiltins.IndexOf(LName) < 0) then
+                FBuiltins.Add(LName);
+              Continue;
+            end;
+            LRef := RefUse(LA, LIM, LIMid, LN, LBM.RoutineHead(LBSym) in
+              [rhFunction, rhConstructor]);
+            if LRef = ruNone then
+              Continue;
+            LUse.Call := LRef <> ruValue;
+            if LUse.Call then
+              Inc(Result);
+            AddUse(LA, LBMid, LBSym, LUse);
+            // `inherited Foo` is a static call of that implementation, and
+            // so is one made on a type name.
+            if LUse.Call and not UnderInherited(LIM, LN) and
+               not CalledOnType(LIM, LIMid, LN, LA) then
+              AddDispatched(LA, LBMid, LBSym, ReceiverClassX(LA, LIM, LIMid,
+                LN), LUse);
+            Continue;
+          end;
+        skProperty:
+          if PropertyAccessor(LA, LBMid, LBSym, IsAssignTarget(LIM, LN),
+             LAMid, LASym) then
+          begin
+            Inc(Result);
+            LUse.Via := QualifiedName(LBM, LBSym);
+            AddUse(LA, LAMid, LASym, LUse);
+            AddDispatched(LA, LAMid, LASym, ReceiverClassX(LA, LIM, LIMid,
+              LN), LUse);
+          end;
+        skField, skVar, skParam, skConst:
+          ;
+      else
+        Continue;
+      end;
+      // A method pointer or a procedural variable called: what it runs is
+      // assigned at run time.
+      LE := DesignatorOf(LIM, LN);
+      LP := LIM.Tree.Nodes[LE].Parent;
+      if (LP <> NIL_NODE) and (LIM.Tree.Nodes[LP].Kind = nkCall) and
+         (LIM.Tree.Nodes[LP].FirstChild = LE) then
+      begin
+        LX := LA.Proj.DeclTypeX(LBMid, LBSym);
+        if not XValid(LX) then
+          LX := LA.Proj.SymDeclTypeX(LBMid, LBSym);
+        if XValid(LX) then
+          LX := LA.Proj.CanonTypeX(LX);
+        if XValid(LX) and (LA.Proj.Model(LX.UnitId).Symbols[LX.Sym].TypeCat =
+           tcProc) then
+        begin
+          Inc(Result);
+          LName := Format('%s (%sat %d)', [LBM.Symbols[LBSym].Name,
+            IfThen(LUse.Caller <> '', LUse.Caller + ' ', ''), LLine]);
+          if FValueCalls.IndexOf(LName) < 0 then
+            FValueCalls.Add(LName);
+        end;
+      end;
+    end;
+
+    // A bare `inherited;` names nothing: GotoBareInherited says what it runs
+    // - statically, as every inherited call.
+    LBlock := NIL_NODE;
+    LChild := LIM.Tree.Nodes[LBody].FirstChild;
+    while LChild <> NIL_NODE do
+    begin
+      if LIM.Tree.Nodes[LChild].Kind = nkBlock then
+        LBlock := LChild;
+      LChild := LIM.Tree.Nodes[LChild].NextSibling;
+    end;
+    if LBlock <> NIL_NODE then
+      for var LVis := LIM.Tree.NodeLeftmostVis(LBlock) to
+          LIM.Tree.Nodes[LBlock].LastToken - 1 do
+        if (LIM.Tree.Source.VisibleToken(LVis).Kind = tkInherited) and
+           (LIM.Tree.Source.VisibleToken(LVis + 1).Kind <> tkIdentifier) and
+           VisPos(LIM, LVis, LFileId, LLine, LCol) and (LFileId = 0) and
+           LA.Nav.GotoBareInherited(LIMid, LLine, LCol, LTo) then
+        begin
+          LTMid := LA.Nav.ModelIdOf(LTo.FilePath);
+          if (LTMid < 0) or not LA.Proj.EnsureHydrated(LTMid) or
+             not LA.Nav.SymbolAt(LTMid, LTo.Line, LTo.Col, LAMid, LASym,
+             LName) then
+            Continue;
+          Inc(Result);
+          LUse.Line := LLine;
+          LUse.Via := '';
+          LUse.Call := True;
+          AddUse(LA, LAMid, LASym, LUse);
+        end;
+  finally
+    LStack.Free;
+  end;
+end;
+
+function TCalleeWalk.Answer(const ATarget: TTarget; ADepth,
+  ALimit: Integer): string;
+var
+  LSb, LLevels: TStringBuilder;
+  LNode: TCallNode;
+  LFrontier, LNext: TList<Integer>;
+  LRows: TArray<TCalleeRow>;
+  LHits: TArray<THit>;
+  LShown, LLibrary, LLevel, LCutAt, LFound, LCalls, LFirstCalls, LIMid,
+    LRoutine, LFileId, LFrom, LAt, LTo: Integer;
+  LSum, LKey, LWhere: string;
+  LLeaves: TStringList;
+  LA: TMcpAnalysis;
+begin
+  LSb := TStringBuilder.Create;
+  LLevels := TStringBuilder.Create;
+  LFrontier := TList<Integer>.Create;
+  LNext := TList<Integer>.Create;
+  LLeaves := TStringList.Create;
+  try
+    LNode.T := ATarget;
+    LNode.Name := ATarget.Name;
+    LNode.Level := 0;
+    LNode.Found := -1;
+    FNodes.Add(LNode);
+    FNodeOf.Add(SiteKey(ATarget.DeclFile, ATarget.DeclLine, ATarget.DeclCol), 0);
+    LFrontier.Add(0);
+    LShown := 0;
+    LLibrary := 0;
+    LCutAt := 0;
+    LFirstCalls := 0;
+    LSum := '';
+    for LLevel := 1 to ADepth do
+    begin
+      FRows.Clear;
+      FRowOf.Clear;
+      LCalls := 0;
+      for var LIdx in LFrontier do
+      begin
+        LFound := Walk(FNodes[LIdx]);
+        LNode := FNodes[LIdx];
+        LNode.Found := LFound;
+        FNodes[LIdx] := LNode;
+        if LFound > 0 then
+          Inc(LCalls, LFound);
+      end;
+      LRows := FRows.ToArray;
+      TArray.Sort<TCalleeRow>(LRows, TComparer<TCalleeRow>.Construct(
+        function(const L, R: TCalleeRow): Integer
+        begin
+          Result := Ord(R.Hit.Own) - Ord(L.Hit.Own);
+          if Result = 0 then
+            Result := CompareText(L.Hit.FilePath, R.Hit.FilePath);
+          if Result = 0 then
+            Result := L.Hit.Line - R.Hit.Line;
+          if Result = 0 then
+            Result := L.Hit.Col - R.Hit.Col;
+        end));
+      if LLevel = 1 then
+      begin
+        LFirstCalls := LCalls;
+        LSum := Plural(LCalls, 'call') + ' reaching ' + Plural(Length(LRows),
+          'routine');
+      end
+      else if LCalls = 0 then
+        LSum := LSum + Format('; depth %d: none', [LLevel])
+      else
+        LSum := LSum + Format('; depth %d: %s reaching %d', [LLevel,
+          Plural(LCalls, 'call'), Length(LRows)]);
+      if LLevel > 1 then
+        LLevels.AppendLine(Format('depth %d - what those call:', [LLevel]));
+      SetLength(LHits, Length(LRows));
+      for var LI := 0 to High(LRows) do
+      begin
+        LHits[LI] := LRows[LI].Hit;
+        LHits[LI].Tag := UsesTag(LRows[LI].Calls);
+      end;
+      if (Length(LHits) = 0) and (LLevel > 1) then
+        LLevels.AppendLine('  none');
+      AppendHitsByFile(FWs, LLevels, LHits, Max(ALimit - LShown, 0), False,
+        FEnclosing);
+      Inc(LShown, Min(Length(LHits), Max(ALimit - LShown, 0)));
+      // The next level: what the calls reach of the group's own files, with
+      // a body - a library routine is shown, not followed.
+      LNext.Clear;
+      for var LR in LRows do
+      begin
+        LKey := SiteKey(LR.T.DeclFile, LR.T.DeclLine, LR.T.DeclCol);
+        if FNodeOf.ContainsKey(LKey) then
+          Continue;
+        var LCalled := False;
+        for var LU in LR.Calls do
+          LCalled := LCalled or LU.Call;
+        if not LCalled then
+          Continue;
+        if not LR.T.Own then
+        begin
+          FNodeOf.Add(LKey, -1);
+          if LLevel < ADepth then
+            Inc(LLibrary);
+          Continue;
+        end;
+        if not HasImpl(LR.T) then
+        begin
+          FNodeOf.Add(LKey, -1);
+          Continue;
+        end;
+        LNode.T := LR.T;
+        LNode.Name := FEnclosing.NameAt(LR.T.DeclFile, LR.T.DeclLine,
+          LR.T.DeclCol, False);
+        if LNode.Name = '' then
+          LNode.Name := LR.T.Name;
+        for var LOther in FNodes do
+          if SameText(LOther.Name, LNode.Name) then
+          begin
+            LNode.Name := Format('%s (line %d)', [LNode.Name, LR.T.DeclLine]);
+            Break;
+          end;
+        LNode.Level := LLevel;
+        LNode.Found := -1;
+        FNodes.Add(LNode);
+        FNodeOf.Add(LKey, FNodes.Count - 1);
+        LNext.Add(FNodes.Count - 1);
+      end;
+      LFrontier.Clear;
+      LFrontier.AddRange(LNext);
+      if (LFrontier.Count > 0) and (LShown >= ALimit) and (LLevel < ADepth) then
+        LCutAt := LLevel + 1;
+      if (LFrontier.Count = 0) or (LShown >= ALimit) then
+        Break;
+    end;
+
+    // Where the lines of the first level are: the body, not the declaration.
+    LWhere := Format('%s:%d', [FWs.RelPath(ATarget.DeclFile),
+      ATarget.DeclLine]);
+    LA := ReportingAnalysis(FWs, ATarget);
+    if (LA <> nil) and RoutineImpl(LA, ATarget.Ids[LA.Index].Mid,
+       ATarget.Ids[LA.Index].Sym, LIMid, LRoutine) and
+       DeclLines(LA.Proj.Model(LIMid), LRoutine, LFileId, LFrom, LAt, LTo) then
+      LWhere := Format('%s:%d-%d', [FWs.RelPath(LA.Proj.Model(LIMid).Tree.
+        Source.FileNames[LFileId]), LAt, LTo]);
+    LSb.Append(Format('callees of %s (%s)', [ATarget.Name, LWhere]));
+    if (LFirstCalls = 0) and (FRows.Count = 0) and (LShown = 0) then
+      LSb.AppendLine(' - none found')
+    else
+      LSb.AppendLine(' - ' + LSum);
+    LSb.Append(LLevels.ToString);
+    if FValueCalls.Count > 0 then
+      LSb.AppendLine(Format('(%s through a method pointer or procedural '
+        + 'variable: %s - what it runs is assigned elsewhere, `related '
+        + 'assignments` of it lists where)', [Plural(FValueCalls.Count,
+        'call'), String.Join(', ', FValueCalls.ToStringArray)]));
+    if FBuiltins.Count > 0 then
+      LSb.AppendLine(Format('(built-ins called: %s)', [String.Join(', ',
+        FBuiltins.ToStringArray)]));
+    if FCompiled.Count > 0 then
+      LSb.AppendLine(Format('(in compiled units without source, not shown: '
+        + '%s)', [String.Join(', ', FCompiled.ToStringArray)]));
+    for var LNote in FNotes do
+      LSb.AppendLine('(' + LNote + ')');
+    // The ends of the walk: searched, nothing called.
+    for var LI := 1 to FNodes.Count - 1 do
+      if FNodes[LI].Found = 0 then
+        LLeaves.Add(FNodes[LI].Name);
+    if LLeaves.Count > 0 then
+      LSb.AppendLine('calling nothing: ' + String.Join(', ',
+        LLeaves.ToStringArray));
+    if LLibrary > 0 then
+      LSb.AppendLine(Format('(%s among them, not followed)',
+        [Plural(LLibrary, 'library routine')]));
+    if (ADepth > 1) and (LFrontier.Count > 0) and (LShown < ALimit) then
+      LSb.AppendLine(Format('(%s at depth %d not searched for callees%s)',
+        [Plural(LFrontier.Count, 'routine'), ADepth, IfThen(ADepth < 4,
+        ' - raise `depth`', '')]));
+    if LCutAt > 0 then
+      LSb.AppendLine(Format('(depth %d not searched: the rows reached `limit` '
+        + '- raise it, or ask for the callees of one routine above)',
+        [LCutAt]));
+    Result := LSb.ToString.TrimRight;
+  finally
+    LLeaves.Free;
+    LNext.Free;
+    LFrontier.Free;
+    LLevels.Free;
+    LSb.Free;
+  end;
+end;
+
+{ What a routine calls (SPEC 9.3.1): the routines its body reaches - a
+  virtual call's overrides and an interface call's implementations too -
+  and, with `depth`, what those call. }
+function ToolCallees(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
+var
+  LT: TTarget;
+  LA: TMcpAnalysis;
+  LM: TPasSemaModel;
+  LIMid, LRoutine, LDecl: Integer;
+  LWhy: string;
+  LWalk: TCalleeWalk;
+begin
+  LT := ResolveOne(AWs, AArgs);
+  if (LT.Kind <> tkSymbol) or not ((LT.Head = 'procedure') or
+     (LT.Head = 'function') or (LT.Head = 'constructor') or
+     (LT.Head = 'destructor') or (LT.Head = 'operator') or
+     (LT.Head = 'routine')) then
+    raise EToolError.CreateFmt('%s is a %s - `callees` takes a routine; '
+      + '`members` lists what a type has', [LT.Name, LT.Head]);
+  LA := ReportingAnalysis(AWs, LT);
+  if (LA = nil) or not RoutineImpl(LA, LT.Ids[LA.Index].Mid,
+     LT.Ids[LA.Index].Sym, LIMid, LRoutine) then
+  begin
+    LWhy := 'no implementation found';
+    if (LA <> nil) and LA.Proj.EnsureHydrated(LT.Ids[LA.Index].Mid) then
+    begin
+      LM := LA.Proj.Model(LT.Ids[LA.Index].Mid);
+      LDecl := LM.Symbols[LT.Ids[LA.Index].Sym].DeclNode;
+      if LDecl <> NIL_NODE then
+        LDecl := LM.Tree.DeclRootOf(LDecl);
+      if (LDecl <> NIL_NODE) and (LM.Tree.Nodes[LDecl].Kind = nkRoutine) then
+        LWhy := NoBodyNote(LM, LDecl);
+    end;
+    raise EToolError.CreateFmt('%s: %s - nothing to read calls from', [LT.Name,
+      LWhy]);
+  end;
+  LWalk := TCalleeWalk.Create(AWs);
+  try
+    Result := LWalk.Answer(LT, EnsureRange(ArgInt(AArgs, 'depth', 1), 1, 4),
+      EnsureRange(ArgInt(AArgs, 'limit', 150), 1, 5000));
+  finally
+    LWalk.Free;
   end;
 end;
 
@@ -4276,6 +5401,23 @@ const
     + '"limit":{"type":"integer","description":"Max rows over all levels '
     + '(default 150)"}}}},' +
 
+    '{"name":"callees","description":"What a routine calls: each routine its '
+    + 'body reaches, once, at its declaration line - grouped by file under '
+    + 'its type - with the lines of the calls ([at 19, 31]). Resolved as the '
+    + 'compiler binds them: the overload called, a property''s getter or '
+    + 'setter, what a bare `inherited;` runs. A virtual call adds the '
+    + 'overrides the object''s class may run, an interface call the methods '
+    + 'implementing it ([via X]). A routine handed on instead of called '
+    + '(OnClick := Foo) says [not a call]. depth 2-4 adds what those call, '
+    + 'level by level, own routines only ([TFoo.Load at 40] names the '
+    + 'caller). Calls through a method pointer are named: what they run is '
+    + 'assigned elsewhere.",'
+    + '"inputSchema":{"type":"object","properties":{' + TARGET_PROPS + ','
+    + '"depth":{"type":"integer","description":"Levels of callees (default 1, '
+    + 'max 4)"},'
+    + '"limit":{"type":"integer","description":"Max rows over all levels '
+    + '(default 150)"}}}},' +
+
     '{"name":"related","description":"Relations across the group. '
     + 'descendants: classes/interfaces below a type. overrides: the virtual '
     + 'chain of a method. implementations: classes implementing an interface '
@@ -4345,7 +5487,9 @@ begin
     + 'ones, by the type declaring each, `references` lists real uses '
     + '(resolved identity, not '
     + 'text), `callers` who calls a routine (through the virtual or '
-    + 'interface method it implements too, to a `depth`), `related` answers '
+    + 'interface method it implements too, to a `depth`), `callees` what a '
+    + 'routine calls (with the overrides and implementations a virtual or '
+    + 'interface call may run), `related` answers '
     + 'hierarchy/override/implementation/assignment/'
     + 'creation questions, `outline` shows a unit''s structure with line '
     + 'numbers, `unit_deps` its uses graph, `diagnostics` checks name '
@@ -4401,6 +5545,8 @@ begin
       Result := ToolReferences(AWs, AArgs)
     else if AName = 'callers' then
       Result := ToolCallers(AWs, AArgs)
+    else if AName = 'callees' then
+      Result := ToolCallees(AWs, AArgs)
     else if AName = 'related' then
       Result := ToolRelated(AWs, AArgs)
     else if AName = 'outline' then

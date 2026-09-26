@@ -39,6 +39,7 @@ or **16 s / 4.3 GB** under the exact one. Typical calls take 60-500 ms.
 | `members` | What a class, record or interface has, inherited members included, under the type declaring each - or what can be called on a variable, by its type |
 | `references` | Every use across the group, grouped by file and by the routine or type it sits in; also units, built-ins and conditional defines |
 | `callers` | Who calls a routine - through the virtual method it overrides, an interface method it implements or a property it is the accessor of too, bare `inherited;` included - and, with `depth`, who calls those |
+| `callees` | What a routine calls - the overload each call binds to, a property's getter or setter, the overrides and implementations a virtual or interface call may run - and, with `depth`, what those call |
 | `related` | `descendants`, `overrides`, `implementations`, `assignments`, `creations`, `destructions` |
 | `outline` | The structure of one unit with line numbers, without reading it |
 | `diagnostics` | PasTree's semantic errors for a file or the whole group, from the files on disk now, each naming its routine |

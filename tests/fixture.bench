@@ -54,6 +54,12 @@ call source {"symbol":"TCircle.Area"}
 grep function\s+TCircle\.Area\b
 read Shared\uShapes.pas 53 4
 
+== callees-runa | What does RunA call?
+call callees {"symbol":"RunA"}
+also source {"symbol":"RunA"}
+also related {"relation":"overrides", "symbol":"TShape.Area"}
+read AppA\uAppA.pas 15 12
+
 == members-derived | What can TDerived's methods use, inherited members included?
 call members {"symbol":"TDerived"}
 also outline {"file":"AppA\\uMembers.pas", "owner":"TDerived"}
