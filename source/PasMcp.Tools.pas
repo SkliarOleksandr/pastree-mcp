@@ -743,27 +743,21 @@ begin
     Result := Result + '  [compiled unit, no source]';
 end;
 
-// The ONE target a search is about: from file+line+name, or from `symbol`,
-// refusing an ambiguous name with the candidates listed.
-function ResolveOne(AWs: TMcpWorkspace; AArgs: TJSONObject): TTarget;
+// The ONE declaration a name means, refusing an ambiguous one with the
+// candidates listed.
+function ResolveNamed(AWs: TMcpWorkspace; const ASymbol,
+  AKind: string): TTarget;
 var
-  LSymbol: string;
   LCands: TArray<TTarget>;
   LMore: Integer;
   LSb: TStringBuilder;
 begin
-  if ArgStr(AArgs, 'file') <> '' then
-    Exit(ResolvePosition(AWs, AArgs));
-  LSymbol := ArgStr(AArgs, 'symbol');
-  if LSymbol = '' then
-    raise EToolError.Create('give `symbol` (a name like TFoo.Bar) or `file` + '
-      + '`line` + `name`');
-  LCands := ResolveName(AWs, LSymbol, ArgStr(AArgs, 'kind'), False, 12, LMore);
+  LCands := ResolveName(AWs, ASymbol, AKind, False, 12, LMore);
   if Length(LCands) = 0 then
     raise EToolError.CreateFmt('no declaration named `%s` in the analyzed '
       + 'closure (try `find` with a wildcard: *%s*; a local or a parameter is '
-      + 'addressed by `file` + `line` + `name`)', [LSymbol,
-      StripGenerics(LSymbol.Split(['.'])[High(LSymbol.Split(['.']))])]);
+      + 'addressed by `file` + `line` + `name`)', [ASymbol,
+      StripGenerics(ASymbol.Split(['.'])[High(ASymbol.Split(['.']))])]);
   if Length(LCands) = 1 then
   begin
     Result := LCands[0];
@@ -774,7 +768,7 @@ begin
   try
     LSb.AppendLine(Format('`%s` is ambiguous - %d declarations%s. Qualify it '
       + '(Unit.Type.Member), add `kind`, or pass `file` + `line` + `name` of '
-      + 'the one you mean:', [LSymbol, Length(LCands) + LMore,
+      + 'the one you mean:', [ASymbol, Length(LCands) + LMore,
       IfThen(LMore > 0, ' (first ' + IntToStr(Length(LCands)) + ')', '')]));
     for var LC in LCands do
       LSb.AppendLine('  ' + DescribeTarget(AWs, LC));
@@ -782,6 +776,17 @@ begin
   finally
     LSb.Free;
   end;
+end;
+
+// The ONE target a search is about: from file+line+name, or from `symbol`.
+function ResolveOne(AWs: TMcpWorkspace; AArgs: TJSONObject): TTarget;
+begin
+  if ArgStr(AArgs, 'file') <> '' then
+    Exit(ResolvePosition(AWs, AArgs));
+  if ArgStr(AArgs, 'symbol') = '' then
+    raise EToolError.Create('give `symbol` (a name like TFoo.Bar) or `file` + '
+      + '`line` + `name`');
+  Result := ResolveNamed(AWs, ArgStr(AArgs, 'symbol'), ArgStr(AArgs, 'kind'));
 end;
 
 { ---- hits ------------------------------------------------------------------- }
@@ -1972,12 +1977,14 @@ type
     ruExported,   // an `exports` entry: called from outside
     ruNone);      // no use - `Foo := X` inside function Foo sets its result
 
-  TCallSourceKind = (csSelf, csVirtual, csInterface, csRead, csWrite);
+  TCallSourceKind = (csSelf, csVirtual, csInterface, csRead, csWrite,
+    csProperty);
 
   { A symbol a call can be written against and still end up running the
     routine, in one analysis: the routine itself, a virtual method it
     overrides, an interface method it implements, a property it is an
-    accessor of. }
+    accessor of. For a field (impact), the property that reads or writes
+    it. }
   TCallSource = record
     Mid, Sym: Integer;
     Kind: TCallSourceKind;
@@ -1990,12 +1997,29 @@ type
     Iface, Lister: TSemaXType;
   end;
 
-  // A routine of the walk: the target, or a caller found at Level.
+  // A routine of the walk: a root, or a caller found at Level.
   TCallNode = record
     T: TTarget;
     Name: string;          // as its rows' heading reads: TFoo.Save.Helper
     Level: Integer;
     Found: Integer;        // rows its search found; -1 = not searched
+    Data: Boolean;         // a root that is no routine - a type, a variable,
+                           // a field (impact): every reference is a use
+  end;
+
+  // One level of a walk, counted: rows that call (or use) a node of the level
+  // above, the routines they sit in, rows that hand a routine on.
+  TCallLevel = record
+    Calls, Routines, Others: Integer;
+  end;
+
+  // What a walk found, for the answer to word.
+  TCallWalkInfo = record
+    Levels: TArray<TCallLevel>;
+    AllVia: string;        // the one symbol every first-level row is bound to
+    Libraries: Integer;    // library routines met, shown and not followed
+    CutAt: Integer;        // the depth `limit` kept from being searched; 0
+    Pending: Integer;      // routines of the last depth, not searched
   end;
 
   TCallRow = record
@@ -2010,7 +2034,7 @@ type
 
 const
   SOURCE_KINDS: array[TCallSourceKind] of string = ('', 'virtual',
-    'interface', 'property read', 'property write');
+    'interface', 'property read', 'property write', 'property');
 
 // The designator a name ends - `Obj.Foo`, `Unit.Foo`, `Foo<T>` - or the name
 // itself.
@@ -2382,7 +2406,9 @@ type
     method it overrides, an interface method it implements, a property it is
     the accessor of - and a bare `inherited;`, which names nothing a
     reference search could find. Each analysis searches with its own symbol
-    ids; rows merge by site, like every answer. }
+    ids; rows merge by site, like every answer.
+    The roots are the routine asked about - or, for impact, every declaration
+    a change touches, a root that is no routine searched for its uses. }
   TCallerWalk = class
   private
     FWs: TMcpWorkspace;
@@ -2393,14 +2419,21 @@ type
     FCallerOf: TDictionary<string, string>;     // analysis:model:routine node -> site
     FSeen: TDictionary<string, Boolean>;        // row sites, over every level
     FRows: TList<TCallRow>;                     // the level being searched
-    FThrough: TStringList;                      // the target's other sources
+    FThroughOf: TObjectDictionary<Integer, TStringList>;   // root -> its other sources
+    FBelowOf: TObjectDictionary<Integer, TStringList>;     // root -> its overrides
     FNotes: TStringList;                        // what the rows cannot show
     FListings: TDictionary<string, TArray<TIfaceListing>>;   // by class
     FIfaceNames: TDictionary<string, Boolean>;  // analysis:method name
     FIfaceScanned: TDictionary<Integer, Boolean>;
     FCompiled: Integer;
     FReached: Integer;      // calls found, a site listed before included
+    FCurrent: Integer;      // the node being searched
+    FTagRoots: Boolean;     // several roots: a first-level row names its own
+    FViaOnRows: Boolean;    // no header says "all through X" for the rows
     procedure NoteThrough(const ASource: TCallSource);
+    procedure NoteBelow(const AText: string);
+    function Listed(ALists: TObjectDictionary<Integer, TStringList>;
+      ANode: Integer): TArray<string>;
     function IsInterfaceMethodName(AA: TMcpAnalysis;
       const ANameLower: string): Boolean;
     function Listings(AA: TMcpAnalysis;
@@ -2416,11 +2449,62 @@ type
     procedure SearchBareInherited(AA: TMcpAnalysis; const ANode: TCallNode;
       ADMid, ADSym: Integer);
     procedure Search(AA: TMcpAnalysis; const ANode: TCallNode);
+    procedure SearchUses(AA: TMcpAnalysis; const ANode: TCallNode);
   public
     constructor Create(AWs: TMcpWorkspace);
     destructor Destroy; override;
+    // A root: searched for its callers, or - AData - for its uses. The node
+    // index; -1 when that declaration is a root already.
+    function AddRoot(const ATarget: TTarget; AData: Boolean): Integer;
+    // The walk from the roots, level by level: the rows of each into ALevels,
+    // grouped by file under the routine they sit in, `limit` rows over all.
+    procedure Walk(ADepth, ALimit: Integer; ALevels: TStringBuilder;
+      out AInfo: TCallWalkInfo);
+    // What the rows cannot show: the ends of the walk, the notes, what was
+    // not searched.
+    procedure AppendNotes(ASb: TStringBuilder; const AInfo: TCallWalkInfo;
+      ADepth: Integer);
+    // A root's other sources - `TShape.Area (virtual)` - in the order met.
+    function Through(ANode: Integer): TArray<string>;
+    // A root's overrides below it - `TCircle (uShapes.pas:26)` - sorted.
+    function Below(ANode: Integer): TArray<string>;
     function Answer(const ATarget: TTarget; ADepth, ALimit: Integer): string;
+    property Nodes: TList<TCallNode> read FNodes;
+    property ViaOnRows: Boolean read FViaOnRows write FViaOnRows;
   end;
+
+// '3 calls in 3 routines; depth 2: 2 in 2' - the levels of a walk, each with
+// the references it found that call nothing. ANoun names the first level's
+// rows; '' leaves them a bare count. AThem: those references do not call
+// "them", the roots, rather than "it".
+function LevelsSummary(const AInfo: TCallWalkInfo; const ANoun: string;
+  AThem: Boolean): string;
+var
+  LL: TCallLevel;
+begin
+  Result := '';
+  for var LIdx := 0 to High(AInfo.Levels) do
+  begin
+    LL := AInfo.Levels[LIdx];
+    if LIdx = 0 then
+    begin
+      if ANoun <> '' then
+        Result := Plural(LL.Calls, ANoun)
+      else
+        Result := IntToStr(LL.Calls);
+      Result := Result + ' in ' + Plural(LL.Routines, 'routine');
+    end
+    else
+      Result := Result + Format('; depth %d: %d in %d', [LIdx + 1, LL.Calls,
+        LL.Routines]);
+    if LL.Others = 1 then
+      Result := Result + ', 1 reference that does not call ' + IfThen(AThem,
+        'them', 'it')
+    else if LL.Others > 1 then
+      Result := Result + Format(', %d references that do not call %s',
+        [LL.Others, IfThen(AThem, 'them', 'it')]);
+  end;
+end;
 
 constructor TCallerWalk.Create(AWs: TMcpWorkspace);
 begin
@@ -2433,7 +2517,8 @@ begin
   FCallerOf := TDictionary<string, string>.Create;
   FSeen := TDictionary<string, Boolean>.Create;
   FRows := TList<TCallRow>.Create;
-  FThrough := TStringList.Create;
+  FThroughOf := TObjectDictionary<Integer, TStringList>.Create([doOwnsValues]);
+  FBelowOf := TObjectDictionary<Integer, TStringList>.Create([doOwnsValues]);
   FNotes := TStringList.Create;
   FListings := TDictionary<string, TArray<TIfaceListing>>.Create;
   FIfaceNames := TDictionary<string, Boolean>.Create;
@@ -2446,7 +2531,8 @@ begin
   FIfaceNames.Free;
   FListings.Free;
   FNotes.Free;
-  FThrough.Free;
+  FBelowOf.Free;
+  FThroughOf.Free;
   FRows.Free;
   FSeen.Free;
   FCallerOf.Free;
@@ -2457,14 +2543,55 @@ begin
   inherited;
 end;
 
-// One of the target's sources other than itself, for the answer's header.
+// One of the root's sources other than itself, for the answer's header.
 procedure TCallerWalk.NoteThrough(const ASource: TCallSource);
 var
   LText: string;
+  LList: TStringList;
 begin
   LText := Format('%s (%s)', [ASource.Name, SOURCE_KINDS[ASource.Kind]]);
-  if FThrough.IndexOf(LText) < 0 then
-    FThrough.Add(LText);
+  if not FThroughOf.TryGetValue(FCurrent, LList) then
+  begin
+    LList := TStringList.Create;
+    FThroughOf.Add(FCurrent, LList);
+  end;
+  if LList.IndexOf(LText) < 0 then
+    LList.Add(LText);
+end;
+
+// An override below the root: what a change to its signature must follow.
+procedure TCallerWalk.NoteBelow(const AText: string);
+var
+  LList: TStringList;
+begin
+  if not FBelowOf.TryGetValue(FCurrent, LList) then
+  begin
+    LList := TStringList.Create;
+    FBelowOf.Add(FCurrent, LList);
+  end;
+  if LList.IndexOf(AText) < 0 then
+    LList.Add(AText);
+end;
+
+function TCallerWalk.Listed(ALists: TObjectDictionary<Integer, TStringList>;
+  ANode: Integer): TArray<string>;
+var
+  LList: TStringList;
+begin
+  Result := nil;
+  if ALists.TryGetValue(ANode, LList) then
+    Result := LList.ToStringArray;
+end;
+
+function TCallerWalk.Through(ANode: Integer): TArray<string>;
+begin
+  Result := Listed(FThroughOf, ANode);
+end;
+
+function TCallerWalk.Below(ANode: Integer): TArray<string>;
+begin
+  Result := Listed(FBelowOf, ANode);
+  TArray.Sort<string>(Result, TIStringComparer.Ordinal);
 end;
 
 { Does any interface of the analysis declare a method named ANameLower? Most
@@ -2618,7 +2745,7 @@ begin
   LRow.Caller := ACaller;
   LRow.Call := ACall;
   LRow.Callee := '';
-  if ANode.Level > 0 then
+  if (ANode.Level > 0) or FTagRoots then
     LRow.Callee := ANode.Name;
   LRow.Via := AVia;
   LRow.Note := ANote;
@@ -2875,6 +3002,9 @@ begin
             LId.Mid := LFamily[LI].UnitId;
             LId.Sym := LFamily[LI].Sym;
             LBelow.Add(LId);
+            if ANode.Level = 0 then
+              NoteBelow(Format('%s (%s:%d)', [LFamily[LI].TypeName,
+                FWs.RelPath(LFamily[LI].Hit.FilePath), LFamily[LI].Hit.Line]));
           end;
         end;
         if (LIdx < 0) or not (LFamily[LIdx].Kind in [pokRoot,
@@ -2960,54 +3090,154 @@ begin
   end;
 end;
 
-function TCallerWalk.Answer(const ATarget: TTarget; ADepth,
-  ALimit: Integer): string;
+// The uses of a root that is no routine (impact) - a type, a variable, a
+// constant, a field, a property - in one analysis: every reference is one.
+// A field a property reads or writes is used wherever the property is, so
+// the property becomes one more source, as a getter's does in Search.
+procedure TCallerWalk.SearchUses(AA: TMcpAnalysis; const ANode: TCallNode);
 var
-  LSb: TStringBuilder;
+  LSources: TList<TCallSource>;
+  LS, LNew: TCallSource;
+  LIdx, LMid, LE, LP, LFileId, LLine, LCol: Integer;
+  LM: TPasSemaModel;
+  LIdent: TPasNavIdent;
+  LNodeOk, LKnown: Boolean;
+  LCaller, LNote, LName: string;
+begin
+  LS := Default(TCallSource);
+  LS.Mid := ANode.T.Ids[AA.Index].Mid;
+  LS.Sym := ANode.T.Ids[AA.Index].Sym;
+  if (LS.Mid < 0) or (LS.Sym < 0) then
+    Exit;
+  LS.Kind := csSelf;
+  LS.Name := ANode.T.Name;
+  LSources := TList<TCallSource>.Create;
+  try
+    LSources.Add(LS);
+    LIdx := 0;
+    while LIdx < LSources.Count do
+    begin
+      LS := LSources[LIdx];
+      Inc(LIdx);
+      for var LH in AA.Nav.FindReferences(LS.Mid, LS.Sym) do
+      begin
+        LCaller := '';
+        LNote := '';
+        LMid := AA.Nav.ModelIdOf(LH.FilePath);
+        LNodeOk := (LMid >= 0) and AA.Nav.IdentAt(LMid, LH.Line, LH.Col,
+          LIdent);
+        if LNodeOk then
+        begin
+          LM := AA.Proj.Model(LMid);
+          if IsPropertyDeclName(LM, LIdent.Node) then
+            Continue;
+          LE := DesignatorOf(LM, LIdent.Node);
+          LP := LM.Tree.Nodes[LE].Parent;
+          if (LP <> NIL_NODE) and (LM.Tree.Nodes[LP].Kind = nkPropSpec) and
+             (LM.Tree.NodeTextEquals(LP, 'read') or
+              LM.Tree.NodeTextEquals(LP, 'write')) then
+          begin
+            // `property X: T read FX write FX` - not a row: X is one more
+            // source, its name the property's first child.
+            while (LP <> NIL_NODE) and
+                  (LM.Tree.Nodes[LP].Kind <> nkPropertyDecl) do
+              LP := LM.Tree.Nodes[LP].Parent;
+            LNew := Default(TCallSource);
+            if (LP = NIL_NODE) or not VisPos(LM, LM.Tree.NodeLeftmostVis(
+               LM.Tree.Nodes[LP].FirstChild), LFileId, LLine, LCol) or
+               (LFileId <> 0) or not AA.Nav.SymbolAt(LMid, LLine, LCol,
+               LNew.Mid, LNew.Sym, LName) then
+              Continue;
+            LKnown := False;
+            for var LOld in LSources do
+              if (LOld.Mid = LNew.Mid) and (LOld.Sym = LNew.Sym) then
+                LKnown := True;
+            if LKnown then
+              Continue;
+            LNew.Kind := csProperty;
+            LNew.Name := QualifiedName(AA.Proj.Model(LNew.Mid), LNew.Sym);
+            LSources.Add(LNew);
+            if ANode.Level = 0 then
+              NoteThrough(LNew);
+            Continue;
+          end;
+          LCaller := CallerOf(AA, LM, LMid, LIdent.Node);
+          if LCaller = '' then
+            LNote := RootPlace(LM, LIdent.Node);
+        end;
+        AddRow(LH, ANode, IfThen(LS.Kind <> csSelf, LS.Name, ''), LNote,
+          LCaller, True);
+      end;
+    end;
+  finally
+    LSources.Free;
+  end;
+end;
+
+function TCallerWalk.AddRoot(const ATarget: TTarget; AData: Boolean): Integer;
+var
+  LNode: TCallNode;
+  LKey: string;
+begin
+  LKey := SiteKey(ATarget.DeclFile, ATarget.DeclLine, ATarget.DeclCol);
+  if FNodeOf.ContainsKey(LKey) then
+    Exit(-1);
+  LNode := Default(TCallNode);
+  LNode.T := ATarget;
+  LNode.Name := ATarget.Name;
+  // Overloads: two roots of one name are told apart by the line the later
+  // one is declared on, as the callers found below them are.
+  for var LOther in FNodes do
+    if SameText(LOther.Name, LNode.Name) then
+    begin
+      LNode.Name := Format('%s (line %d)', [LNode.Name, ATarget.DeclLine]);
+      Break;
+    end;
+  LNode.Level := 0;
+  LNode.Found := -1;
+  LNode.Data := AData;
+  Result := FNodes.Add(LNode);
+  FNodeOf.Add(LKey, Result);
+end;
+
+procedure TCallerWalk.Walk(ADepth, ALimit: Integer; ALevels: TStringBuilder;
+  out AInfo: TCallWalkInfo);
+var
   LNode: TCallNode;
   LFrontier, LNext: TList<Integer>;
   LRows: TArray<TCallRow>;
   LHits: TArray<THit>;
-  LCalls, LOthers, LFirstCalls, LFirstOthers, LShown, LLibrary, LLevel,
-    LCutAt: Integer;
+  LLevel, LShown: Integer;
+  LCount: TCallLevel;
   LWho, LVias: TDictionary<string, Boolean>;
-  LRoots, LDfm: TStringList;
   LT: TTarget;
-  LSum, LTag, LAllVia: string;
-  LLevels: TStringBuilder;
+  LTag: string;
 begin
-  LSb := TStringBuilder.Create;
-  LLevels := TStringBuilder.Create;
+  AInfo := Default(TCallWalkInfo);
+  FTagRoots := FNodes.Count > 1;
   LFrontier := TList<Integer>.Create;
   LNext := TList<Integer>.Create;
   LWho := TDictionary<string, Boolean>.Create;
   LVias := TDictionary<string, Boolean>.Create;
-  LRoots := TStringList.Create;
-  LDfm := TStringList.Create;
-  LAllVia := '';
   try
-    LNode.T := ATarget;
-    LNode.Name := ATarget.Name;
-    LNode.Level := 0;
-    LNode.Found := -1;
-    FNodes.Add(LNode);
-    FNodeOf.Add(SiteKey(ATarget.DeclFile, ATarget.DeclLine, ATarget.DeclCol), 0);
-    LFrontier.Add(0);
+    for var LIdx := 0 to FNodes.Count - 1 do
+      LFrontier.Add(LIdx);
     LShown := 0;
-    LLibrary := 0;
-    LFirstCalls := 0;
-    LFirstOthers := 0;
-    LCutAt := 0;
-    LSum := '';
     for LLevel := 1 to ADepth do
     begin
       FRows.Clear;
       for var LIdx in LFrontier do
       begin
         var LBefore := FReached;
+        FCurrent := LIdx;
         for var LA in FWs.Analyses do
           if FNodes[LIdx].T.Ids[LA.Index].Mid >= 0 then
-            Search(LA, FNodes[LIdx]);
+          begin
+            if FNodes[LIdx].Data then
+              SearchUses(LA, FNodes[LIdx])
+            else
+              Search(LA, FNodes[LIdx]);
+          end;
         LNode := FNodes[LIdx];
         LNode.Found := FReached - LBefore;
         FNodes[LIdx] := LNode;
@@ -3028,14 +3258,13 @@ begin
       // per file and place.
       LWho.Clear;
       LVias.Clear;
-      LCalls := 0;
-      LOthers := 0;
+      LCount := Default(TCallLevel);
       for var LR in LRows do
       begin
         LVias.AddOrSetValue(LR.Via, True);
         if LR.Call then
         begin
-          Inc(LCalls);
+          Inc(LCount.Calls);
           if LR.Caller <> '' then
             LWho.AddOrSetValue(LR.Caller, True)
           else
@@ -3043,30 +3272,18 @@ begin
               True);
         end
         else
-          Inc(LOthers);
+          Inc(LCount.Others);
       end;
+      LCount.Routines := LWho.Count;
+      AInfo.Levels := AInfo.Levels + [LCount];
       // One symbol every row of the first level is bound to - a getter's
       // property, the virtual method an override is called through: said
       // once, above, not on every row.
-      if (LLevel = 1) and (LVias.Count = 1) then
+      if (LLevel = 1) and (LVias.Count = 1) and not FViaOnRows then
         for var LV in LVias.Keys do
-          LAllVia := LV;
-      if LLevel = 1 then
-      begin
-        LFirstCalls := LCalls;
-        LFirstOthers := LOthers;
-        LSum := Plural(LCalls, 'call') + ' in ' + Plural(LWho.Count, 'routine');
-      end
-      else
-        LSum := LSum + Format('; depth %d: %d in %d', [LLevel, LCalls,
-          LWho.Count]);
-      if LOthers = 1 then
-        LSum := LSum + ', 1 reference that does not call it'
-      else if LOthers > 1 then
-        LSum := LSum + Format(', %d references that do not call it',
-          [LOthers]);
+          AInfo.AllVia := LV;
       if LLevel > 1 then
-        LLevels.AppendLine(Format('depth %d - callers of those:', [LLevel]));
+        ALevels.AppendLine(Format('depth %d - callers of those:', [LLevel]));
       SetLength(LHits, Length(LRows));
       for var LI := 0 to High(LRows) do
       begin
@@ -3074,15 +3291,15 @@ begin
         LTag := '';
         if LRows[LI].Callee <> '' then
           LTag := '-> ' + LRows[LI].Callee;
-        if (LRows[LI].Via <> '') and (LAllVia = '') then
+        if (LRows[LI].Via <> '') and (AInfo.AllVia = '') then
           LTag := Trim(LTag + ' via ' + LRows[LI].Via);
         if LRows[LI].Note <> '' then
           LTag := IfThen(LTag = '', '', LTag + ', ') + LRows[LI].Note;
         LHits[LI].Tag := LTag;
       end;
       if (Length(LHits) = 0) and (LLevel > 1) then
-        LLevels.AppendLine('  none');
-      AppendHitsByFile(FWs, LLevels, LHits, Max(ALimit - LShown, 0), False,
+        ALevels.AppendLine('  none');
+      AppendHitsByFile(FWs, ALevels, LHits, Max(ALimit - LShown, 0), False,
         FEnclosing);
       Inc(LShown, Min(Length(LHits), Max(ALimit - LShown, 0)));
       // The next level: the routines these calls sit in, those of the
@@ -3096,10 +3313,11 @@ begin
         if not LT.Own then
         begin
           FNodeOf.Add(LR.Caller, -1);
-          Inc(LLibrary);
+          Inc(AInfo.Libraries);
           Continue;
         end;
         MapToOthers(FWs, LT);
+        LNode := Default(TCallNode);
         LNode.T := LT;
         LNode.Name := FEnclosing.NameAt(LR.Hit.FilePath, LR.Hit.Line,
           LR.Hit.Col, False);
@@ -3122,82 +3340,138 @@ begin
       LFrontier.Clear;
       LFrontier.AddRange(LNext);
       if (LFrontier.Count > 0) and (LShown >= ALimit) and (LLevel < ADepth) then
-        LCutAt := LLevel + 1;
+        AInfo.CutAt := LLevel + 1;
       if (LFrontier.Count = 0) or (LShown >= ALimit) then
         Break;
     end;
-
-    LSb.Append(Format('callers of %s (%s:%d)', [ATarget.Name,
-      FWs.RelPath(ATarget.DeclFile), ATarget.DeclLine]));
-    // No call: none found - or only references that hand it on.
-    if (LFirstCalls = 0) and (LFirstOthers = 0) then
-      LSb.AppendLine(' - none found')
-    else if LFirstCalls = 0 then
-      LSb.AppendLine(Format(' - no calls, %s that %s not call it',
-        [Plural(LFirstOthers, 'reference'), IfThen(LFirstOthers = 1, 'does',
-        'do')]))
-    else
-      LSb.AppendLine(' - ' + LSum);
-    if LAllVia <> '' then
-    begin
-      for var LThrough in FThrough do
-        if LThrough.StartsWith(LAllVia + ' (') then
-          LSb.AppendLine('all through ' + LThrough);
-    end
-    else if FThrough.Count > 0 then
-      LSb.AppendLine('also through ' + String.Join(', ',
-        FThrough.ToStringArray));
-    LSb.Append(LLevels.ToString);
-    if FCompiled > 0 then
-      LSb.AppendLine(Format('(+%d in compiled units without source, not '
-        + 'shown)', [FCompiled]));
-    // The ends of the walk: searched, nothing found. A published method may
-    // be an event handler a form binds by name.
-    for var LI := 0 to FNodes.Count - 1 do
-      if FNodes[LI].Found = 0 then
-      begin
-        if LI > 0 then
-          LRoots.Add(FNodes[LI].Name);
-        for var LA in FWs.Analyses do
-          if FNodes[LI].T.Ids[LA.Index].Mid >= 0 then
-          begin
-            if IsPublishedMethod(LA, FNodes[LI].T.Ids[LA.Index].Mid,
-               FNodes[LI].T.Ids[LA.Index].Sym) then
-              LDfm.Add(FNodes[LI].Name);
-            Break;
-          end;
-      end;
-    if LRoots.Count > 0 then
-      LSb.AppendLine('no callers found: ' + String.Join(', ',
-        LRoots.ToStringArray));
-    if LDfm.Count > 0 then
-      LSb.AppendLine(Format('(%s: published - a form''s .dfm may bind it to '
-        + 'an event, and forms are not read)', [String.Join(', ',
-        LDfm.ToStringArray)]));
-    for var LNote in FNotes do
-      LSb.AppendLine('(' + LNote + ')');
-    if ATarget.Head = 'destructor' then
-      LSb.AppendLine('(a destructor runs from Free and FreeAndNil: `related '
-        + 'destructions` of its class lists those)');
-    if LLibrary > 0 then
-      LSb.AppendLine(Format('(%s among them, not followed)',
-        [Plural(LLibrary, 'library routine')]));
-    if (ADepth > 1) and (LFrontier.Count > 0) and (LShown < ALimit) then
-      LSb.AppendLine(Format('(%s at depth %d not searched for callers%s)',
-        [Plural(LFrontier.Count, 'routine'), ADepth, IfThen(ADepth < 4,
-        ' - raise `depth`', '')]));
-    if LCutAt > 0 then
-      LSb.AppendLine(Format('(depth %d not searched: the rows reached `limit` '
-        + '- raise it, or ask for the callers of one routine above)',
-        [LCutAt]));
-    Result := LSb.ToString.TrimRight;
+    if (ADepth > 1) and (LShown < ALimit) then
+      AInfo.Pending := LFrontier.Count;
   finally
-    LDfm.Free;
-    LRoots.Free;
     LVias.Free;
     LWho.Free;
     LNext.Free;
     LFrontier.Free;
+  end;
+end;
+
+procedure TCallerWalk.AppendNotes(ASb: TStringBuilder;
+  const AInfo: TCallWalkInfo; ADepth: Integer);
+var
+  LRoots, LUnused, LDfm, LDfmData: TStringList;
+  LDestructor: Boolean;
+begin
+  LRoots := TStringList.Create;
+  LUnused := TStringList.Create;
+  LDfm := TStringList.Create;
+  LDfmData := TStringList.Create;
+  try
+    if FCompiled > 0 then
+      ASb.AppendLine(Format('(+%d in compiled units without source, not '
+        + 'shown)', [FCompiled]));
+    // The ends of the walk: searched, nothing found - a lone root's "none"
+    // is the answer's header. A published member may be what a form's .dfm
+    // binds by name.
+    LDestructor := False;
+    for var LI := 0 to FNodes.Count - 1 do
+    begin
+      if (FNodes[LI].Level = 0) and (FNodes[LI].T.Head = 'destructor') then
+        LDestructor := True;
+      if FNodes[LI].Found <> 0 then
+        Continue;
+      if (LI > 0) or FTagRoots then
+      begin
+        if FNodes[LI].Data then
+          LUnused.Add(FNodes[LI].Name)
+        else
+          LRoots.Add(FNodes[LI].Name);
+      end;
+      for var LA in FWs.Analyses do
+        if FNodes[LI].T.Ids[LA.Index].Mid >= 0 then
+        begin
+          if IsPublishedMethod(LA, FNodes[LI].T.Ids[LA.Index].Mid,
+             FNodes[LI].T.Ids[LA.Index].Sym) then
+          begin
+            if FNodes[LI].Data then
+              LDfmData.Add(FNodes[LI].Name)
+            else
+              LDfm.Add(FNodes[LI].Name);
+          end;
+          Break;
+        end;
+    end;
+    if LRoots.Count > 0 then
+      ASb.AppendLine('no callers found: ' + String.Join(', ',
+        LRoots.ToStringArray));
+    if LUnused.Count > 0 then
+      ASb.AppendLine('no uses found: ' + String.Join(', ',
+        LUnused.ToStringArray));
+    if LDfm.Count > 0 then
+      ASb.AppendLine(Format('(%s: published - a form''s .dfm may bind it to '
+        + 'an event, and forms are not read)', [String.Join(', ',
+        LDfm.ToStringArray)]));
+    if LDfmData.Count > 0 then
+      ASb.AppendLine(Format('(%s: published - a form''s .dfm may set it, and '
+        + 'forms are not read)', [String.Join(', ', LDfmData.ToStringArray)]));
+    for var LNote in FNotes do
+      ASb.AppendLine('(' + LNote + ')');
+    if LDestructor then
+      ASb.AppendLine('(a destructor runs from Free and FreeAndNil: `related '
+        + 'destructions` of its class lists those)');
+    if AInfo.Libraries > 0 then
+      ASb.AppendLine(Format('(%s among them, not followed)',
+        [Plural(AInfo.Libraries, 'library routine')]));
+    if AInfo.Pending > 0 then
+      ASb.AppendLine(Format('(%s at depth %d not searched for callers%s)',
+        [Plural(AInfo.Pending, 'routine'), ADepth, IfThen(ADepth < 4,
+        ' - raise `depth`', '')]));
+    if AInfo.CutAt > 0 then
+      ASb.AppendLine(Format('(depth %d not searched: the rows reached `limit` '
+        + '- raise it, or ask for the callers of one routine above)',
+        [AInfo.CutAt]));
+  finally
+    LDfmData.Free;
+    LDfm.Free;
+    LUnused.Free;
+    LRoots.Free;
+  end;
+end;
+
+function TCallerWalk.Answer(const ATarget: TTarget; ADepth,
+  ALimit: Integer): string;
+var
+  LSb, LLevels: TStringBuilder;
+  LInfo: TCallWalkInfo;
+  LThrough: TArray<string>;
+begin
+  LSb := TStringBuilder.Create;
+  LLevels := TStringBuilder.Create;
+  try
+    AddRoot(ATarget, False);
+    Walk(ADepth, ALimit, LLevels, LInfo);
+    LSb.Append(Format('callers of %s (%s:%d)', [ATarget.Name,
+      FWs.RelPath(ATarget.DeclFile), ATarget.DeclLine]));
+    // No call: none found - or only references that hand it on.
+    if (LInfo.Levels[0].Calls = 0) and (LInfo.Levels[0].Others = 0) then
+      LSb.AppendLine(' - none found')
+    else if LInfo.Levels[0].Calls = 0 then
+      LSb.AppendLine(Format(' - no calls, %s that %s not call it',
+        [Plural(LInfo.Levels[0].Others, 'reference'),
+        IfThen(LInfo.Levels[0].Others = 1, 'does', 'do')]))
+    else
+      LSb.AppendLine(' - ' + LevelsSummary(LInfo, 'call', False));
+    LThrough := Through(0);
+    if LInfo.AllVia <> '' then
+    begin
+      for var LText in LThrough do
+        if LText.StartsWith(LInfo.AllVia + ' (') then
+          LSb.AppendLine('all through ' + LText);
+    end
+    else if Length(LThrough) > 0 then
+      LSb.AppendLine('also through ' + String.Join(', ', LThrough));
+    LSb.Append(LLevels.ToString);
+    AppendNotes(LSb, LInfo, ADepth);
+    Result := LSb.ToString.TrimRight;
+  finally
     LLevels.Free;
     LSb.Free;
   end;
@@ -5288,6 +5562,1921 @@ begin
   end;
 end;
 
+{ ---- impact ---------------------------------------------------------------------- }
+
+const
+  // Changed declarations whose callers one impact answer searches, and the
+  // ones it lists; past them the rest are named or counted.
+  MAX_IMPACT_ROOTS = 40;
+  MAX_IMPACT_DECLS = 100;
+
+type
+  { Which members of the group compile a file in (SPEC 9.3.3). An analysis
+    holds one or more members (section 4) and its models are their closures
+    together; a member's own is what its main source reaches through `uses`,
+    interface and implementation alike - the units dcc compiles into it.
+    Built per member on first use, a flag per model of its analysis. }
+  TMemberReach = class
+  private
+    FWs: TMcpWorkspace;
+    FReach: TDictionary<Integer, TArray<Boolean>>;
+    function Reach(AMember: Integer): TArray<Boolean>;
+  public
+    constructor Create(AWs: TMcpWorkspace);
+    destructor Destroy; override;
+    // The members whose closure holds model file AFile - a unit, a program,
+    // a package - by index into TMcpWorkspace.Members.
+    function MembersOf(const AFile: string): TArray<Integer>;
+  end;
+
+  // One line of a unified diff, numbered in the NEW file: its own line, or -
+  // a removed line - the line that follows the removal.
+  TDiffLine = record
+    Kind: Char;            // '+', '-' or ' '
+    Line: Integer;
+    Text: string;
+  end;
+
+  TDiffFile = record
+    OldPath, NewPath: string;   // as written, git's a/ b/ left on; '' = /dev/null
+    Lines: TArray<TDiffLine>;
+  end;
+
+  // A declaration a change touches - or, with none around the changed lines,
+  // the place they are in: a uses clause, an initialization section.
+  TImpactDecl = class
+  public
+    T: TTarget;            // the declaration; unset for a place
+    Place: string;         // '' for a declaration
+    Lines: TArray<Integer>;
+    Node: Integer;         // its root in the caller walk; -1 = not searched
+    procedure AddLine(ALine: Integer);
+    function FirstLine: Integer;
+  end;
+
+  TImpactFile = class
+  public
+    Path: string;          // full path; as the diff writes it when not on disk
+    Note: string;          // said after the path: deleted, a form, ...
+    Units: TArray<string>; // the model files it changes: itself, its
+                           // includers, the unit of a form
+    Project: Integer;      // the member whose .dproj it is; -1
+    Iface: Boolean;        // its interface section changed
+    UsedBy: Boolean;       // a unit asked about: list the units using it
+    Code, Comments: Boolean;   // changed lines of code / of comments alone
+    Decls: TList<TImpactDecl>;   // not owned
+    Removed: TArray<string>;     // 'TFoo.Bar (procedure)'
+    RemovedKeys: TArray<string>; // their last segment, lower-case
+    Members: TArray<Integer>;
+    constructor Create;
+    destructor Destroy; override;
+  end;
+
+  { What a change reaches (SPEC 9.3.3): the declarations a diff touches - or
+    the ones named - with the methods they are also called through and their
+    overrides, their callers or uses to a depth, the units a changed
+    interface recompiles, and the members of the group that compile the
+    changed files: the projects to build and test. }
+  TImpact = class
+  private
+    FWs: TMcpWorkspace;
+    FReach: TMemberReach;
+    FEnclosing: TEnclosing;
+    FFiles: TObjectList<TImpactFile>;
+    FFileOf: TDictionary<string, TImpactFile>;
+    FDecls: TObjectList<TImpactDecl>;
+    FDeclOf: TDictionary<string, TImpactDecl>;
+    FOther: TStringList;       // files of the diff the index does not read
+    FNamed: TStringList;       // the declarations asked about, for the header
+    FDiffFiles: Integer;       // files the diff names; -1 = no diff
+    function FileFor(const APath: string): TImpactFile;
+    function AddDecl(AFile: TImpactFile; const AT: TTarget): TImpactDecl;
+    function AddPlace(AFile: TImpactFile; const APlace: string): TImpactDecl;
+    procedure MapLines(AFile: TImpactFile; AA: TMcpAnalysis; AMid: Integer;
+      const APath: string; const ALines: TArray<TDiffLine>);
+    procedure NoteRemoved(AFile: TImpactFile; const ALines: TArray<TDiffLine>);
+    procedure AddDiffFile(const AD: TDiffFile);
+    function Names(const AMembers: TArray<Integer>): string;
+    function UsedByText(AFile: TImpactFile; AMax: Integer): string;
+    function Leftovers: TObjectDictionary<string, TList<THit>>;
+    function ImplementedIn(const AT: TTarget): TArray<string>;
+  public
+    constructor Create(AWs: TMcpWorkspace);
+    destructor Destroy; override;
+    procedure AddTarget(const AT: TTarget);
+    procedure AddDiff(const AText: string);
+    function Empty: Boolean;
+    function Answer(ADepth, ALimit: Integer): string;
+  end;
+
+function IsRoutineHead(const AHead: string): Boolean;
+begin
+  Result := (AHead = 'procedure') or (AHead = 'function') or
+    (AHead = 'constructor') or (AHead = 'destructor') or
+    (AHead = 'operator') or (AHead = 'routine');
+end;
+
+function HasInt(const AValues: TArray<Integer>; AValue: Integer): Boolean;
+begin
+  for var LV in AValues do
+    if LV = AValue then
+      Exit(True);
+  Result := False;
+end;
+
+constructor TMemberReach.Create(AWs: TMcpWorkspace);
+begin
+  inherited Create;
+  FWs := AWs;
+  FReach := TDictionary<Integer, TArray<Boolean>>.Create;
+end;
+
+destructor TMemberReach.Destroy;
+begin
+  FReach.Free;
+  inherited;
+end;
+
+function TMemberReach.Reach(AMember: Integer): TArray<Boolean>;
+var
+  LA: TMcpAnalysis;
+  LQueue: TList<Integer>;
+  LMid, LHead: Integer;
+  LM: TPasSemaModel;
+begin
+  if FReach.TryGetValue(AMember, Result) then
+    Exit;
+  Result := nil;
+  if FWs.Members[AMember].Analysis >= 0 then
+  begin
+    LA := FWs.Analyses[FWs.Members[AMember].Analysis];
+    SetLength(Result, LA.Proj.ModelCount);
+    LMid := LA.Nav.ModelIdOf(FWs.Members[AMember].MainSource);
+    if LMid >= 0 then
+    begin
+      LQueue := TList<Integer>.Create;
+      try
+        Result[LMid] := True;
+        LQueue.Add(LMid);
+        LHead := 0;
+        while LHead < LQueue.Count do
+        begin
+          LM := LA.Proj.Model(LQueue[LHead]);
+          Inc(LHead);
+          for var LU := 0 to High(LM.UsesList) do
+          begin
+            LMid := LM.UsesList[LU].UnitId;
+            if (LMid >= 0) and (LMid < Length(Result)) and not Result[LMid] then
+            begin
+              Result[LMid] := True;
+              LQueue.Add(LMid);
+            end;
+          end;
+        end;
+      finally
+        LQueue.Free;
+      end;
+    end;
+  end;
+  FReach.Add(AMember, Result);
+end;
+
+function TMemberReach.MembersOf(const AFile: string): TArray<Integer>;
+var
+  LMid: Integer;
+  LReach: TArray<Boolean>;
+begin
+  Result := nil;
+  for var LIdx := 0 to High(FWs.Members) do
+  begin
+    if FWs.Members[LIdx].Analysis < 0 then
+      Continue;
+    LMid := FWs.Analyses[FWs.Members[LIdx].Analysis].Nav.ModelIdOf(AFile);
+    if LMid < 0 then
+      Continue;
+    LReach := Reach(LIdx);
+    if (LMid < Length(LReach)) and LReach[LMid] then
+      Result := Result + [LIdx];
+  end;
+end;
+
+{ ---- reading a diff ---- }
+
+// A path from a `---` or `+++` line: the timestamp `diff -u` writes after a
+// tab cut off, git's quotes undone; '' for /dev/null.
+function DiffPath(const AText: string): string;
+var
+  LAt: Integer;
+begin
+  Result := AText;
+  LAt := Pos(#9, Result);
+  if LAt > 0 then
+    Result := Copy(Result, 1, LAt - 1);
+  Result := Trim(Result);
+  if (Length(Result) >= 2) and (Result[1] = '"') and
+     (Result[Length(Result)] = '"') then
+    Result := Copy(Result, 2, Length(Result) - 2).Replace('\"', '"').
+      Replace('\\', '\');
+  if Result = '/dev/null' then
+    Result := '';
+end;
+
+// `@@ -12,3 +12,4 @@`: the old line count, the new start and count - a count
+// left out is 1.
+function ParseHunk(const AText: string; out AOld, ANewStart,
+  ANew: Integer): Boolean;
+var
+  LAt, LOldStart: Integer;
+
+  function Num(out AValue: Integer): Boolean;
+  var
+    LFrom: Integer;
+  begin
+    LFrom := LAt;
+    while (LAt <= Length(AText)) and CharInSet(AText[LAt], ['0'..'9']) do
+      Inc(LAt);
+    Result := (LAt > LFrom) and TryStrToInt(Copy(AText, LFrom, LAt - LFrom),
+      AValue);
+  end;
+
+  function Count(out AValue: Integer): Boolean;
+  begin
+    AValue := 1;
+    Result := True;
+    if (LAt <= Length(AText)) and (AText[LAt] = ',') then
+    begin
+      Inc(LAt);
+      Result := Num(AValue);
+    end;
+  end;
+
+begin
+  Result := False;
+  AOld := 0;
+  ANewStart := 0;
+  ANew := 0;
+  if not AText.StartsWith('@@ -') then
+    Exit;
+  LAt := 5;
+  if not Num(LOldStart) or not Count(AOld) or (Copy(AText, LAt, 2) <> ' +') then
+    Exit;
+  Inc(LAt, 2);
+  Result := Num(ANewStart) and Count(ANew);
+end;
+
+// The files of a unified diff - `git diff`, `diff -u` - with their lines
+// numbered in the new file. A hunk is read by its counts, so a removed line
+// that starts with `--` is not taken for a header.
+function ParseDiff(const AText: string): TArray<TDiffFile>;
+var
+  LFiles: TList<TDiffFile>;
+  LRows: TList<TDiffLine>;
+  LCur: TDiffFile;
+  LOpen, LSawOld: Boolean;
+  LOld, LNew, LLine, LAt: Integer;
+  LS: string;
+
+  procedure Close;
+  begin
+    if LOpen then
+    begin
+      LCur.Lines := LRows.ToArray;
+      LFiles.Add(LCur);
+    end;
+    LCur := Default(TDiffFile);
+    LRows.Clear;
+    LOpen := False;
+    LSawOld := False;
+  end;
+
+  procedure Open;
+  begin
+    Close;
+    LOpen := True;
+  end;
+
+  procedure Add(AKind: Char);
+  var
+    LRow: TDiffLine;
+  begin
+    LRow.Kind := AKind;
+    LRow.Line := LLine;
+    LRow.Text := Copy(LS, 2, MaxInt);
+    LRows.Add(LRow);
+  end;
+
+begin
+  LFiles := TList<TDiffFile>.Create;
+  LRows := TList<TDiffLine>.Create;
+  try
+    LOpen := False;
+    LSawOld := False;
+    LCur := Default(TDiffFile);
+    LOld := 0;
+    LNew := 0;
+    LLine := 0;
+    for var LRaw in AText.Split([#10]) do
+    begin
+      LS := LRaw;
+      if LS.EndsWith(#13) then
+        SetLength(LS, Length(LS) - 1);
+      if LOpen and ((LOld > 0) or (LNew > 0)) then
+      begin
+        // An empty line in a hunk is a context line whose space was trimmed.
+        if LS = '' then
+          LS := ' ';
+        case LS[1] of
+          ' ':
+            begin
+              Add(' ');
+              Inc(LLine);
+              Dec(LOld);
+              Dec(LNew);
+              Continue;
+            end;
+          '+':
+            begin
+              Add('+');
+              Inc(LLine);
+              Dec(LNew);
+              Continue;
+            end;
+          '-':
+            begin
+              Add('-');
+              Dec(LOld);
+              Continue;
+            end;
+          '\':
+            Continue;   // \ No newline at end of file
+        end;
+        // A hunk cut short: read on as a header.
+        LOld := 0;
+        LNew := 0;
+      end;
+      if LS.StartsWith('diff ') then
+      begin
+        Open;
+        // `diff --git a/X b/Y`: the paths when no ---/+++ follows - a binary
+        // file, a rename alone.
+        LAt := LS.LastIndexOf(' b/');
+        if LS.StartsWith('diff --git ') and (LAt > 10) then
+        begin
+          LCur.OldPath := Trim(Copy(LS, 12, LAt - 10));
+          LCur.NewPath := Trim(Copy(LS, LAt + 2, MaxInt));
+        end;
+      end
+      else if LS.StartsWith('--- ') then
+      begin
+        if not LOpen or LSawOld then
+          Open;
+        LSawOld := True;
+        LCur.OldPath := DiffPath(Copy(LS, 5, MaxInt));
+      end
+      else if LS.StartsWith('+++ ') then
+      begin
+        if not LOpen then
+          Open;
+        LCur.NewPath := DiffPath(Copy(LS, 5, MaxInt));
+      end
+      else if LOpen and LS.StartsWith('@@ ') then
+      begin
+        if ParseHunk(LS, LOld, LLine, LNew) and (LNew = 0) then
+          Inc(LLine);   // `+12,0`: the removal follows line 12
+      end
+      else if LOpen and LS.StartsWith('rename to ') then
+        LCur.NewPath := Trim(Copy(LS, 11, MaxInt))
+      else if LOpen and LS.StartsWith('deleted file mode') then
+        LCur.NewPath := '';
+    end;
+    Close;
+    Result := LFiles.ToArray;
+  finally
+    LRows.Free;
+    LFiles.Free;
+  end;
+end;
+
+// A diff path without git's a/ or b/ in front, as an answer names it.
+function DiffShown(const APath: string): string;
+begin
+  if APath.StartsWith('a/') or APath.StartsWith('b/') then
+    Result := Copy(APath, 3, MaxInt)
+  else
+    Result := APath;
+  Result := Result.Replace('/', '\');
+end;
+
+// A diff path on disk: as written - git's a/ b/ taken off first - relative to
+// the group directory or to a directory above it, where git's paths start
+// when the repository holds more than the group. '' when none exists.
+function DiffFileOnDisk(AWs: TMcpWorkspace; const APath: string): string;
+var
+  LCands: TArray<string>;
+  LDir, LUp, LFull: string;
+begin
+  Result := '';
+  if APath = '' then
+    Exit;
+  if APath.StartsWith('a/') or APath.StartsWith('b/') then
+    LCands := [Copy(APath, 3, MaxInt), APath]
+  else
+    LCands := [APath];
+  for var LC in LCands do
+    try
+      if TPath.IsPathRooted(LC) then
+      begin
+        if TFile.Exists(LC) then
+          Exit(TPath.GetFullPath(LC));
+        Continue;
+      end;
+      LDir := AWs.Root;
+      while LDir <> '' do
+      begin
+        LFull := TPath.GetFullPath(TPath.Combine(LDir, LC));
+        if TFile.Exists(LFull) then
+          Exit(LFull);
+        LUp := TPath.GetDirectoryName(LDir);
+        if SameText(LUp, LDir) then
+          Break;
+        LDir := LUp;
+      end;
+    except
+      // characters no path can hold: not this candidate
+    end;
+end;
+
+// Is a changed line code, rather than blank or a comment alone? Read from the
+// diff's own text, so a removed line is judged too; a line inside a block
+// comment passes for code, which only widens the answer.
+function IsCodeText(const AText: string): Boolean;
+var
+  LT: string;
+begin
+  LT := Trim(AText);
+  if (LT = '') or LT.StartsWith('//') then
+    Exit(False);
+  if LT.StartsWith('{') and not LT.StartsWith('{$') and
+     (Pos('}', LT) = Length(LT)) then
+    Exit(False);
+  if LT.StartsWith('(*') and not LT.StartsWith('(*$') and LT.EndsWith('*)') then
+    Exit(False);
+  Result := True;
+end;
+
+// A line as the check that a diff matches the file compares it: trimmed, and
+// every character past ASCII dropped - a diff that went through a console
+// may carry those in another encoding, and it is the numbering that counts.
+function LineSkeleton(const AText: string): string;
+var
+  LSb: TStringBuilder;
+begin
+  LSb := TStringBuilder.Create;
+  try
+    for var LCh in AText do
+      if LCh <= #127 then
+        LSb.Append(LCh);
+    Result := Trim(LSb.ToString);
+  finally
+    LSb.Free;
+  end;
+end;
+
+// The routine, property or type a line of source declares, by the words it
+// starts with - `procedure TFoo.Bar(`, `class function Baz:`, `property
+// Count:`, `TFoo = class(` - with its head word in AHead; '' for any other
+// line.
+function DeclaredOnLine(const AText: string; out AHead: string): string;
+const
+  HEADS: array[0..5] of string = ('procedure', 'function', 'constructor',
+    'destructor', 'operator', 'property');
+  TYPE_HEADS: array[0..4] of string = ('class', 'record', 'interface',
+    'object', 'dispinterface');
+var
+  LT, LFirst, LWord: string;
+  LAt: Integer;
+
+  function Ident: string;
+  var
+    LFrom: Integer;
+  begin
+    while (LAt <= Length(LT)) and (LT[LAt] = ' ') do
+      Inc(LAt);
+    LFrom := LAt;
+    while (LAt <= Length(LT)) and (IsIdentChar(LT[LAt]) or (LT[LAt] = '.')) do
+      Inc(LAt);
+    Result := Copy(LT, LFrom, LAt - LFrom);
+  end;
+
+  // A qualified name, generic parameters stepped over: TList<T>.Add.
+  function QualName: string;
+  begin
+    Result := Ident;
+    while (LAt <= Length(LT)) and (LT[LAt] = '<') do
+    begin
+      while (LAt <= Length(LT)) and (LT[LAt] <> '>') do
+        Inc(LAt);
+      Inc(LAt);
+      if (LAt <= Length(LT)) and (LT[LAt] = '.') then
+        Result := Result + Ident;
+    end;
+  end;
+
+begin
+  Result := '';
+  AHead := '';
+  LT := Trim(AText).Replace(#9, ' ');
+  LAt := 1;
+  LFirst := Ident;
+  LWord := LowerCase(LFirst);
+  if LWord = 'class' then
+    LWord := LowerCase(Ident);
+  for var LH in HEADS do
+    if LWord = LH then
+    begin
+      Result := QualName;
+      if Result <> '' then
+        AHead := LH;
+      Exit;
+    end;
+  // `TFoo = class(TBase)`, `TFoo<T> = record`
+  if (LFirst = '') or (Pos('.', LFirst) > 0) then
+    Exit;
+  if (LAt <= Length(LT)) and (LT[LAt] = '<') then
+  begin
+    while (LAt <= Length(LT)) and (LT[LAt] <> '>') do
+      Inc(LAt);
+    Inc(LAt);
+  end;
+  while (LAt <= Length(LT)) and (LT[LAt] = ' ') do
+    Inc(LAt);
+  if (LAt > Length(LT)) or (LT[LAt] <> '=') then
+    Exit;
+  Inc(LAt);
+  LWord := LowerCase(Ident);
+  if LWord = 'packed' then
+    LWord := LowerCase(Ident);
+  for var LH in TYPE_HEADS do
+    if LWord = LH then
+    begin
+      AHead := LH;
+      Result := LFirst;
+      Exit;
+    end;
+end;
+
+// The fields a line of a type declares - `FCount, FTotal: Integer;` - by its
+// shape: names before a colon, a semicolon at the end, no parenthesis (a
+// parameter). Nil for any other line.
+function FieldsOnLine(const AText: string): TArray<string>;
+const
+  WORDS: array[0..12] of string = ('case', 'var', 'const', 'type', 'class',
+    'property', 'strict', 'private', 'protected', 'public', 'published',
+    'threadvar', 'out');
+var
+  LT, LName: string;
+  LAt: Integer;
+begin
+  Result := nil;
+  LT := AText;
+  LAt := Pos('//', LT);
+  if LAt > 0 then
+    LT := Copy(LT, 1, LAt - 1);
+  LT := Trim(LT);
+  LAt := Pos(':', LT);
+  if (LAt <= 1) or (Copy(LT, LAt, 2) = ':=') or not LT.EndsWith(';') or
+     (Pos('(', LT) > 0) or (Pos(')', LT) > 0) then
+    Exit;
+  for var LPart in Copy(LT, 1, LAt - 1).Split([',']) do
+  begin
+    LName := Trim(LPart);
+    if not IsValidIdent(LName) or (IndexText(LName, WORDS) >= 0) then
+      Exit(nil);
+    Result := Result + [LName];
+  end;
+end;
+
+// The visible tokens of the names a declaration node declares: a routine's
+// last segment (an implementation header names its declaration's symbol
+// there), a type's name, every name a variable declaration lists, the one
+// name of a constant or a property.
+function DeclNameVises(LM: TPasSemaModel; ANode: Integer): TArray<Integer>;
+var
+  LChild, LPrev, LFirst, LLast: Integer;
+begin
+  Result := nil;
+  case LM.Tree.Nodes[ANode].Kind of
+    nkRoutine:
+      begin
+        DeclName(LM, ANode, LFirst, LLast);
+        if LLast >= 0 then
+          Result := [LLast];
+      end;
+    nkTypeDecl:
+      begin
+        DeclName(LM, ANode, LFirst);
+        if LFirst >= 0 then
+          Result := [LFirst];
+      end;
+    nkVarDecl, nkConstDecl, nkPropertyDecl:
+      begin
+        LChild := LM.Tree.Nodes[ANode].FirstChild;
+        while LChild <> NIL_NODE do
+        begin
+          case LM.Tree.Nodes[LChild].Kind of
+            nkIdent:
+              begin
+                // The type after the colon is an nkIdent too.
+                LPrev := LM.Tree.NodeLeftmostVis(LChild) - 1;
+                if (LPrev >= 0) and
+                   (LM.Tree.Source.VisibleToken(LPrev).Kind = tkColon) then
+                  Break;
+                Result := Result + [LM.Tree.NodeLeftmostVis(LChild)];
+                if LM.Tree.Nodes[ANode].Kind <> nkVarDecl then
+                  Break;
+              end;
+            nkAttrGroup:
+              ;
+          else
+            Break;
+          end;
+          LChild := LM.Tree.Nodes[LChild].NextSibling;
+        end;
+      end;
+  end;
+end;
+
+// '26, 53-56' - sorted, runs joined, six runs at most.
+function LinesText(const ALines: TArray<Integer>): string;
+var
+  LSorted: TArray<Integer>;
+  LFrom, LRuns, LIdx: Integer;
+begin
+  LSorted := Copy(ALines);
+  TArray.Sort<Integer>(LSorted);
+  Result := '';
+  LRuns := 0;
+  LIdx := 0;
+  while LIdx <= High(LSorted) do
+  begin
+    LFrom := LSorted[LIdx];
+    while (LIdx < High(LSorted)) and (LSorted[LIdx + 1] <= LSorted[LIdx] + 1) do
+      Inc(LIdx);
+    Inc(LRuns);
+    if LRuns > 6 then
+      Exit(Result + ', ...');
+    if Result <> '' then
+      Result := Result + ', ';
+    if LSorted[LIdx] > LFrom then
+      Result := Result + Format('%d-%d', [LFrom, LSorted[LIdx]])
+    else
+      Result := Result + IntToStr(LFrom);
+    Inc(LIdx);
+  end;
+end;
+
+{ ---- the change, and its answer ---- }
+
+procedure TImpactDecl.AddLine(ALine: Integer);
+begin
+  for var LL in Lines do
+    if LL = ALine then
+      Exit;
+  Lines := Lines + [ALine];
+end;
+
+function TImpactDecl.FirstLine: Integer;
+begin
+  Result := MaxInt;
+  for var LL in Lines do
+    Result := Min(Result, LL);
+end;
+
+constructor TImpactFile.Create;
+begin
+  inherited Create;
+  Project := -1;
+  Decls := TList<TImpactDecl>.Create;
+end;
+
+destructor TImpactFile.Destroy;
+begin
+  Decls.Free;
+  inherited;
+end;
+
+constructor TImpact.Create(AWs: TMcpWorkspace);
+begin
+  inherited Create;
+  FWs := AWs;
+  FReach := TMemberReach.Create(AWs);
+  FEnclosing := TEnclosing.Create(AWs);
+  FFiles := TObjectList<TImpactFile>.Create(True);
+  FFileOf := TDictionary<string, TImpactFile>.Create;
+  FDecls := TObjectList<TImpactDecl>.Create(True);
+  FDeclOf := TDictionary<string, TImpactDecl>.Create;
+  FOther := TStringList.Create;
+  FNamed := TStringList.Create;
+  FDiffFiles := -1;
+end;
+
+destructor TImpact.Destroy;
+begin
+  FNamed.Free;
+  FOther.Free;
+  FDeclOf.Free;
+  FDecls.Free;
+  FFileOf.Free;
+  FFiles.Free;
+  FEnclosing.Free;
+  FReach.Free;
+  inherited;
+end;
+
+function TImpact.FileFor(const APath: string): TImpactFile;
+begin
+  if FFileOf.TryGetValue(LowerCase(APath), Result) then
+    Exit;
+  Result := TImpactFile.Create;
+  Result.Path := APath;
+  FFiles.Add(Result);
+  FFileOf.Add(LowerCase(APath), Result);
+end;
+
+function TImpact.AddDecl(AFile: TImpactFile; const AT: TTarget): TImpactDecl;
+var
+  LKey: string;
+begin
+  LKey := SiteKey(AT.DeclFile, AT.DeclLine, AT.DeclCol);
+  if FDeclOf.TryGetValue(LKey, Result) then
+    Exit;
+  Result := TImpactDecl.Create;
+  Result.T := AT;
+  Result.Node := -1;
+  FDecls.Add(Result);
+  FDeclOf.Add(LKey, Result);
+  AFile.Decls.Add(Result);
+end;
+
+function TImpact.AddPlace(AFile: TImpactFile;
+  const APlace: string): TImpactDecl;
+var
+  LKey: string;
+begin
+  LKey := LowerCase(AFile.Path) + '|' + APlace;
+  if FDeclOf.TryGetValue(LKey, Result) then
+    Exit;
+  Result := TImpactDecl.Create;
+  Result.Place := APlace;
+  Result.Node := -1;
+  FDecls.Add(Result);
+  FDeclOf.Add(LKey, Result);
+  AFile.Decls.Add(Result);
+end;
+
+{ The declarations the changed lines of APath touch, read from model AMid -
+  APath's own, or one including it. A changed line of code touches the
+  innermost declaration around its tokens: a routine (the whole of it - what
+  is nested in a routine is its own business), a type, or a variable, a
+  constant or a property of a unit or a type. A line with no token of its own
+  - a directive, a removal - touches the declaration around the tokens on
+  both sides of it. Outside every declaration: the place, a uses clause or an
+  initialization section. Refused when the diff's lines are not the file's:
+  a diff of another state numbers another file. }
+procedure TImpact.MapLines(AFile: TImpactFile; AA: TMcpAnalysis; AMid: Integer;
+  const APath: string; const ALines: TArray<TDiffLine>);
+var
+  LM: TPasSemaModel;
+  LFileId, LCount, LLine, LCol, LNext, LB, LTok, LIfaceFrom, LIfaceTo,
+    LFirstVis, LLastVis: Integer;
+  LText: string;
+  LNodes, LFrom, LTo, LOuter, LPlaceFrom, LPlaceTo, LStack: TList<Integer>;
+  LPlaceName: TStringList;
+  LOrder, LInner, LFirst, LLast, LBefore, LAfter: TArray<Integer>;
+  LPlus, LCode: Boolean;
+  LFid, LFromLine, LToLine: Integer;
+  LDeclsOf: TDictionary<Integer, TArray<TImpactDecl>>;
+  LAdded: TDictionary<Integer, Boolean>;
+
+  function InRoutine(ANode: Integer): Boolean;
+  var
+    LUp: Integer;
+  begin
+    LUp := LM.Tree.Nodes[ANode].Parent;
+    while LUp <> NIL_NODE do
+    begin
+      if LM.Tree.Nodes[LUp].Kind = nkRoutine then
+        Exit(True);
+      LUp := LM.Tree.Nodes[LUp].Parent;
+    end;
+    Result := False;
+  end;
+
+  procedure AddPlaceSpan(ANode: Integer; const AName: string);
+  begin
+    if LM.Tree.NodeVisRange(ANode, LFirstVis, LLastVis) then
+    begin
+      LPlaceFrom.Add(LFirstVis);
+      LPlaceTo.Add(LLastVis);
+      LPlaceName.Add(AName);
+    end;
+  end;
+
+  // The declarations span ASpan stands for, resolved once. A name that does
+  // not resolve here - written in an include file - is listed by its text.
+  function DeclsOf(ASpan: Integer): TArray<TImpactDecl>;
+  var
+    LFid, LNameLine, LNameCol, LTMid, LTSym, LVis: Integer;
+    LName: string;
+    LT: TTarget;
+  begin
+    if LDeclsOf.TryGetValue(ASpan, Result) then
+      Exit;
+    Result := nil;
+    for var LNameVis in DeclNameVises(LM, LNodes[ASpan]) do
+      if VisPos(LM, LNameVis, LFid, LNameLine, LNameCol) and (LFid = 0) and
+         AA.Nav.SymbolAt(AMid, LNameLine, LNameCol, LTMid, LTSym, LName) then
+      begin
+        LT := Default(TTarget);
+        LT.Ids := NewIds(FWs);
+        if FillSymbolTarget(FWs, AA, LTMid, LTSym, LT) then
+        begin
+          MapToOthers(FWs, LT);
+          Result := Result + [AddDecl(AFile, LT)];
+        end;
+      end;
+    if Result = nil then
+    begin
+      LName := DeclName(LM, LNodes[ASpan], LVis);
+      if LName <> '' then
+        Result := [AddPlace(AFile, LName)];
+    end;
+    LDeclsOf.Add(ASpan, Result);
+  end;
+
+  // A changed point: the tokens AB..AAfter, one token or the two around a
+  // line that has none.
+  procedure Touch(AB, AAfter, ALine: Integer);
+  var
+    LS: Integer;
+  begin
+    if (LIfaceFrom >= 0) and (AB >= LIfaceFrom) and (AB <= LIfaceTo) then
+      AFile.Iface := True;
+    LS := -1;
+    if (AB >= 0) and (AAfter >= 0) then
+    begin
+      LS := LInner[AAfter];
+      while (LS >= 0) and (LFrom[LS] > AB) do
+        LS := LOuter[LS];
+    end;
+    if LS >= 0 then
+    begin
+      for var LD in DeclsOf(LS) do
+        LD.AddLine(ALine);
+      Exit;
+    end;
+    if (AB < 0) or (AAfter < 0) then
+      Exit;
+    for var LP := 0 to LPlaceName.Count - 1 do
+      if (AB >= LPlaceFrom[LP]) and (AAfter <= LPlaceTo[LP]) then
+      begin
+        AddPlace(AFile, LPlaceName[LP]).AddLine(ALine);
+        Exit;
+      end;
+  end;
+
+  // A changed line with tokens of its own: the innermost declarations they
+  // are in. One that holds another met on the line is left out - the `;`
+  // after `property X: T read FX` is the class's token, and the property
+  // changed, not the class.
+  procedure TouchLine(ALine: Integer);
+  var
+    LSpans: TList<Integer>;
+    LUp, LS: Integer;
+    LHolds: Boolean;
+  begin
+    LSpans := TList<Integer>.Create;
+    try
+      for var LV := LFirst[ALine] to LLast[ALine] do
+        if (LM.Tree.Source.Visible[LV].FileId = LFileId) and
+           not LSpans.Contains(LInner[LV]) then
+          LSpans.Add(LInner[LV]);
+      LS := -1;
+      for var LCand in LSpans do
+      begin
+        if LCand < 0 then
+          Continue;
+        LHolds := False;
+        for var LOther in LSpans do
+        begin
+          LUp := -1;
+          if (LOther >= 0) and (LOther <> LCand) then
+            LUp := LOuter[LOther];
+          while (LUp >= 0) and not LHolds do
+          begin
+            LHolds := LUp = LCand;
+            LUp := LOuter[LUp];
+          end;
+        end;
+        if not LHolds then
+        begin
+          LS := LCand;
+          Touch(LFrom[LS], LFrom[LS], ALine);
+        end;
+      end;
+      // No declaration on the line: a place, or the unit's own lines.
+      if LS < 0 then
+        Touch(LFirst[ALine], LFirst[ALine], ALine);
+      for var LV := LFirst[ALine] to LLast[ALine] do
+        if (LIfaceFrom >= 0) and (LV >= LIfaceFrom) and (LV <= LIfaceTo) then
+          AFile.Iface := True;
+    finally
+      LSpans.Free;
+    end;
+  end;
+
+  // A run that only removes lines, ALines[AFrom..ATo]. Out of a type, the
+  // members it removed are named - a removed routine or property the file
+  // lists already, a field here - and their users are what breaks, not every
+  // user of the type. What names no member (an enum value, a GUID) changed
+  // the type itself.
+  procedure TouchRemoval(AFrom, ATo: Integer);
+  var
+    LAt, LBv, LAv, LS: Integer;
+    LHead: string;
+    LMembers, LInHeader: Boolean;
+  begin
+    LAt := EnsureRange(ALines[AFrom].Line, 1, LCount + 1);
+    LBv := LBefore[LAt];
+    LAv := LAfter[LAt];
+    LS := -1;
+    if (LBv >= 0) and (LAv >= 0) then
+    begin
+      LS := LInner[LAv];
+      while (LS >= 0) and (LFrom[LS] > LBv) do
+        LS := LOuter[LS];
+    end;
+    if (LS >= 0) and (LM.Tree.Nodes[LNodes[LS]].Kind = nkTypeDecl) then
+    begin
+      LMembers := False;
+      // The lines of a removed method's parameter list look like fields.
+      LInHeader := False;
+      for var LI := AFrom to ATo do
+        if ALines[LI].Kind = '-' then
+        begin
+          if DeclaredOnLine(ALines[LI].Text, LHead) <> '' then
+          begin
+            LMembers := True;
+            LInHeader := (Pos('(', ALines[LI].Text) > 0) and
+              (Pos(')', ALines[LI].Text) = 0);
+            Continue;
+          end;
+          if LInHeader then
+          begin
+            LInHeader := Pos(')', ALines[LI].Text) = 0;
+            Continue;
+          end;
+          for var LName in FieldsOnLine(ALines[LI].Text) do
+          begin
+            LMembers := True;
+            if IndexText(LName, AFile.RemovedKeys) < 0 then
+            begin
+              AFile.Removed := AFile.Removed + [LName + ' (field)'];
+              AFile.RemovedKeys := AFile.RemovedKeys + [LowerCase(LName)];
+            end;
+          end;
+        end;
+      if LMembers then
+      begin
+        if (LIfaceFrom >= 0) and (LBv >= LIfaceFrom) and (LBv <= LIfaceTo) then
+          AFile.Iface := True;
+        Exit;
+      end;
+    end;
+    Touch(LBv, LAv, LAt);
+  end;
+
+begin
+  if not AA.Proj.EnsureHydrated(AMid) then
+  begin
+    AFile.Note := 'its unit could not be read back (a library unit changed '
+      + 'on disk is not re-analyzed)';
+    Exit;
+  end;
+  LM := AA.Proj.Model(AMid);
+  LFileId := FileIdOf(LM, APath);
+  if LFileId < 0 then
+    Exit;
+  LCount := Length(LM.Tree.Source.Files[LFileId].LineStarts);
+  for var LD in ALines do
+  begin
+    if LD.Kind = '-' then
+      Continue;
+    LText := '';
+    if (LD.Line >= 1) and (LD.Line <= LCount) then
+      LText := LM.Tree.Source.Files[LFileId].LineText(LD.Line);
+    if LineSkeleton(LD.Text) <> LineSkeleton(LText) then
+    begin
+      AFile.Note := Format('the diff does not match the file on disk: line %d '
+        + 'reads `%s` - pass `git diff` of the files as they are now',
+        [LD.Line, CleanLine(LText, 80)]);
+      Exit;
+    end;
+  end;
+
+  LNodes := TList<Integer>.Create;
+  LFrom := TList<Integer>.Create;
+  LTo := TList<Integer>.Create;
+  LOuter := TList<Integer>.Create;
+  LPlaceFrom := TList<Integer>.Create;
+  LPlaceTo := TList<Integer>.Create;
+  LPlaceName := TStringList.Create;
+  LStack := TList<Integer>.Create;
+  LDeclsOf := TDictionary<Integer, TArray<TImpactDecl>>.Create;
+  LAdded := TDictionary<Integer, Boolean>.Create;
+  try
+    LIfaceFrom := -1;
+    LIfaceTo := -1;
+    for var LNode := 0 to High(LM.Tree.Nodes) do
+      case LM.Tree.Nodes[LNode].Kind of
+        nkRoutine, nkTypeDecl, nkVarDecl, nkConstDecl, nkPropertyDecl:
+          if not InRoutine(LNode) and
+             LM.Tree.NodeVisRange(LNode, LFirstVis, LLastVis) then
+          begin
+            LNodes.Add(LNode);
+            LFrom.Add(LFirstVis);
+            LTo.Add(LLastVis);
+            LOuter.Add(-1);
+          end;
+        nkUsesClause:
+          AddPlaceSpan(LNode, 'uses clause');
+        nkInitSec:
+          AddPlaceSpan(LNode, 'initialization');
+        nkFinalSec:
+          AddPlaceSpan(LNode, 'finalization');
+        nkExportsClause:
+          AddPlaceSpan(LNode, 'exports');
+        nkBlock:
+          if (LM.Tree.Nodes[LNode].Parent <> NIL_NODE) and
+             (LM.Tree.Nodes[LM.Tree.Nodes[LNode].Parent].Kind in [nkProgram,
+             nkLibrary]) then
+            AddPlaceSpan(LNode, 'main block');
+        nkInterfaceSec:
+          if not LM.Tree.NodeVisRange(LNode, LIfaceFrom, LIfaceTo) then
+          begin
+            LIfaceFrom := -1;
+            LIfaceTo := -1;
+          end;
+      end;
+
+    // The innermost declaration of every token, and the one around each
+    // declaration: declarations nest, so a sweep in token order with the open
+    // ones on a stack has the innermost on top.
+    SetLength(LOrder, LNodes.Count);
+    for var LI := 0 to High(LOrder) do
+      LOrder[LI] := LI;
+    TArray.Sort<Integer>(LOrder, TComparer<Integer>.Construct(
+      function(const L, R: Integer): Integer
+      begin
+        Result := LFrom[L] - LFrom[R];
+        if Result = 0 then
+          Result := LTo[R] - LTo[L];
+      end));
+    SetLength(LInner, Length(LM.Tree.Source.Visible));
+    LNext := 0;
+    for var LV := 0 to High(LInner) do
+    begin
+      while (LStack.Count > 0) and (LTo[LStack.Last] < LV) do
+        LStack.Delete(LStack.Count - 1);
+      while (LNext <= High(LOrder)) and (LFrom[LOrder[LNext]] <= LV) do
+      begin
+        if LStack.Count > 0 then
+          LOuter[LOrder[LNext]] := LStack.Last;
+        if LTo[LOrder[LNext]] >= LV then
+          LStack.Add(LOrder[LNext]);
+        Inc(LNext);
+      end;
+      if LStack.Count > 0 then
+        LInner[LV] := LStack.Last
+      else
+        LInner[LV] := -1;
+    end;
+
+    // By line of APath: the first and last token on it, the last token on a
+    // line above, the first on this line or one below.
+    SetLength(LFirst, LCount + 2);
+    SetLength(LLast, LCount + 2);
+    for var LI := 0 to LCount + 1 do
+    begin
+      LFirst[LI] := -1;
+      LLast[LI] := -1;
+    end;
+    for var LV := 0 to High(LM.Tree.Source.Visible) do
+      if LM.Tree.Source.Visible[LV].FileId = LFileId then
+      begin
+        LTok := LM.Tree.Source.Visible[LV].TokenIndex;
+        LM.Tree.Source.Files[LFileId].OffsetToLineCol(
+          LM.Tree.Source.Files[LFileId].Tokens[LTok].Start, LLine, LCol);
+        if (LLine >= 1) and (LLine <= LCount) then
+        begin
+          if LFirst[LLine] < 0 then
+            LFirst[LLine] := LV;
+          LLast[LLine] := LV;
+        end;
+      end;
+    SetLength(LBefore, LCount + 2);
+    LB := -1;
+    for var LI := 1 to LCount + 1 do
+    begin
+      LBefore[LI] := LB;
+      if (LI <= LCount) and (LLast[LI] >= 0) then
+        LB := LLast[LI];
+    end;
+    SetLength(LAfter, LCount + 2);
+    LB := -1;
+    for var LI := LCount + 1 downto 1 do
+    begin
+      if (LI <= LCount) and (LFirst[LI] >= 0) then
+        LB := LFirst[LI];
+      LAfter[LI] := LB;
+    end;
+
+    // The diff in runs of changed lines between context lines. A run with
+    // added code is shown by its added lines; its removed ones would only
+    // name what holds the change - the class, for a member edited in it. A
+    // run that only removes code is a point between two tokens.
+    LB := 0;
+    while LB <= High(ALines) do
+    begin
+      if ALines[LB].Kind = ' ' then
+      begin
+        Inc(LB);
+        Continue;
+      end;
+      LNext := LB;
+      LPlus := False;
+      LCode := False;
+      while (LNext <= High(ALines)) and (ALines[LNext].Kind <> ' ') do
+      begin
+        if IsCodeText(ALines[LNext].Text) then
+        begin
+          LCode := True;
+          LPlus := LPlus or (ALines[LNext].Kind = '+');
+        end
+        else
+          AFile.Comments := True;
+        Inc(LNext);
+      end;
+      AFile.Code := AFile.Code or LCode;
+      if LPlus then
+      begin
+        for var LI := LB to LNext - 1 do
+          if (ALines[LI].Kind = '+') and IsCodeText(ALines[LI].Text) then
+          begin
+            LLine := EnsureRange(ALines[LI].Line, 1, LCount + 1);
+            if (LLine <= LCount) and (LFirst[LLine] >= 0) then
+              TouchLine(LLine)
+            else
+              Touch(LBefore[LLine], LAfter[LLine], LLine);
+          end;
+      end
+      else if LCode then
+        TouchRemoval(LB, LNext - 1);
+      LB := LNext;
+    end;
+
+    // A type every line of which is added is new: listed alone, what it
+    // declares folded into it, implementations included - each member of a
+    // new class would otherwise be a root that only the new code calls.
+    for var LI := 0 to High(ALines) do
+      if ALines[LI].Kind = '+' then
+        LAdded.AddOrSetValue(ALines[LI].Line, True);
+    for var LS in LDeclsOf.Keys do
+    begin
+      if (LM.Tree.Nodes[LNodes[LS]].Kind <> nkTypeDecl) or
+         (Length(LDeclsOf[LS]) <> 1) or (LDeclsOf[LS][0].Place <> '') or
+         not VisPos(LM, LFrom[LS], LFid, LFromLine, LCol) or
+         (LFid <> LFileId) or not VisPos(LM, LTo[LS], LFid, LToLine, LCol) or
+         (LFid <> LFileId) then
+        Continue;
+      LPlus := True;
+      for var LL := LFromLine to Min(LToLine, LCount) do
+        if (LFirst[LL] >= 0) and not LAdded.ContainsKey(LL) then
+          LPlus := False;
+      if not LPlus then
+        Continue;
+      for var LX in LDeclsOf.Keys do
+        if (LX <> LS) and (LFrom[LX] >= LFrom[LS]) and (LTo[LX] <= LTo[LS]) then
+          for var LD in LDeclsOf[LX] do
+            if AFile.Decls.Contains(LD) then
+            begin
+              for var LL in LD.Lines do
+                LDeclsOf[LS][0].AddLine(LL);
+              AFile.Decls.Remove(LD);
+            end;
+    end;
+  finally
+    LAdded.Free;
+    LDeclsOf.Free;
+    LStack.Free;
+    LPlaceName.Free;
+    LPlaceTo.Free;
+    LPlaceFrom.Free;
+    LOuter.Free;
+    LTo.Free;
+    LFrom.Free;
+    LNodes.Free;
+  end;
+end;
+
+// The routines, properties and types the diff removes from a file: declared
+// on a removed line, and on no added one - a changed signature is not a
+// removal.
+procedure TImpact.NoteRemoved(AFile: TImpactFile;
+  const ALines: TArray<TDiffLine>);
+var
+  LName, LHead, LKey: string;
+  LMinus: TDictionary<string, string>;
+  LPlus: TDictionary<string, Boolean>;
+  LKeys: TStringList;
+begin
+  LMinus := TDictionary<string, string>.Create;
+  LPlus := TDictionary<string, Boolean>.Create;
+  LKeys := TStringList.Create;
+  try
+    for var LD in ALines do
+    begin
+      if LD.Kind = ' ' then
+        Continue;
+      LName := DeclaredOnLine(LD.Text, LHead);
+      if LName = '' then
+        Continue;
+      LKey := LowerCase(Copy(LName, LastDelimiter('.', LName) + 1, MaxInt));
+      if LD.Kind = '+' then
+        LPlus.AddOrSetValue(LKey, True)
+      // A method is removed from its class and its implementation: the
+      // qualified name is the one kept.
+      else if not LMinus.ContainsKey(LKey) or
+        (Length(LName) > Pos(' (', LMinus[LKey]) - 1) then
+        LMinus.AddOrSetValue(LKey, Format('%s (%s)', [LName, LHead]));
+    end;
+    for var LPair in LMinus do
+      if not LPlus.ContainsKey(LPair.Key) then
+        LKeys.Add(LPair.Key);
+    LKeys.Sort;
+    for LKey in LKeys do
+    begin
+      AFile.Removed := AFile.Removed + [LMinus[LKey]];
+      AFile.RemovedKeys := AFile.RemovedKeys + [LKey];
+    end;
+  finally
+    LKeys.Free;
+    LPlus.Free;
+    LMinus.Free;
+  end;
+end;
+
+procedure TImpact.AddDiffFile(const AD: TDiffFile);
+var
+  LPath, LShown, LExt, LFull, LUnit: string;
+  LF: TImpactFile;
+  LA, LIncA: TMcpAnalysis;
+  LMid, LOwner, LIncMid: Integer;
+  LIncluders: TStringList;
+  LM: TPasSemaModel;
+begin
+  LPath := IfThen(AD.NewPath <> '', AD.NewPath, AD.OldPath);
+  if LPath = '' then
+    Exit;
+  LShown := DiffShown(LPath);
+  LExt := LowerCase(TPath.GetExtension(LShown));
+  if not ((LExt = '.pas') or (LExt = '.dpr') or (LExt = '.dpk') or
+     (LExt = '.inc') or (LExt = '.dfm') or (LExt = '.fmx') or
+     (LExt = '.dproj')) then
+  begin
+    if FOther.IndexOf(LShown) < 0 then
+      FOther.Add(LShown);
+    Exit;
+  end;
+  if AD.NewPath = '' then
+  begin
+    LF := FileFor(LShown);
+    LF.Note := 'deleted - no longer in the index; a unit still naming it in '
+      + '`uses` does not resolve (`status` lists those)';
+    NoteRemoved(LF, AD.Lines);
+    Exit;
+  end;
+  LFull := DiffFileOnDisk(FWs, AD.NewPath);
+  if LFull = '' then
+  begin
+    LF := FileFor(LShown);
+    LF.Note := 'not found on disk, under the group directory or one above it';
+    Exit;
+  end;
+  LF := FileFor(LFull);
+  if LExt = '.dproj' then
+  begin
+    for var LIdx := 0 to High(FWs.Members) do
+      if SameText(FWs.Members[LIdx].ProjectFile, LFull) then
+      begin
+        LF.Project := LIdx;
+        LF.Note := 'the project file of ' + FWs.Members[LIdx].Name;
+      end;
+    if LF.Project < 0 then
+      LF.Note := 'a project file of no member of the group';
+    Exit;
+  end;
+  if (LExt = '.dfm') or (LExt = '.fmx') then
+  begin
+    LUnit := ChangeFileExt(LFull, '.pas');
+    LF.Note := 'a form of no analyzed unit - forms are not read';
+    for var LCand in FWs.Analyses do
+      if LCand.Nav.ModelIdOf(LUnit) >= 0 then
+      begin
+        LF.Units := [LUnit];
+        LF.Note := 'the form of ' + FWs.RelPath(LUnit) + ' - forms are not '
+          + 'read';
+        Break;
+      end;
+    Exit;
+  end;
+  NoteRemoved(LF, AD.Lines);
+  // Its own model - the owner analysis' - else the units including it.
+  LA := nil;
+  LMid := -1;
+  LOwner := FWs.OwnerAnalysis(LFull);
+  if LOwner >= 0 then
+  begin
+    LA := FWs.Analyses[LOwner];
+    LMid := LA.Nav.ModelIdOf(LFull);
+  end;
+  if LMid < 0 then
+    for var LCand in FWs.Analyses do
+    begin
+      LMid := LCand.Nav.ModelIdOf(LFull);
+      if LMid >= 0 then
+      begin
+        LA := LCand;
+        Break;
+      end;
+    end;
+  if LMid >= 0 then
+  begin
+    LF.Units := [LFull];
+    MapLines(LF, LA, LMid, LFull, AD.Lines);
+    Exit;
+  end;
+  LIncluders := TStringList.Create;
+  try
+    LIncA := nil;
+    LIncMid := -1;
+    for var LCand in FWs.Analyses do
+      for var LI := 0 to LCand.Proj.ModelCount - 1 do
+      begin
+        if not FWs.IsOwnFile(LCand.Proj.ModelFile(LI)) then
+          Continue;
+        LM := LCand.Proj.Model(LI);
+        if FileIdOf(LM, LFull) <= 0 then
+          Continue;
+        if LIncluders.IndexOf(LCand.Proj.ModelFile(LI)) < 0 then
+          LIncluders.Add(LCand.Proj.ModelFile(LI));
+        if LIncA = nil then
+        begin
+          LIncA := LCand;
+          LIncMid := LI;
+        end;
+      end;
+    if LIncA = nil then
+    begin
+      LF.Note := 'not in any analyzed project - nothing reachable uses or '
+        + 'includes it';
+      Exit;
+    end;
+    LF.Units := LIncluders.ToStringArray;
+    LF.Note := Format('included by %s', [Plural(LIncluders.Count, 'unit')]);
+    MapLines(LF, LIncA, LIncMid, LFull, AD.Lines);
+  finally
+    LIncluders.Free;
+  end;
+end;
+
+procedure TImpact.AddDiff(const AText: string);
+var
+  LFiles: TArray<TDiffFile>;
+begin
+  LFiles := ParseDiff(AText);
+  if Length(LFiles) = 0 then
+    raise EToolError.Create('no file in `diff` - pass the output of `git diff` '
+      + 'as it is: `--- a/<path>` and `+++ b/<path>` lines, then `@@` hunks');
+  FDiffFiles := Length(LFiles);
+  for var LD in LFiles do
+    AddDiffFile(LD);
+end;
+
+procedure TImpact.AddTarget(const AT: TTarget);
+var
+  LF: TImpactFile;
+  LA: TMcpAnalysis;
+  LUnit: string;
+begin
+  case AT.Kind of
+    tkUnit:
+      begin
+        LF := FileFor(AT.DeclFile);
+        LF.Units := [AT.DeclFile];
+        LF.UsedBy := True;
+      end;
+    tkSymbol:
+      begin
+        if SameText(TPath.GetExtension(AT.DeclFile), '.dcu') then
+          raise EToolError.CreateFmt('%s is declared in a compiled unit without '
+            + 'source (%s) - no project of the group changes it', [AT.Name,
+            FWs.RelPath(AT.DeclFile)]);
+        LF := FileFor(AT.DeclFile);
+        // The unit it is in: its model's file - an include's includer.
+        LA := ReportingAnalysis(FWs, AT);
+        if LA <> nil then
+        begin
+          LUnit := LA.Proj.ModelFile(AT.Ids[LA.Index].Mid);
+          if IndexText(LUnit, LF.Units) < 0 then
+            LF.Units := LF.Units + [LUnit];
+        end;
+        AddDecl(LF, AT).AddLine(AT.DeclLine);
+      end;
+  else
+    raise EToolError.CreateFmt('%s is a %s - `impact` takes a declaration, a '
+      + 'unit or a diff', [AT.Name, AT.Head]);
+  end;
+  if FNamed.IndexOf(AT.Name) < 0 then
+    FNamed.Add(AT.Name);
+end;
+
+function TImpact.Empty: Boolean;
+begin
+  Result := (FFiles.Count = 0) and (FOther.Count = 0);
+end;
+
+function TImpact.Names(const AMembers: TArray<Integer>): string;
+begin
+  Result := '';
+  for var LIdx in AMembers do
+    Result := Result + IfThen(Result <> '', ', ', '') + FWs.Members[LIdx].Name;
+end;
+
+// 'used by 3 units: AppB, uAppA, uAppB' - the units whose `uses` name it,
+// merged over the analyses, by name - AMax of them at most; past that a
+// count: a core unit's 200 importers are a recompile, not a reading list.
+function TImpact.UsedByText(AFile: TImpactFile; AMax: Integer): string;
+var
+  LNames: TStringList;
+  LMid: Integer;
+  LUnit: string;
+begin
+  LNames := TStringList.Create;
+  try
+    LNames.CaseSensitive := False;
+    for var LFile in AFile.Units do
+      for var LA in FWs.Analyses do
+      begin
+        LMid := LA.Nav.ModelIdOf(LFile);
+        if LMid < 0 then
+          Continue;
+        for var LH in LA.Nav.FindUnitReferences(LMid) do
+        begin
+          LUnit := UnitNameOfFile(LH.FilePath);
+          if LNames.IndexOf(LUnit) < 0 then
+            LNames.Add(LUnit);
+        end;
+      end;
+    LNames.Sort;
+    if LNames.Count = 0 then
+      Result := 'used by no unit'
+    else if LNames.Count > AMax then
+      Result := 'used by ' + Plural(LNames.Count, 'unit')
+    else
+      Result := Format('used by %s: %s', [Plural(LNames.Count, 'unit'),
+        String.Join(', ', LNames.ToStringArray)]);
+  finally
+    LNames.Free;
+  end;
+end;
+
+// Own-unit diagnostics naming a removed routine or type in quotes - calls
+// and uses of it that no longer resolve - by its lower-case last segment.
+// Each unit reports from its owner analysis, as `diagnostics` does.
+function TImpact.Leftovers: TObjectDictionary<string, TList<THit>>;
+var
+  LKeys: TStringList;
+  LM: TPasSemaModel;
+  LOwner: Integer;
+  LMsg, LFile: string;
+  LList: TList<THit>;
+  LH: THit;
+begin
+  Result := TObjectDictionary<string, TList<THit>>.Create([doOwnsValues]);
+  LKeys := TStringList.Create;
+  try
+    for var LF in FFiles do
+      for var LKey in LF.RemovedKeys do
+        if LKeys.IndexOf(LKey) < 0 then
+          LKeys.Add(LKey);
+    if LKeys.Count = 0 then
+      Exit;
+    for var LA in FWs.Analyses do
+      for var LMid := 0 to LA.Proj.ModelCount - 1 do
+      begin
+        if not FWs.IsOwnFile(LA.Proj.ModelFile(LMid)) then
+          Continue;
+        LOwner := FWs.OwnerAnalysis(LA.Proj.ModelFile(LMid));
+        if (LOwner >= 0) and (LOwner <> LA.Index) then
+          Continue;
+        LM := LA.Proj.Model(LMid);
+        for var LD in LM.Diags do
+        begin
+          LMsg := LowerCase(LD.Msg);
+          for var LKey in LKeys do
+            if Pos('''' + LKey + '''', LMsg) > 0 then
+            begin
+              if (LD.FileId >= 0) and
+                 (LD.FileId <= High(LM.Tree.Source.FileNames)) then
+                LFile := LM.Tree.Source.FileNames[LD.FileId]
+              else
+                LFile := LA.Proj.ModelFile(LMid);
+              if not Result.TryGetValue(LKey, LList) then
+              begin
+                LList := TList<THit>.Create;
+                Result.Add(LKey, LList);
+              end;
+              LH := Default(THit);
+              LH.FilePath := LFile;
+              LH.Line := LD.Line;
+              LH.Col := LD.Col;
+              LList.Add(LH);
+            end;
+        end;
+      end;
+  finally
+    LKeys.Free;
+  end;
+end;
+
+// The methods implementing an interface method, as `related implementations`
+// finds them: 'TShape (Shared\uShapes.pas:17)'.
+function TImpact.ImplementedIn(const AT: TTarget): TArray<string>;
+var
+  LDm, LTMid, LTSym: Integer;
+  LName, LText: string;
+begin
+  Result := nil;
+  for var LA in FWs.Analyses do
+  begin
+    if (AT.Ids[LA.Index].Mid < 0) or not IsInterfaceMethodSym(LA,
+       AT.Ids[LA.Index].Mid, AT.Ids[LA.Index].Sym) then
+      Continue;
+    LDm := LA.Nav.ModelIdOf(AT.DeclFile);
+    if (LDm < 0) or not LA.Proj.EnsureHydrated(LDm) or
+       not LA.Nav.InterfaceMethodAt(LDm, AT.DeclLine, AT.DeclCol, LTMid, LTSym,
+       LName) then
+      Continue;
+    for var LH in LA.Nav.FindImplementations(LTMid, LTSym) do
+    begin
+      if LH.Kind = pikRoot then
+        Continue;
+      LText := Format('%s (%s:%d)', [LH.TypeName, FWs.RelPath(LH.Hit.FilePath),
+        LH.Hit.Line]);
+      if IndexStr(LText, Result) < 0 then
+        Result := Result + [LText];
+    end;
+  end;
+  TArray.Sort<string>(Result, TIStringComparer.Ordinal);
+end;
+
+function TImpact.Answer(ADepth, ALimit: Integer): string;
+const
+  MAX_FAMILY = 10;
+  MAX_LEFTOVERS = 5;
+var
+  LSb, LLevels: TStringBuilder;
+  LWalk: TCallerWalk;
+  LInfo: TCallWalkInfo;
+  LFiles: TArray<TImpactFile>;
+  LDecls: TArray<TImpactDecl>;
+  LReached, LNot: TArray<Integer>;
+  LHave: TArray<Boolean>;
+  LLeft: TObjectDictionary<string, TList<THit>>;
+  LList: TList<THit>;
+  LRoutines, LData, LShown, LHidden, LCount: Integer;
+  LLine, LText, LTag: string;
+  LParts, LSkipped: TStringList;
+  LFamily: TArray<string>;
+  LSW: TStopwatch;
+  LMembersMs, LWalkMs: Int64;
+begin
+  LSW := TStopwatch.StartNew;
+  LFiles := FFiles.ToArray;
+  TArray.Sort<TImpactFile>(LFiles, TComparer<TImpactFile>.Construct(
+    function(const L, R: TImpactFile): Integer
+    begin
+      Result := Ord(FWs.IsOwnFile(R.Path)) - Ord(FWs.IsOwnFile(L.Path));
+      if Result = 0 then
+        Result := CompareText(L.Path, R.Path);
+    end));
+
+  // The members each file is compiled into, and all of them together.
+  SetLength(LHave, Length(FWs.Members));
+  for var LF in LFiles do
+  begin
+    for var LUnit in LF.Units do
+      for var LIdx in FReach.MembersOf(LUnit) do
+        if not HasInt(LF.Members, LIdx) then
+          LF.Members := LF.Members + [LIdx];
+    if (LF.Project >= 0) and not HasInt(LF.Members, LF.Project) then
+      LF.Members := LF.Members + [LF.Project];
+    TArray.Sort<Integer>(LF.Members);
+    for var LIdx in LF.Members do
+      LHave[LIdx] := True;
+  end;
+  for var LIdx := 0 to High(FWs.Members) do
+    if FWs.Members[LIdx].Analysis >= 0 then
+    begin
+      if LHave[LIdx] then
+        LReached := LReached + [LIdx]
+      else
+        LNot := LNot + [LIdx];
+    end;
+  LMembersMs := LSW.ElapsedMilliseconds;
+
+  LSb := TStringBuilder.Create;
+  LLevels := TStringBuilder.Create;
+  LWalk := TCallerWalk.Create(FWs);
+  LParts := TStringList.Create;
+  LSkipped := TStringList.Create;
+  LLeft := Leftovers;
+  try
+    // The roots, file by file, each file's declarations by line.
+    LWalk.ViaOnRows := True;
+    LRoutines := 0;
+    LData := 0;
+    for var LF in LFiles do
+    begin
+      LDecls := LF.Decls.ToArray;
+      TArray.Sort<TImpactDecl>(LDecls, TComparer<TImpactDecl>.Construct(
+        function(const L, R: TImpactDecl): Integer
+        begin
+          Result := L.FirstLine - R.FirstLine;
+        end));
+      LF.Decls.Clear;
+      LF.Decls.AddRange(LDecls);
+      for var LD in LDecls do
+      begin
+        if LD.Place <> '' then
+          Continue;
+        if LRoutines + LData >= MAX_IMPACT_ROOTS then
+        begin
+          LSkipped.Add(LD.T.Name);
+          Continue;
+        end;
+        LD.Node := LWalk.AddRoot(LD.T, not IsRoutineHead(LD.T.Head));
+        if IsRoutineHead(LD.T.Head) then
+          Inc(LRoutines)
+        else
+          Inc(LData);
+      end;
+    end;
+    if LRoutines + LData > 0 then
+      LWalk.Walk(ADepth, ALimit, LLevels, LInfo);
+    LWalkMs := LSW.ElapsedMilliseconds - LMembersMs;
+
+    LCount := 0;
+    for var LF in LFiles do
+      for var LD in LF.Decls do
+        if LD.Place = '' then
+          Inc(LCount);
+    if FDiffFiles >= 0 then
+      LSb.AppendLine(Format('impact of the diff - %s, %s', [Plural(FDiffFiles,
+        'file'), IfThen(LCount = 0, 'no declaration changed',
+        Plural(LCount, 'declaration') + ' changed')]))
+    else
+      LSb.AppendLine('impact of ' + String.Join(', ', FNamed.ToStringArray));
+    if Length(LReached) = 0 then
+      LSb.AppendLine('members to build and test: none - no member compiles '
+        + 'the changed files')
+    else if Length(LNot) = 0 then
+      LSb.AppendLine(Format('members to build and test: %s (all %d)',
+        [Names(LReached), Length(LReached)]))
+    else
+      LSb.AppendLine(Format('members to build and test: %s (not reached: %s)',
+        [Names(LReached), Names(LNot)]));
+
+    LShown := 0;
+    for var LF in LFiles do
+    begin
+      LLine := IfThen(TPath.IsPathRooted(LF.Path), FWs.RelPath(LF.Path),
+        LF.Path);
+      // A file compiled into fewer members than the list above names them.
+      if ((Length(LF.Units) > 0) or (LF.Project >= 0)) and
+         (Names(LF.Members) <> Names(LReached)) then
+        LLine := LLine + '  [' + IfThen(Length(LF.Members) = 0, 'no member',
+          Names(LF.Members)) + ']';
+      LParts.Clear;
+      if LF.Note <> '' then
+        LParts.Add(LF.Note);
+      if LF.Iface then
+        LParts.Add('interface changed, ' + UsedByText(LF, 8))
+      else if LF.UsedBy then
+        LParts.Add(UsedByText(LF, 30));
+      if LParts.Count > 0 then
+        LLine := LLine + ' - ' + String.Join('; ', LParts.ToStringArray)
+      else if (LF.Decls.Count = 0) and (Length(LF.Removed) = 0) then
+      begin
+        if LF.Code then
+          LLine := LLine + ' (no declaration: lines outside every one)'
+        else if LF.Comments then
+          LLine := LLine + ' (comments only)';
+      end;
+      LSb.AppendLine(LLine);
+      LHidden := 0;
+      for var LD in LF.Decls do
+      begin
+        Inc(LShown);
+        if LShown > MAX_IMPACT_DECLS then
+        begin
+          Inc(LHidden);
+          Continue;
+        end;
+        LLine := '  ' + LinesText(LD.Lines) + '  ';
+        if LD.Place <> '' then
+        begin
+          LSb.AppendLine(LLine + LD.Place);
+          Continue;
+        end;
+        LLine := LLine + Format('%s (%s)', [LD.T.Name, LD.T.Head]);
+        LParts.Clear;
+        if LD.Node >= 0 then
+        begin
+          // The virtual chain by its nearest link - what a changed signature
+          // must still match; the rows name the others they are bound to.
+          LText := '';
+          LTag := '';
+          for var LSource in LWalk.Through(LD.Node) do
+            if LSource.EndsWith(' (virtual)') then
+            begin
+              if LText = '' then
+                LText := 'overrides ' + Copy(LSource, 1, Length(LSource) -
+                  Length(' (virtual)'));
+            end
+            else
+              LTag := LTag + IfThen(LTag <> '', ', ', '') + LSource;
+          if LText <> '' then
+            LParts.Add(LText);
+          if LTag <> '' then
+            LParts.Add('also through ' + LTag);
+          LFamily := LWalk.Below(LD.Node);
+          if Length(LFamily) > 0 then
+            LParts.Add('overridden in ' + String.Join(', ', Copy(LFamily, 0,
+              MAX_FAMILY)) + IfThen(Length(LFamily) > MAX_FAMILY,
+              Format(' and %d more (`related overrides`)', [Length(LFamily) -
+              MAX_FAMILY]), ''));
+          LFamily := ImplementedIn(LD.T);
+          if Length(LFamily) > 0 then
+            LParts.Add('implemented in ' + String.Join(', ', Copy(LFamily, 0,
+              MAX_FAMILY)) + IfThen(Length(LFamily) > MAX_FAMILY,
+              Format(' and %d more (`related implementations`)',
+              [Length(LFamily) - MAX_FAMILY]), ''));
+        end;
+        if LParts.Count > 0 then
+          LLine := LLine + ' - ' + String.Join('; ', LParts.ToStringArray);
+        LSb.AppendLine(LLine);
+      end;
+      if LHidden > 0 then
+        LSb.AppendLine(Format('  ... %d more changed declarations', [LHidden]));
+      for var LR := 0 to High(LF.Removed) do
+      begin
+        LLine := '  removed: ' + LF.Removed[LR];
+        if LLeft.TryGetValue(LF.RemovedKeys[LR], LList) then
+        begin
+          LText := '';
+          for var LI := 0 to Min(LList.Count, MAX_LEFTOVERS) - 1 do
+          begin
+            LTag := FEnclosing.NameAt(LList[LI].FilePath, LList[LI].Line,
+              LList[LI].Col, False);
+            LText := LText + IfThen(LText <> '', ', ', '') + Format('%s:%d%s',
+              [FWs.RelPath(LList[LI].FilePath), LList[LI].Line,
+              IfThen(LTag <> '', ' (in ' + LTag + ')', '')]);
+          end;
+          if LList.Count > MAX_LEFTOVERS then
+            LText := LText + Format(' and %d more (`diagnostics`)',
+              [LList.Count - MAX_LEFTOVERS]);
+          LLine := LLine + ' - still named at ' + LText;
+        end
+        else
+          LLine := LLine + ' - nothing unresolved names it';
+        LSb.AppendLine(LLine);
+      end;
+    end;
+    if FOther.Count > 0 then
+      LSb.AppendLine('other files, not Pascal source: ' + String.Join(', ',
+        FOther.ToStringArray));
+
+    if LRoutines + LData > 0 then
+    begin
+      if LData = 0 then
+        LText := 'callers'
+      else if LRoutines = 0 then
+        LText := 'uses'
+      else
+        LText := 'callers and uses';
+      if (LInfo.Levels[0].Calls = 0) and (LInfo.Levels[0].Others = 0) then
+        LSb.AppendLine(LText + ' - none found')
+      else if LInfo.Levels[0].Calls = 0 then
+        LSb.AppendLine(Format('%s - no calls, %s that %s not call %s', [LText,
+          Plural(LInfo.Levels[0].Others, 'reference'),
+          IfThen(LInfo.Levels[0].Others = 1, 'does', 'do'),
+          IfThen(LRoutines + LData > 1, 'them', 'it')]))
+      else
+        LSb.AppendLine(LText + ' - ' + LevelsSummary(LInfo, IfThen(LData = 0,
+          'call', ''), LRoutines + LData > 1));
+      LSb.Append(LLevels.ToString);
+      LWalk.AppendNotes(LSb, LInfo, ADepth);
+    end;
+    if LSkipped.Count > 0 then
+      LSb.AppendLine(Format('(not searched for callers - past the first %d: '
+        + '%s; ask `impact` or `callers` for them)', [MAX_IMPACT_ROOTS,
+        String.Join(', ', LSkipped.ToStringArray)]));
+    for var LM in FWs.Members do
+      if LM.Analysis < 0 then
+        LSb.AppendLine(Format('(member %s was not analyzed, not judged: %s)',
+          [LM.Name, LM.Error]));
+    Result := LSb.ToString.TrimRight;
+    Log('impact: %d files, %d roots (%d routines); members %d ms, walk %d ms, '
+      + 'the rest %d ms', [Length(LFiles), LRoutines + LData, LRoutines,
+      LMembersMs, LWalkMs, LSW.ElapsedMilliseconds - LMembersMs - LWalkMs]);
+  finally
+    LLeft.Free;
+    LSkipped.Free;
+    LParts.Free;
+    LWalk.Free;
+    LLevels.Free;
+    LSb.Free;
+  end;
+end;
+
+{ What a change reaches (SPEC 9.3.3), from a unified diff - the agent passes
+  `git diff` output; the server runs no git - or from the declarations
+  named: `impact` is callers, overrides and unit_deps in one answer, and the
+  one thing none of them says - which members of the group to build and
+  test. }
+function ToolImpact(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
+var
+  LImpact: TImpact;
+  LDiff: string;
+  LV: TJSONValue;
+  LSW: TStopwatch;
+begin
+  LDiff := '';
+  LV := nil;
+  if AArgs <> nil then
+  begin
+    // Not trimmed: a hunk's last context line may be a lone space.
+    LV := AArgs.GetValue('diff');
+    if (LV <> nil) and not (LV is TJSONNull) then
+      LDiff := LV.Value;
+    LV := AArgs.GetValue('symbols');
+  end;
+  LImpact := TImpact.Create(AWs);
+  try
+    LSW := TStopwatch.StartNew;
+    if Trim(LDiff) <> '' then
+    begin
+      LImpact.AddDiff(LDiff);
+      Log('impact: the diff read in %d ms', [LSW.ElapsedMilliseconds]);
+    end;
+    if (ArgStr(AArgs, 'file') <> '') or (ArgStr(AArgs, 'symbol') <> '') then
+      LImpact.AddTarget(ResolveOne(AWs, AArgs));
+    if LV is TJSONArray then
+    begin
+      for var LItem in TJSONArray(LV) do
+        if Trim(LItem.Value) <> '' then
+          LImpact.AddTarget(ResolveNamed(AWs, Trim(LItem.Value),
+            ArgStr(AArgs, 'kind')));
+    end
+    else if (LV <> nil) and not (LV is TJSONNull) then
+      // A list written as one string: "TFoo.Bar, Baz".
+      for var LName in LV.Value.Split([',', ';'], TStringSplitOptions.ExcludeEmpty) do
+        if Trim(LName) <> '' then
+          LImpact.AddTarget(ResolveNamed(AWs, Trim(LName),
+            ArgStr(AArgs, 'kind')));
+    if LImpact.Empty then
+      raise EToolError.Create('give `diff` (the output of `git diff`) or the '
+        + 'declarations you will change: `symbol`, `symbols`, or `file` + '
+        + '`line` + `name`');
+    Result := LImpact.Answer(EnsureRange(ArgInt(AArgs, 'depth', 1), 1, 4),
+      EnsureRange(ArgInt(AArgs, 'limit', 150), 1, 5000));
+  finally
+    LImpact.Free;
+  end;
+end;
+
 { ---- the catalogue ----------------------------------------------------------- }
 
 const
@@ -5418,6 +7607,28 @@ const
     + '"limit":{"type":"integer","description":"Max rows over all levels '
     + '(default 150)"}}}},' +
 
+    '{"name":"impact","description":"What a change reaches - after editing, '
+    + 'pass the output of `git diff` as `diff`; before, the declarations you '
+    + 'will change. Answers which projects of the group compile the changed '
+    + 'files (build and test those, not the rest); the declarations the diff '
+    + 'touches - routines, types, fields, properties, a uses clause - each '
+    + 'with the virtual or interface methods it is also called through, its '
+    + 'overrides and implementations; their callers or uses across the group, '
+    + 'grouped by the routine they sit in, to a `depth`; the units that use a '
+    + 'unit whose interface changed; and a removed routine with the places '
+    + 'that still name it. The diff must be of the files as they are on disk '
+    + 'now. Forms (.dfm) are not read.",'
+    + '"inputSchema":{"type":"object","properties":{'
+    + '"diff":{"type":"string","description":"Unified diff of your edits: '
+    + 'the output of `git diff`, as it is"},'
+    + TARGET_PROPS + ','
+    + '"symbols":{"type":"array","items":{"type":"string"},"description":'
+    + '"Several declarations by name (TFoo.Bar), instead of symbol"},'
+    + '"depth":{"type":"integer","description":"Levels of callers (default 1, '
+    + 'max 4)"},'
+    + '"limit":{"type":"integer","description":"Max caller rows over all '
+    + 'levels (default 150)"}}}},' +
+
     '{"name":"related","description":"Relations across the group. '
     + 'descendants: classes/interfaces below a type. overrides: the virtual '
     + 'chain of a method. implementations: classes implementing an interface '
@@ -5489,7 +7700,9 @@ begin
     + 'text), `callers` who calls a routine (through the virtual or '
     + 'interface method it implements too, to a `depth`), `callees` what a '
     + 'routine calls (with the overrides and implementations a virtual or '
-    + 'interface call may run), `related` answers '
+    + 'interface call may run), `impact` what a change reaches - pass `git '
+    + 'diff` output or the symbols you will change: callers, overrides, and '
+    + 'which projects of the group to build and test, `related` answers '
     + 'hierarchy/override/implementation/assignment/'
     + 'creation questions, `outline` shows a unit''s structure with line '
     + 'numbers, `unit_deps` its uses graph, `diagnostics` checks name '
@@ -5547,6 +7760,8 @@ begin
       Result := ToolCallers(AWs, AArgs)
     else if AName = 'callees' then
       Result := ToolCallees(AWs, AArgs)
+    else if AName = 'impact' then
+      Result := ToolImpact(AWs, AArgs)
     else if AName = 'related' then
       Result := ToolRelated(AWs, AArgs)
     else if AName = 'outline' then

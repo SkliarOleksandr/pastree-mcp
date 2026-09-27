@@ -144,6 +144,29 @@ Check 'callers indexed' (Block $b 'callers {"symbol":"TSlots.SetSlot"}') @('1 ca
 Check 'callees none' (Block $b 'callees {"symbol":"NeverCalled"}') @('callees of NeverCalled (AppB\uBoxes.pas:62-64) - none found')
 Check 'callees abstract' (Block $b 'callees {"symbol":"TShape.Area"}') @('TShape.Area: abstract, no body')
 Check 'callees not a routine' (Block $b 'callees {"symbol":"TCircle"}') @('TCircle is a class - `callees` takes a routine')
+# impact: the members a change reaches, the declarations it touches with what
+# they are called through, their callers or uses.
+Check 'impact' (Block $b 'impact {"symbol":"TCircle.Area"}') @('impact of TCircle.Area', 'members to build and test: AppA, AppB (all 2)', "Shared\uShapes.pas`n  26  TCircle.Area (function) - overrides TShape.Area; also through IShape.Area (interface); overridden in TBigCircle (AppB\uAppB.pas:13)", 'callers - 3 calls in 3 routines', "  RunA`n    22  [via TShape.Area]", "  TotalArea`n    75  [via IShape.Area]")
+# A unit of one project reaches that project alone.
+Check 'impact one member' (Block $b 'impact {"symbol":"NeverCalled"}') @('members to build and test: AppB (not reached: AppA)', "AppB\uBoxes.pas`n  31  NeverCalled (procedure)", 'callers - none found') @('no callers found')
+Check 'impact unit' (Block $b 'impact {"symbol":"uMembers"}') @('members to build and test: AppA (not reached: AppB)', 'AppA\uMembers.pas - used by 1 unit: AppA') @('callers')
+# A field: its uses, through the property that reads and writes it too.
+Check 'impact field' (Block $b 'impact {"symbol":"TCircle.FRadius"}') @('23  TCircle.FRadius (field) - also through TCircle.Radius (property)', 'uses - 4 in 3 routines', "  RunA`n    21  [via TCircle.Radius]", "  TCircle.Create`n    50  FRadius := ARadius;")
+# Several roots: a row names the one it reaches, a file of fewer members
+# says which, a published member nothing calls gets the form note.
+Check 'impact symbols' (Block $b 'impact {"symbols":["TShapeBox.BoxClick"') @("AppA\uMembers.pas  [AppA]`n  44  TPanelModel.Source (field)", "Shared\uShapes.pas`n  12  IShape.Area (function) - implemented in TShape (Shared\uShapes.pas:17)", '43  [-> TShapeBox.BoxClick, not a call]', '75  [-> IShape.Area]', 'no callers found: TShapeBox.BoxClick', 'no uses found: TPanelModel.Source', '(TPanelModel.Source: published - a form')
+Check 'impact depth' (Block $b 'impact {"symbols":["TCircle.Area", "NeverCalled"]') @('callers - 3 calls in 3 routines; depth 2: 2 in 2', '22  [-> TCircle.Area via TShape.Area]', 'depth 2 - callers of those:', '10  [-> RunA, main block]', 'no callers found: NeverCalled')
+# A diff: its lines to declarations, a uses clause, a removed routine, a
+# changed interface section and who uses it, a file no project compiles. A
+# member edited in a class is the member, not the class.
+Check 'impact diff' (Block $b 'impact {"diff":"diff --git') @('impact of the diff - 5 files, 3 declarations changed', 'members to build and test: AppA, AppB (all 2)', "AppA\uAppA.pas  [AppA]`n  12  uses clause", "AppB\uAppB.pas  [AppB]`n  removed: Obsolete (procedure) - nothing unresolved names it", '37  TShapeBox.GetItem (function) - also through TShapeBox.Item (property read)', 'Shared\uShapes.pas - interface changed, used by 3 units: AppB, uAppA, uAppB', "  27  TCircle.Radius (property)`n  55  TCircle.Area (function)", 'other files, not Pascal source: README.md', 'callers and uses - 5 in 4 routines', '21  [-> TCircle.Radius]', '53  [-> TShapeBox.GetItem via TShapeBox.Item]') @('TCircle (class)')
+# A field removed from a class is named, and the class is not a root.
+Check 'impact removed field' (Block $b 'impact {"diff":"--- a/AppA/uMembers.pas') @('no declaration changed', 'AppA\uMembers.pas - interface changed, used by 1 unit: AppA', 'removed: FGone (field) - nothing unresolved names it') @('TBase (class)', 'uses -')
+Check 'impact comments' (Block $b 'impact {"diff":"--- a/Shared/uShapes.pas\n+++ b/Shared/uShapes.pas\n@@ -4 ') @('no declaration changed', 'Shared\uShapes.pas (comments only)')
+# A diff of another state than the file on disk is refused, not misread.
+Check 'impact mismatch' (Block $b 'impact {"diff":"--- a/Shared/uShapes.pas\n+++ b/Shared/uShapes.pas\n@@ -55 ') @('the diff does not match the file on disk: line 55 reads `Result := Pi * FRadius * FRadius;`') @('TCircle.Area (function)')
+Check 'impact not a diff' (Block $b 'impact {"diff":"not a diff"}') @('no file in `diff`')
+Check 'impact nothing' (Block $b 'impact {}') @('give `diff`')
 Check 'outline' (Block $b 'outline {"file":"Shared') @('21  type TCircle = class', '27    property Radius: Double', '53  function TCircle.Area: Double', '40 implementation')
 Check 'unit_deps' (Block $b 'unit_deps') @('uShapes is used by 3 units', 'AppB\uAppB.pas:8')
 Check 'diagnostics' (Block $b 'diagnostics') @('no diagnostics')
@@ -163,6 +186,10 @@ Check 'strict members' (Block $b 'members {"symbol":"TDerived"}') @('8 members',
 # The implementations of one call, merged from both analyses: TBigCircle is
 # project B's alone.
 Check 'strict callees' (Block $b 'callees {"symbol":"TotalArea"}') @('1 call reaching 5 routines', "  TBigCircle`n    13  [at 75 via IShape.Area]")
+# Each member's closure read from its own analysis.
+Check 'strict impact' (Block $b 'impact {"symbol":"TCircle.Area"}') @('members to build and test: AppA, AppB (all 2)', 'callers - 3 calls in 3 routines')
+Check 'strict impact unit' (Block $b 'impact {"symbol":"uMembers"}') @('members to build and test: AppA (not reached: AppB)')
+Check 'strict impact diff' (Block $b 'impact {"diff":"diff --git') @('members to build and test: AppA, AppB (all 2)', 'AppB\uBoxes.pas  [AppB]', 'Shared\uShapes.pas - interface changed, used by 3 units: AppB, uAppA, uAppB', 'callers and uses - 5 in 4 routines')
 
 # ---- 3. MCP over stdio, with an edit in between ------------------------------------
 Write-Host '--- MCP over stdio'
@@ -198,7 +225,7 @@ try {
     $stdin.WriteLine('{"jsonrpc":"2.0","method":"notifications/initialized"}')
     $r = Rpc 2 'tools/list' '{}'
     $names = ($r.result.tools | ForEach-Object { $_.name }) -join ','
-    Check 'tools/list' $names @('status', 'find', 'definition', 'source', 'members', 'references', 'callers', 'callees', 'related', 'outline', 'diagnostics', 'unit_deps')
+    Check 'tools/list' $names @('status', 'find', 'definition', 'source', 'members', 'references', 'callers', 'callees', 'impact', 'related', 'outline', 'diagnostics', 'unit_deps')
     $r = Rpc 3 'tools/call' '{"name":"related","arguments":{"relation":"creations","symbol":"TCircle"}}'
     Check 'call before edit' (ToolText $r) @('creations of TCircle', ': 1')
     if ($r.result.isError) { Write-Host 'FAIL call before edit reported isError'; $script:failures++ }
@@ -213,10 +240,14 @@ try {
     Check 'call after edit' (ToolText $r) @('(index: re-analyzed 1 changed file(s)', 'creations of TCircle', ': 2', 'TCircle.Create(5).Free;')
     $r = Rpc 5 'tools/call' '{"name":"diagnostics","arguments":{}}'
     Check 'diagnostics after edit' (ToolText $r) @('AppA\uAppA.pas:26:5: ', "'NoSuchName' (in RunA)")
+    # A diff removing a routine the edited unit still calls: impact names the
+    # call that no longer resolves.
+    $r = Rpc 6 'tools/call' '{"name":"impact","arguments":{"diff":"--- a/AppA/uAppA.pas\n+++ b/AppA/uAppA.pas\n@@ -7,3 +7,2 @@\n procedure RunA;\n-procedure NoSuchName;\n \n"}}'
+    Check 'impact after edit' (ToolText $r) @('AppA\uAppA.pas - interface changed, used by 1 unit: AppA', 'removed: NoSuchName (procedure) - still named at AppA\uAppA.pas:26 (in RunA)')
 
-    $r = Rpc 6 'tools/call' '{"name":"no_such_tool","arguments":{}}'
+    $r = Rpc 7 'tools/call' '{"name":"no_such_tool","arguments":{}}'
     if (-not $r.result.isError) { Write-Host 'FAIL unknown tool not reported as isError'; $script:failures++ }
-    $r = Rpc 7 'no/such/method' '{}'
+    $r = Rpc 8 'no/such/method' '{}'
     if ($r.error.code -ne -32601) { Write-Host 'FAIL unknown method not -32601'; $script:failures++ }
 
     $stdin.Close()

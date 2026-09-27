@@ -53,6 +53,18 @@ callers {"symbol":"TSlots.SetSlot"}
 callees {"symbol":"NeverCalled"}
 callees {"symbol":"TShape.Area"}
 callees {"symbol":"TCircle"}
+impact {"symbol":"TCircle.Area"}
+impact {"symbol":"NeverCalled"}
+impact {"symbol":"uMembers"}
+impact {"symbol":"TCircle.FRadius"}
+impact {"symbols":["TShapeBox.BoxClick", "TPanelModel.Source", "IShape.Area"]}
+impact {"symbols":["TCircle.Area", "NeverCalled"], "depth":2}
+impact {"diff":"diff --git a/Shared/uShapes.pas b/Shared/uShapes.pas\n--- a/Shared/uShapes.pas\n+++ b/Shared/uShapes.pas\n@@ -26,3 +26,3 @@\n     function Area: Double; override;\n-    property Radius: Double read FRadius;\n+    property Radius: Double read FRadius write FRadius;\n   end;\n@@ -55 +55 @@\n-  Result := 3.14 * FRadius * FRadius;\n+  Result := Pi * FRadius * FRadius;\ndiff --git a/AppA/uAppA.pas b/AppA/uAppA.pas\n--- a/AppA/uAppA.pas\n+++ b/AppA/uAppA.pas\n@@ -12 +12 @@\n-  SysUtils,\n+  System.SysUtils,\ndiff --git a/AppB/uAppB.pas b/AppB/uAppB.pas\n--- a/AppB/uAppB.pas\n+++ b/AppB/uAppB.pas\n@@ -31,8 +31,4 @@\n   Writeln(TotalArea([LSquare, TBigCircle.Create(1)]):0:2);\n end;\n-\n-procedure Obsolete;\n-begin\n-end;\n \n end.\ndiff --git a/AppB/uBoxes.pas b/AppB/uBoxes.pas\n--- a/AppB/uBoxes.pas\n+++ b/AppB/uBoxes.pas\n@@ -37 +37 @@\n-  Result := nil;\n+  Result := FItem;\ndiff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old\n+new\n"}
+impact {"diff":"--- a/AppA/uMembers.pas\n+++ b/AppA/uMembers.pas\n@@ -17,3 +17,2 @@\n     FSecret: Integer;\n-    FGone: Integer;\n   private\n"}
+impact {"diff":"--- a/Shared/uShapes.pas\n+++ b/Shared/uShapes.pas\n@@ -4 +4 @@\n-// old comment\n+// both projects of Fixture.groupproj. The smoke test pins line numbers of\n"}
+impact {"diff":"--- a/Shared/uShapes.pas\n+++ b/Shared/uShapes.pas\n@@ -55 +55 @@\n-  Result := Pi * FRadius * FRadius;\n+  Result := 2 * Pi * FRadius;\n"}
+impact {"diff":"not a diff"}
+impact {}
 outline {"file":"Shared\\uShapes.pas"}
 unit_deps {"unit":"uShapes"}
 diagnostics {}

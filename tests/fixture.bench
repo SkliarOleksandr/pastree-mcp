@@ -60,6 +60,12 @@ also source {"symbol":"RunA"}
 also related {"relation":"overrides", "symbol":"TShape.Area"}
 read AppA\uAppA.pas 15 12
 
+== impact-circle-area | What does a change to TCircle.Area reach, and which projects do I build?
+call impact {"symbol":"TCircle.Area"}
+also callers {"symbol":"TCircle.Area"}
+also related {"relation":"overrides", "symbol":"TCircle.Area"}
+grep \bArea\b
+
 == members-derived | What can TDerived's methods use, inherited members included?
 call members {"symbol":"TDerived"}
 also outline {"file":"AppA\\uMembers.pas", "owner":"TDerived"}

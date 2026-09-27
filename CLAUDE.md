@@ -17,12 +17,17 @@ autonomous session ("work autonomously", a scheduled run).
 A green smoke test covers a two-project fixture. What matters is an agent on a
 real group, and that is only seen by running it there.
 
-## English, plain hyphens, no client names, `local/` for working papers
+## English in the repository, Russian to Alex, plain hyphens, no client names, `local/` for working papers
 
 **Everything written into this repository is in English** - docs, comments,
-log lines, commit messages, tool descriptions. Conversation is in whatever
-language suits; the repository is not, because it outlives the conversation
-and the next reader may be a stranger or a future session.
+log lines, commit messages, tool descriptions - because it outlives the
+conversation and the next reader may be a stranger or a future session.
+
+**Everything written to Alex is in Russian** - the report of what was done,
+summaries, questions, the explanation of a tool - in full, not a shortened
+retelling. It is the language he works in: a report in English is one he
+has to ask for again. Quoted tool output, code and identifiers stay as they
+are.
 
 **Only the plain hyphen `-`. Never an em dash (U+2014) or en dash (U+2013).**
 They are non-ASCII, and `dcc` on a legacy code page, `cmd.exe` and the diff
