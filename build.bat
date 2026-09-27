@@ -43,9 +43,12 @@ if not exist "%DCU64%" mkdir "%DCU64%"
 rem A RUNNING SERVER HOLDS THE EXE: Claude Code starts out\pastree-mcp.exe per
 rem session and keeps it. Windows lets a running exe be RENAMED, so the old one
 rem moves aside, the build writes a fresh file, and the next session picks it
-rem up. The .old file is removed when nothing holds it any more.
-if exist out\pastree-mcp.exe.old del /q out\pastree-mcp.exe.old >nul 2>&1
+rem up. The .old files are removed when nothing holds them any more. Sessions
+rem of two builds ago may still hold .old itself: then the exe moves to a name
+rem of its own, or it stays in place and dcc cannot write it (F2039).
+for %%F in (out\pastree-mcp.exe.old*) do del /q "%%F" >nul 2>&1
 if exist out\pastree-mcp.exe move /y out\pastree-mcp.exe out\pastree-mcp.exe.old >nul 2>&1
+if exist out\pastree-mcp.exe move /y out\pastree-mcp.exe "out\pastree-mcp.exe.old-%RANDOM%" >nul 2>&1
 
 echo === pastree-mcp.exe (Win64) ===
 dcc64 -B -Q -GD ^
@@ -55,7 +58,7 @@ dcc64 -B -Q -GD ^
  "-NSSystem;System.Win;Winapi;Data;Xml" ^
  -N0"%DCU64%" -Eout pastree-mcp.dpr
 if errorlevel 1 goto :fail
-if exist out\pastree-mcp.exe.old del /q out\pastree-mcp.exe.old >nul 2>&1
+for %%F in (out\pastree-mcp.exe.old*) do del /q "%%F" >nul 2>&1
 
 "out\pastree-mcp.exe" --version
 if errorlevel 1 goto :fail

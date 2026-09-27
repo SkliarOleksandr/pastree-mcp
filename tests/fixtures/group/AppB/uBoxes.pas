@@ -63,4 +63,29 @@ procedure NeverCalled;
 begin
 end;
 
+type
+  // Declarations written over several lines: `find`, `members` and `outline`
+  // show each whole, and one longer than a row cut at a parameter boundary.
+  TWideBox = class
+  public
+    function Configure(const AFirstName: string; ASecondValue: Integer;
+      const AThirdName: string = 'third';
+      AFourthFlag: Boolean = False): Boolean;
+    procedure Many(const AAlphaName, ABetaName, AGammaName: string;
+      ADeltaCount, AEpsilonCount, AZetaCount: Integer;
+      const AEtaText, AThetaText, AIotaText: string); virtual;
+  end;
+
+function TWideBox.Configure(const AFirstName: string; ASecondValue: Integer;
+  const AThirdName: string; AFourthFlag: Boolean): Boolean;
+begin
+  Result := AFourthFlag;
+end;
+
+procedure TWideBox.Many(const AAlphaName, ABetaName, AGammaName: string;
+  ADeltaCount, AEpsilonCount, AZetaCount: Integer;
+  const AEtaText, AThetaText, AIotaText: string);
+begin
+end;
+
 end.

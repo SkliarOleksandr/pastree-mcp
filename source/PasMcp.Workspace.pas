@@ -137,7 +137,7 @@ type
     procedure BuildAnalysis(AAnalysis: TMcpAnalysis; ADonor: TPasSemaProject);
     procedure RecordStamps(AAnalysis: TMcpAnalysis);
     procedure RebuildAnalysis(AAnalysis: TMcpAnalysis; const AWhy: string);
-    function ConfigChanged: Boolean;
+    function ChangedConfigFiles: TArray<string>;
     procedure ClearAnalyses;
     procedure RebuildOwners;
   public
@@ -152,7 +152,8 @@ type
     function State: string;
     property LoadError: string read FLoadError;
     // Re-analyzes whatever changed on disk since the last look. AReport says
-    // what was done ('' = nothing had changed).
+    // what was done and NAMES the files ('' = nothing had changed): a file
+    // the agent did not edit is someone else's edit, and the only sign of it.
     procedure EnsureFresh(out AReport: string);
     // The files EnsureFresh found changed on disk since the load, in the order
     // it met them: this session's edits (and the developer's). `compile`
@@ -167,6 +168,18 @@ type
     // a unit analyzed under two configurations reports two sets of errors,
     // and only its own project's are the ones a build would show. -1 = none.
     function OwnerAnalysis(const APath: string): Integer;
+    // The units the analyses hold, each once, and how many are own files.
+    function IndexedUnitCount(out AOwn: Integer): Integer;
+    // What the index is, for an answer that found nothing in it:
+    // `pastree-mcp.dproj`, `the 9 projects of Foo.groupproj`.
+    function IndexedProjects: string;
+    // The Pascal sources (.pas .dpr .dpk .inc) no analysis holds, under the
+    // group directory (every level, but .git and the IDE's __history and
+    // __recovery) and in the members' own search path directories. The index
+    // is the projects' closure, not the directory: a unit nothing uses is
+    // invisible to every tool, and "no declaration matches" alone does not
+    // say that the name may be declared in one.
+    function UnindexedSources: TArray<string>;
     // APath relative to Root when it lies under it, else APath unchanged.
     function RelPath(const APath: string): string;
     // AFile as the user wrote it (relative to Root, or absolute) -> full path.
@@ -379,6 +392,126 @@ begin
     FListed.ContainsKey(LowerCase(APath));
 end;
 
+function TMcpWorkspace.IndexedUnitCount(out AOwn: Integer): Integer;
+var
+  LSeen: TDictionary<string, Boolean>;
+  LFile: string;
+begin
+  AOwn := 0;
+  LSeen := TDictionary<string, Boolean>.Create;
+  try
+    for var LA in FAnalyses do
+      if LA.Proj <> nil then
+        for var LMid := 0 to LA.Proj.ModelCount - 1 do
+        begin
+          LFile := LA.Proj.ModelFile(LMid);
+          if LSeen.TryAdd(LowerCase(LFile), True) and IsOwnFile(LFile) then
+            Inc(AOwn);
+        end;
+    Result := LSeen.Count;
+  finally
+    LSeen.Free;
+  end;
+end;
+
+function TMcpWorkspace.IndexedProjects: string;
+begin
+  if Length(FMembers) = 1 then
+    Result := TPath.GetFileName(FMembers[0].ProjectFile)
+  else
+    Result := Format('the %d projects of %s', [Length(FMembers),
+      TPath.GetFileName(FProjectFile)]);
+end;
+
+function TMcpWorkspace.UnindexedSources: TArray<string>;
+var
+  LIndexed, LDone: TDictionary<string, Boolean>;
+  LList: TList<string>;
+  LFull: string;
+
+  function IsSource(const AName: string): Boolean;
+  var
+    LExt: string;
+  begin
+    LExt := LowerCase(TPath.GetExtension(AName));
+    Result := (LExt = '.pas') or (LExt = '.dpr') or (LExt = '.dpk') or
+      (LExt = '.inc');
+  end;
+
+  procedure Walk(const ADir: string; ADeep: Boolean);
+  var
+    LSr: TSearchRec;
+    LPath: string;
+  begin
+    if not LDone.TryAdd(LowerCase(ExcludeTrailingPathDelimiter(ADir)), True) then
+      Exit;
+    if FindFirst(TPath.Combine(ADir, '*'), faAnyFile, LSr) <> 0 then
+      Exit;
+    try
+      repeat
+        if (LSr.Name = '.') or (LSr.Name = '..') then
+          Continue;
+        LPath := TPath.Combine(ADir, LSr.Name);
+        if (LSr.Attr and faDirectory) <> 0 then
+        begin
+          // A junction could lead back up; the IDE's backups repeat every
+          // unit under another extension anyway.
+          if ADeep and ((LSr.Attr and FILE_ATTRIBUTE_REPARSE_POINT) = 0) and
+             not StartsStr('.', LSr.Name) and
+             not SameText(LSr.Name, '__history') and
+             not SameText(LSr.Name, '__recovery') then
+            Walk(LPath, True);
+        end
+        else if IsSource(LSr.Name) and
+          not LIndexed.ContainsKey(LowerCase(LPath)) then
+          LList.Add(LPath);
+      until FindNext(LSr) <> 0;
+    finally
+      System.SysUtils.FindClose(LSr);   // not Winapi.Windows' FindClose(THandle)
+    end;
+  end;
+
+begin
+  LIndexed := TDictionary<string, Boolean>.Create;
+  LDone := TDictionary<string, Boolean>.Create;
+  LList := TList<string>.Create;
+  try
+    for var LA in FAnalyses do
+      if LA.Proj <> nil then
+        for var LMid := 0 to LA.Proj.ModelCount - 1 do
+        begin
+          LIndexed.AddOrSetValue(LowerCase(LA.Proj.ModelFile(LMid)), True);
+          // Its includes too: a demoted model keeps its file names.
+          for var LFile in LA.Proj.Model(LMid).Tree.Source.FileNames do
+            if LFile <> '' then
+              LIndexed.AddOrSetValue(LowerCase(LFile), True);
+        end;
+    Walk(FRoot, True);
+    // A search path directory holds units by name, not by level. Its path
+    // may be written `..\lib`: the index holds full paths.
+    for var LMem in FMembers do
+      for var LDir in LMem.SearchPaths do
+      begin
+        if Trim(LDir) = '' then
+          Continue;
+        try
+          LFull := TPath.GetFullPath(Trim(LDir));
+        except
+          Continue;   // a macro left unexpanded, a character a path cannot hold
+        end;
+        if TDirectory.Exists(LFull) and not StartsText(
+           IncludeTrailingPathDelimiter(FRoot), IncludeTrailingPathDelimiter(LFull))
+        then
+          Walk(LFull, False);
+      end;
+    Result := LList.ToArray;
+  finally
+    LList.Free;
+    LDone.Free;
+    LIndexed.Free;
+  end;
+end;
+
 procedure TMcpWorkspace.LoadMembers;
 var
   LFiles, LMissing: TArray<string>;
@@ -402,8 +535,9 @@ begin
   else
     raise Exception.Create('not a .groupproj, .dproj, .dpr or .dpk: ' +
       FProjectFile);
+  // By path as written, not lower-cased: a changed one is named in a report.
   if StampOf(FProjectFile, LStamp) then
-    FConfigStamps.AddOrSetValue(LowerCase(FProjectFile), LStamp);
+    FConfigStamps.AddOrSetValue(FProjectFile, LStamp);
 
   for var LFile in LFiles do
   begin
@@ -435,7 +569,7 @@ begin
         LD.Free;
       end;
       if StampOf(LFile, LStamp) then
-        FConfigStamps.AddOrSetValue(LowerCase(LFile), LStamp);
+        FConfigStamps.AddOrSetValue(LFile, LStamp);
     end
     else
     begin
@@ -794,14 +928,35 @@ begin
   end;
 end;
 
-function TMcpWorkspace.ConfigChanged: Boolean;
+function TMcpWorkspace.ChangedConfigFiles: TArray<string>;
 var
   LStamp: TMcpFileStamp;
 begin
+  Result := nil;
   for var LPair in FConfigStamps do
     if not StampOf(LPair.Key, LStamp) or not SameStamp(LStamp, LPair.Value) then
-      Exit(True);
-  Result := False;
+      Result := Result + [LPair.Key];
+end;
+
+// A report's list of files: relative, sorted, the first MAX_NAMED of them
+// named and the rest counted.
+function NamedFiles(AWs: TMcpWorkspace; const AFiles: TArray<string>): string;
+const
+  MAX_NAMED = 8;
+var
+  LNames: TArray<string>;
+begin
+  LNames := nil;
+  for var LFile in AFiles do
+    LNames := LNames + [AWs.RelPath(LFile)];
+  TArray.Sort<string>(LNames, TComparer<string>.Construct(
+    function(const L, R: string): Integer
+    begin
+      Result := CompareText(L, R);
+    end));
+  Result := string.Join(', ', Copy(LNames, 0, MAX_NAMED));
+  if Length(LNames) > MAX_NAMED then
+    Result := Result + Format(' and %d more', [Length(LNames) - MAX_NAMED]);
 end;
 
 procedure TMcpWorkspace.RebuildAnalysis(AAnalysis: TMcpAnalysis;
@@ -824,49 +979,69 @@ end;
 
 procedure TMcpWorkspace.EnsureFresh(out AReport: string);
 var
-  LChanged: TList<string>;
+  LChanged, LGone: TList<string>;
+  LAllChanged, LAllGone: TArray<string>;   // over the analyses, each once
+  LAllSeen: TDictionary<string, Boolean>;
   LStamp: TMcpFileStamp;
-  LGone: Boolean;
   LNeedRebuild: string;
+  LConfig: TArray<string>;
   LMid: Integer;
   LSW: TStopwatch;
-  LOk: Boolean;
+  LOk, LRebuilt: Boolean;
+  LTotalMs: Int64;
 begin
   AReport := '';
   if (FLoadError <> '') or (FAnalyses.Count = 0) then
     Exit;
-  if ConfigChanged then
+  LConfig := ChangedConfigFiles;
+  if Length(LConfig) > 0 then
   begin
-    Log('a project file changed - reloading the workspace');
+    Log('project file(s) changed (%s) - reloading the workspace',
+      [NamedFiles(Self, LConfig)]);
     ClearAnalyses;
     FReady.ResetEvent;
     Load;
-    AReport := 'project files changed; the workspace was reloaded';
+    AReport := Format('project file(s) changed: %s; the workspace was reloaded',
+      [NamedFiles(Self, LConfig)]);
     Exit;
   end;
+  LAllChanged := nil;
+  LAllGone := nil;
+  LRebuilt := False;
+  LTotalMs := 0;
   LChanged := TList<string>.Create;
+  LGone := TList<string>.Create;
+  LAllSeen := TDictionary<string, Boolean>.Create;
   try
     for var LA in FAnalyses do
     begin
       LChanged.Clear;
-      LGone := False;
+      LGone.Clear;
       for var LPair in LA.Stamps do
         if not StampOf(LA.Paths[LPair.Key], LStamp) then
-          LGone := True
+          LGone.Add(LA.Paths[LPair.Key])
         else if not SameStamp(LStamp, LPair.Value) then
           LChanged.Add(LA.Paths[LPair.Key]);
-      if not LGone and (LChanged.Count = 0) then
+      if (LGone.Count = 0) and (LChanged.Count = 0) then
         Continue;
       for var LFile in LChanged do
+      begin
         if not FChangedSeen.ContainsKey(LowerCase(LFile)) then
         begin
           FChangedSeen.Add(LowerCase(LFile), True);
           FChanged.Add(LFile);
         end;
+        // A unit shared by several analyses changed in each of them.
+        if LAllSeen.TryAdd(LowerCase(LFile), True) then
+          LAllChanged := LAllChanged + [LFile];
+      end;
+      for var LFile in LGone do
+        if LAllSeen.TryAdd(LowerCase(LFile), True) then
+          LAllGone := LAllGone + [LFile];
       LSW := TStopwatch.StartNew;
       LNeedRebuild := '';
-      if LGone then
-        LNeedRebuild := 'a file was deleted';
+      if LGone.Count > 0 then
+        LNeedRebuild := 'deleted: ' + NamedFiles(Self, LGone.ToArray);
       if LNeedRebuild = '' then
         for var LFile in LChanged do
         begin
@@ -906,15 +1081,27 @@ begin
         LA.Nav := TPasNavigator.Create(LA.Proj);
         LA.Nav.LibraryPaths := FLibDirs;
       end;
-      Log('analysis %d: %d changed file(s) re-analyzed in %d ms%s', [LA.Index,
-        LChanged.Count, LSW.ElapsedMilliseconds, IfThen(LNeedRebuild <> '',
-        ' (full rebuild)', '')]);
-      AReport := AReport + Format('re-analyzed %d changed file(s)%s in %d ms; ',
-        [LChanged.Count, IfThen(LNeedRebuild <> '', ' (full rebuild)', ''),
-        LSW.ElapsedMilliseconds]);
+      Log('analysis %d: %d changed file(s) re-analyzed in %d ms%s: %s',
+        [LA.Index, LChanged.Count, LSW.ElapsedMilliseconds,
+        IfThen(LNeedRebuild <> '', ' (full rebuild)', ''),
+        NamedFiles(Self, LChanged.ToArray)]);
+      Inc(LTotalMs, LSW.ElapsedMilliseconds);
+      LRebuilt := LRebuilt or (LNeedRebuild <> '');
     end;
   finally
+    LAllSeen.Free;
+    LGone.Free;
     LChanged.Free;
+  end;
+  if Length(LAllChanged) > 0 then
+    AReport := Format('re-analyzed %d changed file(s)%s in %d ms: %s',
+      [Length(LAllChanged), IfThen(LRebuilt, ' (full rebuild)', ''), LTotalMs,
+      NamedFiles(Self, LAllChanged)]);
+  if Length(LAllGone) > 0 then
+  begin
+    if AReport = '' then
+      AReport := Format('rebuilt in %d ms', [LTotalMs]);
+    AReport := AReport + '; deleted: ' + NamedFiles(Self, LAllGone);
   end;
 end;
 

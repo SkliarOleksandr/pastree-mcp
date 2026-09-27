@@ -3,6 +3,10 @@
 status
 find {"query":"TCircle"}
 find {"query":"*Circ*", "scope":"project"}
+find {"query":"TWideBox.Configure"}
+find {"query":"TWideBox.Many"}
+find {"query":"OrphanRoutine"}
+find {"query":"NothingAnywhere"}
 definition {"symbol":"TCircle.Area", "context":3}
 source {"symbol":"TCircle.Area"}
 source {"symbol":"TCircle.Area", "part":"both"}
@@ -23,6 +27,7 @@ members {"symbol":"IShape", "library":true}
 members {"symbol":"TCircle", "match":"Nothing"}
 members {"symbol":"TEmpty"}
 members {"symbol":"RunA"}
+members {"symbol":"TWideBox"}
 outline {"file":"AppA\tuAppA.pas"}
 references {"symbol":"TShape.Area"}
 references {"file":"AppA\\uAppA.pas", "line":21, "name":"Radius"}
@@ -43,6 +48,7 @@ callers {"symbol":"TShapeBox.Changed"}
 callers {"symbol":"TBigBox.Changed"}
 callers {"symbol":"NeverCalled"}
 callers {"symbol":"TCircle"}
+callers {"symbol":"OrphanRoutine"}
 callees {"symbol":"RunA"}
 callees {"symbol":"TotalArea"}
 callees {"symbol":"TShapeBox.BoxClick", "depth":2}
@@ -74,6 +80,7 @@ compile {"member":"NoSuch"}
 compile {"show":"some"}
 compile {}
 outline {"file":"Shared\\uShapes.pas"}
+outline {"file":"AppB\\uBoxes.pas", "section":"implementation"}
 unit_deps {"unit":"uShapes"}
 diagnostics {}
 references {"symbol":"Area"}

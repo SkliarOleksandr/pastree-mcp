@@ -211,6 +211,32 @@ begin
     Result := Copy(Result, 1, AMax - 3) + '...';
 end;
 
+{ A declaration's text at most AMax characters, cut after a `;` or a `,` - a
+  parameter boundary - with ` ...` for what is left out, and the text from
+  its last `)` on kept when that is short: `function Foo(A: X; B: Y; ...):
+  Integer;`. Cut anywhere else, the end of a parameter list reads as a
+  parameter - `AInterfa...: TPasTree` - and the result type is gone. }
+function CutDecl(const AText: string; AMax: Integer = 160): string;
+const
+  MAX_TAIL = 40;
+var
+  LTail: string;
+  LClose, LCut: Integer;
+begin
+  if Length(AText) <= AMax then
+    Exit(AText);
+  LTail := '';
+  LClose := LastDelimiter(')', AText);
+  if (LClose > 0) and (Length(AText) - LClose < MAX_TAIL) then
+    LTail := Copy(AText, LClose, MaxInt);
+  LCut := AMax - Length(LTail) - Length(' ...');
+  while (LCut > 0) and not CharInSet(AText[LCut], [';', ',']) do
+    Dec(LCut);
+  if LCut <= 0 then
+    Exit(Copy(AText, 1, AMax - 3) + '...');
+  Result := Copy(AText, 1, LCut) + ' ...' + LTail;
+end;
+
 function IsIdentChar(ACh: Char): Boolean;
 begin
   Result := ACh.IsLetterOrDigit or (ACh = '_');
@@ -399,6 +425,130 @@ begin
     Result := LM.Symbols[ASym].Name;
 end;
 
+{ The visible tokens AFrom..ATo as one line: each as written, one space
+  wherever the source has anything between two - so a comment, a directive,
+  a code branch not compiled and the line breaks are gone. Joined into one
+  line, a `//` comment would swallow what follows it. None inside brackets:
+  a list broken after its `(` would read `( AFirst: X`. }
+function VisText(LM: TPasSemaModel; AFrom, ATo: Integer): string;
+var
+  LSb: TStringBuilder;
+  LTok, LPrev: TPasToken;
+  LFileId, LPrevFileId: Integer;
+begin
+  LSb := TStringBuilder.Create;
+  try
+    LPrev := Default(TPasToken);
+    LPrevFileId := -1;
+    for var LI := AFrom to ATo do
+    begin
+      LFileId := LM.Tree.Source.Visible[LI].FileId;
+      LTok := LM.Tree.Source.Files[LFileId].Tokens[
+        LM.Tree.Source.Visible[LI].TokenIndex];
+      if (LI > AFrom) and ((LFileId <> LPrevFileId) or
+         (LPrev.EndPos < LTok.Start)) and
+         not (LPrev.Kind in [tkLParen, tkLBracket]) and
+         not (LTok.Kind in [tkRParen, tkRBracket]) then
+        LSb.Append(' ');
+      LSb.Append(LM.Tree.Source.Files[LFileId].TokenText(LTok));
+      LPrev := LTok;
+      LPrevFileId := LFileId;
+    end;
+    Result := LSb.ToString;
+  finally
+    LSb.Free;
+  end;
+end;
+
+{ A declaration written over several lines, as one: `function Foo(A:
+  Integer;` alone reads as a routine of one parameter. Its head ends at the
+  `;` after it, outside brackets - a routine, property, variable, field or
+  constant - or, for a type, at the first line end with every bracket closed
+  (a class's members follow `TFoo = class(TBar,` / `IFoo)`). Its first and
+  last lines are taken whole, as a one-line declaration is: `class function`
+  before the name, directives after the `;`. '' when it is on one line, when
+  the model's text is demoted, or when the head runs into an $I include. }
+function JoinedDecl(LM: TPasSemaModel; ANameNode: Integer): string;
+const
+  MAX_LINES = 40;
+var
+  LRoot, LVis, LFileId, LCol, LLine, LStartLine, LEndLine, LDepth, LFirst,
+    LLast, LHigh: Integer;
+  LToSemicolon: Boolean;
+  LKind: TPasTokenKind;
+
+  function LineOfVis(AVis: Integer): Integer;
+  begin
+    if LM.Tree.Source.Visible[AVis].FileId <> LFileId then
+      Exit(-1);
+    LM.Tree.Source.Files[LFileId].OffsetToLineCol(LM.Tree.Source.Files[
+      LFileId].Tokens[LM.Tree.Source.Visible[AVis].TokenIndex].Start, Result,
+      LCol);
+  end;
+
+begin
+  Result := '';
+  if (ANameNode < 0) or (ANameNode > High(LM.Tree.Nodes)) then
+    Exit;
+  LRoot := LM.Tree.DeclRootOf(ANameNode);
+  LVis := LM.Tree.NodeLeftmostVis(ANameNode);
+  LHigh := High(LM.Tree.Source.Visible);
+  if (LRoot = NIL_NODE) or (LVis < 0) or (LVis > LHigh) then
+    Exit;
+  LFileId := LM.Tree.Source.Visible[LVis].FileId;
+  LStartLine := LineOfVis(LVis);
+  LToSemicolon := LM.Tree.Nodes[LRoot].Kind <> nkTypeDecl;
+  LEndLine := LStartLine;
+  LLast := LVis;
+  LDepth := 0;
+  for var LI := LVis + 1 to LHigh do
+  begin
+    LKind := LM.Tree.Source.VisibleToken(LI).Kind;
+    if LKind = tkEndOfFile then
+      Break;
+    LLine := LineOfVis(LI);
+    if LLine < 0 then
+      Exit;
+    if (LLine > LEndLine) and ((not LToSemicolon and (LDepth <= 0)) or
+       (LLine - LStartLine >= MAX_LINES)) then
+      Break;
+    LEndLine := LLine;
+    LLast := LI;
+    case LKind of
+      tkLParen, tkLBracket:
+        Inc(LDepth);
+      tkRParen, tkRBracket:
+        Dec(LDepth);
+      tkSemicolon:
+        if LToSemicolon and (LDepth <= 0) then
+          Break;
+    end;
+  end;
+  if LEndLine = LStartLine then
+    Exit;
+  LFirst := LVis;
+  while (LFirst > 0) and (LineOfVis(LFirst - 1) = LStartLine) do
+    Dec(LFirst);
+  while (LLast < LHigh) and (LM.Tree.Source.VisibleToken(LLast + 1).Kind <>
+        tkEndOfFile) and (LineOfVis(LLast + 1) = LEndLine) do
+    Inc(LLast);
+  Result := VisText(LM, LFirst, LLast);
+end;
+
+{ The row text of a declaration: its line, or the lines it is written over
+  joined (JoinedDecl) and cut at a parameter boundary. }
+function DeclRowText(LM: TPasSemaModel; ASym: Integer;
+  const ALine: string): string;
+begin
+  Result := '';
+  if (LM <> nil) and (ASym >= 0) and (ASym < LM.SymCount) then
+    Result := JoinedDecl(LM, LM.Symbols[ASym].DeclNode);
+  if Result <> '' then
+    Result := CutDecl(Result)
+  else
+    Result := CleanLine(ALine);
+end;
+
 { Is the property named at ANameNode the default array property - `property
   Items[I: Integer]: T read GetItem; default;`? `X[I]` uses it without
   writing its name, and a reference search, which follows names, finds none
@@ -453,7 +603,7 @@ begin
   AT.DeclFile := LHit.FilePath;
   AT.DeclLine := LHit.Line;
   AT.DeclCol := LHit.Col;
-  AT.Snippet := CleanLine(LHit.Snippet);
+  AT.Snippet := DeclRowText(LM, ATSym, LHit.Snippet);
   AT.Own := AWs.IsOwnFile(LHit.FilePath);
   AT.Ids[AA.Index].Mid := ATMid;
   AT.Ids[AA.Index].Sym := ATSym;
@@ -767,6 +917,249 @@ begin
     Result := Result + '  [compiled unit, no source]';
 end;
 
+{ ---- what the index does not hold ---------------------------------------------- }
+
+// What was searched, for an answer that found nothing: `the 80 units indexed
+// - what pastree-mcp.dproj compiles: 9 of its own, 71 from libraries`.
+function IndexScope(AWs: TMcpWorkspace): string;
+var
+  LAll, LOwn: Integer;
+begin
+  LAll := AWs.IndexedUnitCount(LOwn);
+  Result := Format('the %d units indexed - what %s %s: %d of %s own, %d from '
+    + 'libraries', [LAll, AWs.IndexedProjects, IfThen(Length(AWs.Members) = 1,
+    'compiles', 'compile'), LOwn, IfThen(Length(AWs.Members) = 1, 'its',
+    'their'), LAll - LOwn]);
+end;
+
+type
+  // One file outside the index that writes a name (OutsideIndexNote).
+  TWordSite = record
+    FilePath: string;
+    Line: Integer;
+    Text: string;
+    Score: Integer;        // of its line, see OutsideIndexNote
+  end;
+
+{ Does the line that writes a name at ACol declare it? A routine, property
+  or unit keyword before it (a qualifier - `procedure TFoo.Bar` - skipped),
+  or the name first on its line (or after a `,` of a list) and followed by
+  `=` or a `:` that is not `:=`. A guess from text - a `case` label reads as
+  a field - that only orders the rows. }
+function DeclaresAt(const ALine: string; ACol, ALen: Integer): Boolean;
+const
+  HEADS: array[0..9] of string = ('procedure', 'function', 'constructor',
+    'destructor', 'property', 'operator', 'unit', 'program', 'library',
+    'package');
+var
+  LBefore, LAfter: string;
+  LAt: Integer;
+begin
+  LBefore := LowerCase(Trim(Copy(ALine, 1, ACol - 1)));
+  while LBefore.EndsWith('.') do
+  begin
+    LBefore := Copy(LBefore, 1, Length(LBefore) - 1);
+    while (LBefore <> '') and IsIdentChar(LBefore[Length(LBefore)]) do
+      Delete(LBefore, Length(LBefore), 1);
+    LBefore := TrimRight(LBefore);
+  end;
+  LAt := Length(LBefore);
+  while (LAt > 0) and IsIdentChar(LBefore[LAt]) do
+    Dec(LAt);
+  for var LHead in HEADS do
+    if Copy(LBefore, LAt + 1, MaxInt) = LHead then
+      Exit(True);
+  LAfter := TrimLeft(Copy(ALine, ACol + ALen, MaxInt));
+  Result := ((LBefore = '') or LBefore.EndsWith(',')) and
+    (LAfter.StartsWith('=') or (LAfter.StartsWith(':') and
+    not LAfter.StartsWith(':=')));
+end;
+
+{ ALines[AIdx] and, while its parentheses are open, the lines after it, as one
+  - JoinedDecl for a file no model holds, so read as text: a `//` comment is
+  cut off each line, and a parenthesis in a string or a brace comment can
+  end the join early or late. At most MAX_LINES lines. }
+function JoinedTextLine(const ALines: TArray<string>; AIdx: Integer): string;
+const
+  MAX_LINES = 20;
+var
+  LDepth, LCut: Integer;
+  LLine: string;
+begin
+  Result := '';
+  LDepth := 0;
+  for var LIdx := AIdx to Min(High(ALines), AIdx + MAX_LINES - 1) do
+  begin
+    LLine := ALines[LIdx];
+    LCut := Pos('//', LLine);
+    if LCut > 0 then
+      LLine := Copy(LLine, 1, LCut - 1);
+    Result := Result + ' ' + Trim(LLine);
+    for var LCh in LLine do
+      if LCh = '(' then
+        Inc(LDepth)
+      else if LCh = ')' then
+        Dec(LDepth);
+    if LDepth <= 0 then
+      Break;
+  end;
+  Result := CutDecl(CleanLine(Result, MaxInt).Replace('( ', '(').Replace(' )',
+    ')'));
+end;
+
+{ Where the Pascal sources the index does not hold write a name that no
+  declaration matches (TMcpWorkspace.UnindexedSources). A unit no project
+  uses is invisible to every tool, and "no declaration matches" alone sends
+  the agent to conclude there is none - a session on PasTree lost the tree
+  checker and the test kit that way, both in units its project did not use.
+  Every segment of a qualified name must be in the file. Per file, the line
+  that best says where the name is, by score: 4 declares the dotted name
+  (`unit A.B;`, `procedure TFoo.Bar`), 3 declares its last segment
+  (DeclaresAt), 2 writes the dotted name, 1 writes the last segment - a
+  file whose best is 1 for a qualified name only has the words somewhere,
+  and is left out. A declaration's line comes with the lines its parameter
+  list goes on over (JoinedTextLine). The files are read until SCAN_MS runs
+  out, and the answer says so. '' for a wildcard query; with AAlways, a line
+  saying that nothing was found, else '' then too. }
+function OutsideIndexNote(AWs: TMcpWorkspace; const AQuery: string;
+  AAlways: Boolean): string;
+const
+  SCAN_MS = 2000;
+  MAX_FILES = 5;
+var
+  LSegs, LLower: TArray<string>;
+  LFiles, LLines: TArray<string>;
+  LSites: TList<TWordSite>;
+  LSite: TWordSite;
+  LText, LTextLower, LWord, LDotted: string;
+  LSearched, LCol, LScore: Integer;
+  LAll: Boolean;
+  LSW: TStopwatch;
+  LSb: TStringBuilder;
+begin
+  Result := '';
+  if (AQuery = '') or AQuery.Contains('*') or AQuery.Contains('?') then
+    Exit;
+  LSegs := nil;
+  LLower := nil;
+  for var LSeg in AQuery.Split(['.']) do
+    if StripGenerics(Trim(LSeg)) <> '' then
+    begin
+      LSegs := LSegs + [StripGenerics(Trim(LSeg))];
+      LLower := LLower + [LowerCase(StripGenerics(Trim(LSeg)))];
+    end;
+  if Length(LSegs) = 0 then
+    Exit;
+  LWord := LSegs[High(LSegs)];
+  LDotted := '';
+  if Length(LSegs) > 1 then
+    LDotted := string.Join('.', LSegs);
+  LFiles := AWs.UnindexedSources;
+  LSearched := 0;
+  LSW := TStopwatch.StartNew;
+  LSites := TList<TWordSite>.Create;
+  LSb := TStringBuilder.Create;
+  try
+    for var LFile in LFiles do
+    begin
+      if LSW.ElapsedMilliseconds > SCAN_MS then
+        Break;
+      Inc(LSearched);
+      try
+        LText := TFile.ReadAllText(LFile);   // BOM-aware
+      except
+        Continue;
+      end;
+      LTextLower := LowerCase(LText);
+      LAll := True;
+      for var LSeg in LLower do
+        if Pos(LSeg, LTextLower) = 0 then
+        begin
+          LAll := False;
+          Break;
+        end;
+      if not LAll then
+        Continue;
+      LLines := LText.Split([#13#10, #10, #13]);
+      LSite := Default(TWordSite);
+      for var LIdx := 0 to High(LLines) do
+      begin
+        LScore := 0;
+        LCol := 0;
+        if LDotted <> '' then
+          LCol := FindWord(LLines[LIdx], LDotted);
+        if LCol > 0 then
+          LScore := IfThen(DeclaresAt(LLines[LIdx], LCol, Length(LDotted)), 4, 2)
+        else
+        begin
+          LCol := FindWord(LLines[LIdx], LWord);
+          if LCol > 0 then
+            LScore := IfThen(DeclaresAt(LLines[LIdx], LCol, Length(LWord)), 3, 1);
+        end;
+        if LScore > LSite.Score then
+        begin
+          LSite.FilePath := LFile;
+          LSite.Line := LIdx + 1;
+          LSite.Score := LScore;
+          if LScore >= 3 then
+            LSite.Text := JoinedTextLine(LLines, LIdx)
+          else
+            LSite.Text := CleanLine(LLines[LIdx]);
+          if LScore = 4 then
+            Break;
+        end;
+      end;
+      if (LSite.Score > 1) or ((LSite.Score = 1) and (LDotted = '')) then
+        LSites.Add(LSite);
+    end;
+    LSites.Sort(TComparer<TWordSite>.Construct(
+      function(const L, R: TWordSite): Integer
+      begin
+        Result := R.Score - L.Score;
+        if Result = 0 then
+          Result := CompareText(L.FilePath, R.FilePath);
+      end));
+    if LSites.Count > 0 then
+    begin
+      LSb.AppendLine(Format('`%s` is written in %d file(s) that no indexed '
+        + 'project uses - no tool here sees them:', [AQuery, LSites.Count]));
+      for var LIdx := 0 to Min(LSites.Count, MAX_FILES) - 1 do
+        LSb.AppendLine(Format('  %s:%d  %s', [AWs.RelPath(LSites[LIdx].FilePath),
+          LSites[LIdx].Line, LSites[LIdx].Text]));
+      if LSites.Count > MAX_FILES then
+        LSb.AppendLine(Format('  ... and %d more files',
+          [LSites.Count - MAX_FILES]));
+    end
+    else if AAlways then
+      LSb.AppendLine(Format('no Pascal file outside them writes `%s` either '
+        + '(%d searched, under the group directory and on its projects'' '
+        + 'search paths)', [AQuery, LSearched]));
+    if (LSearched < Length(LFiles)) and ((LSites.Count > 0) or AAlways) then
+      LSb.AppendLine(Format('(%d of %d files outside the index searched - the '
+        + 'search stops after %d s)', [LSearched, Length(LFiles),
+        SCAN_MS div 1000]));
+    Result := LSb.ToString.TrimRight;
+  finally
+    LSb.Free;
+    LSites.Free;
+  end;
+end;
+
+// The refusal of a name no declaration matches, for every tool that takes
+// `symbol`: what was searched, and where the name is written outside it.
+function NoSuchDeclaration(AWs: TMcpWorkspace; const ASymbol: string): string;
+var
+  LNote: string;
+begin
+  Result := Format('no declaration named `%s` among %s - try `find` with a '
+    + 'wildcard: *%s*; a local or a parameter is addressed by `file` + '
+    + '`line` + `name`', [ASymbol, IndexScope(AWs),
+    StripGenerics(ASymbol.Split(['.'])[High(ASymbol.Split(['.']))])]);
+  LNote := OutsideIndexNote(AWs, ASymbol, False);
+  if LNote <> '' then
+    Result := Result + sLineBreak + LNote;
+end;
+
 // The ONE declaration a name means, refusing an ambiguous one with the
 // candidates listed.
 function ResolveNamed(AWs: TMcpWorkspace; const ASymbol,
@@ -778,10 +1171,7 @@ var
 begin
   LCands := ResolveName(AWs, ASymbol, AKind, False, 12, LMore);
   if Length(LCands) = 0 then
-    raise EToolError.CreateFmt('no declaration named `%s` in the analyzed '
-      + 'closure (try `find` with a wildcard: *%s*; a local or a parameter is '
-      + 'addressed by `file` + `line` + `name`)', [ASymbol,
-      StripGenerics(ASymbol.Split(['.'])[High(ASymbol.Split(['.']))])]);
+    raise EToolError.Create(NoSuchDeclaration(AWs, ASymbol));
   if Length(LCands) = 1 then
   begin
     Result := LCands[0];
@@ -1283,28 +1673,46 @@ var
   LLimit, LMore: Integer;
   LCands: TArray<TTarget>;
   LSb: TStringBuilder;
-  LFallback: Boolean;
+  LFallback, LOwnOnly: Boolean;
+  LAll, LOwn: Integer;
 begin
   LQuery := ArgStr(AArgs, 'query');
   if LQuery = '' then
     raise EToolError.Create('`query` is required');
   LKind := ArgStr(AArgs, 'kind');
   LLimit := EnsureRange(ArgInt(AArgs, 'limit', 30), 1, 500);
-  LCands := ResolveName(AWs, LQuery, LKind, SameText(ArgStr(AArgs, 'scope'),
-    'project'), LLimit, LMore);
+  LOwnOnly := SameText(ArgStr(AArgs, 'scope'), 'project');
+  LCands := ResolveName(AWs, LQuery, LKind, LOwnOnly, LLimit, LMore);
   LFallback := False;
   if (Length(LCands) = 0) and (Pos('*', LQuery) = 0) and (Pos('?', LQuery) = 0)
   then
   begin
     // Nothing by that exact name: the agent often half-remembers one.
-    LCands := ResolveName(AWs, '*' + LQuery + '*', LKind,
-      SameText(ArgStr(AArgs, 'scope'), 'project'), LLimit, LMore);
+    LCands := ResolveName(AWs, '*' + LQuery + '*', LKind, LOwnOnly, LLimit,
+      LMore);
     LFallback := True;
   end;
   LSb := TStringBuilder.Create;
   try
+    // Nothing of that name in the index: say what the index is, and where
+    // the name is written outside it - a unit no project uses is invisible
+    // to every tool, and nothing else would say so.
     if Length(LCands) = 0 then
-      Exit(Format('no declaration matches `%s`', [LQuery]));
+    begin
+      if LOwnOnly then
+      begin
+        LAll := AWs.IndexedUnitCount(LOwn);
+        LSb.AppendLine(Format('no declaration%s matches `%s` among the group''s '
+          + 'own %d units (%d with the libraries; `scope: all` searches those '
+          + 'too)', [IfThen(LKind <> '', ' of kind ' + LKind), LQuery, LOwn,
+          LAll]));
+      end
+      else
+        LSb.AppendLine(Format('no declaration%s matches `%s` among %s',
+          [IfThen(LKind <> '', ' of kind ' + LKind), LQuery, IndexScope(AWs)]));
+      LSb.AppendLine(OutsideIndexNote(AWs, LQuery, True));
+      Exit(LSb.ToString.TrimRight);
+    end;
     if LFallback then
       LSb.AppendLine(Format('no declaration named exactly `%s`; names '
         + 'containing it:', [LQuery]));
@@ -1313,6 +1721,10 @@ begin
     if LMore > 0 then
       LSb.AppendLine(Format('... %d more (narrow the query, add `kind`, or '
         + 'raise `limit`)', [LMore]));
+    // The names containing it may be the wrong ones when the name itself is
+    // declared in a unit nothing uses.
+    if LFallback then
+      LSb.AppendLine(OutsideIndexNote(AWs, LQuery, False));
     Result := LSb.ToString.TrimRight;
   finally
     LSb.Free;
@@ -1370,9 +1782,7 @@ begin
     LTargets := ResolveName(AWs, ArgStr(AArgs, 'symbol'), ArgStr(AArgs, 'kind'),
       False, 10, LMore);
     if Length(LTargets) = 0 then
-      raise EToolError.CreateFmt('no declaration named `%s` (try `find` with '
-        + 'a wildcard; a local or a parameter is addressed by `file` + `line` '
-        + '+ `name`)', [ArgStr(AArgs, 'symbol')]);
+      raise EToolError.Create(NoSuchDeclaration(AWs, ArgStr(AArgs, 'symbol')));
   end;
   LSb := TStringBuilder.Create;
   try
@@ -3978,7 +4388,8 @@ begin
           LRow.FilePath := LHit.FilePath;
           LRow.Line := LHit.Line;
           LRow.Col := LHit.Col;
-          LRow.Text := CleanLine(LHit.Snippet);
+          LRow.Text := DeclRowText(LA.Proj.Model(LSite.Mid), LSite.Sym,
+            LHit.Snippet);
         end
         else
           LRow.Text := HeadOf(LDM, LSite.Sym) + ' ' +
@@ -5269,12 +5680,83 @@ begin
   Result := False;
 end;
 
+{ A routine's or property's parameter list and result type (`(const A: X; B:
+  Y): Z`, `[I: Integer]: T`) whole - what PasTree's outline puts in Detail,
+  whose 80-character cut ends mid-name and then appends the result type:
+  `AInterfa...: TPasTree` reads as one more parameter. The same children as
+  PasTree.Outline's Routine and PropertyDecl pick; the text through VisText,
+  cut by CutDecl. '' when the node has none of them. }
+function SignatureDetail(LM: TPasSemaModel; ANode: Integer): string;
+var
+  LChild, LParams, LResult, LFirst, LLast, LPrev: Integer;
+  LIsProperty: Boolean;
+
+  function PartText(APart: Integer): string;
+  begin
+    Result := '';
+    if (APart <> NIL_NODE) and LM.Tree.NodeVisRange(APart, LFirst, LLast) then
+      Result := VisText(LM, LFirst, LLast);
+  end;
+
+begin
+  Result := '';
+  LParams := NIL_NODE;
+  LResult := NIL_NODE;
+  LIsProperty := LM.Tree.Nodes[ANode].Kind = nkPropertyDecl;
+  LChild := LM.Tree.Nodes[ANode].FirstChild;
+  if LIsProperty then
+  begin
+    while (LChild <> NIL_NODE) and (LM.Tree.Nodes[LChild].Kind = nkAttrGroup) do
+      LChild := LM.Tree.Nodes[LChild].NextSibling;
+    if (LChild = NIL_NODE) or (LM.Tree.Nodes[LChild].Kind <> nkIdent) then
+      Exit;
+    LChild := LM.Tree.Nodes[LChild].NextSibling;
+    if (LChild <> NIL_NODE) and (LM.Tree.Nodes[LChild].Kind = nkParams) then
+    begin
+      LParams := LChild;
+      LChild := LM.Tree.Nodes[LChild].NextSibling;
+    end;
+    // The type is the child after a colon; a bare `property X;` has none.
+    if (LChild <> NIL_NODE) and (LM.Tree.Nodes[LChild].Kind <> nkPropSpec) then
+    begin
+      LPrev := LM.Tree.NodeLeftmostVis(LChild) - 1;
+      if (LPrev >= 0) and (LPrev <= High(LM.Tree.Source.Visible)) and
+         (LM.Tree.Source.VisibleToken(LPrev).Kind = tkColon) then
+        LResult := LChild;
+    end;
+  end
+  else
+    while LChild <> NIL_NODE do
+    begin
+      case LM.Tree.Nodes[LChild].Kind of
+        // A name segment - or the result type, an nkIdent too.
+        nkIdent, nkMissing:
+          if not (nfName in LM.Tree.Nodes[LChild].Flags) and
+             (LResult = NIL_NODE) then
+            LResult := LChild;
+        nkParams:
+          LParams := LChild;
+        nkGenericParams, nkDirective, nkAttrGroup, nkRoutineBody:
+          ;
+      else
+        // The result type in any other shape: `array of`, a qualified name.
+        if LResult = NIL_NODE then
+          LResult := LChild;
+      end;
+      LChild := LM.Tree.Nodes[LChild].NextSibling;
+    end;
+  Result := PartText(LParams);
+  if LResult <> NIL_NODE then
+    Result := Result + ': ' + PartText(LResult);
+  Result := CutDecl(Result);
+end;
+
 function ToolOutline(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
 const
   SECTIONS: array[TPasOutlineSection] of string = ('', 'interface',
     'implementation', 'initialization', 'finalization');
 var
-  LFile, LOwner, LSection, LLabel: string;
+  LFile, LOwner, LSection, LLabel, LDetail: string;
   LA: TMcpAnalysis;
   LMid, LDepth: Integer;
   LM: TPasSemaModel;
@@ -5336,12 +5818,16 @@ begin
           end;
           LSb.Append(Format('%d%s%s %s', [LE.Line, StringOfChar(' ', 2 * LDepth),
             LE.Head, LLabel]));
-          if LE.Detail <> '' then
+          LDetail := LE.Detail;
+          if (LE.Kind in [okRoutine, okProperty]) and (LE.Node <> NIL_NODE) then
+            LDetail := SignatureDetail(LM, LE.Node);
+          if LDetail <> '' then
           begin
-            if LE.Detail.StartsWith('(') or LE.Detail.StartsWith(':') then
-              LSb.Append(LE.Detail)
+            if LDetail.StartsWith('(') or LDetail.StartsWith(':') or
+               LDetail.StartsWith('[') then
+              LSb.Append(LDetail)
             else
-              LSb.Append(' ' + LE.Detail);
+              LSb.Append(' ' + LDetail);
           end;
           if (LE.FilePath <> '') and not SameText(LE.FilePath, LFile) then
             LSb.Append('  [in ' + AWs.RelPath(LE.FilePath) + ']');
@@ -8276,8 +8762,10 @@ const
     + 'whole closure of the project group (project units first, then '
     + 'libraries and the RTL). Exact name, qualified name (TFoo.Bar, '
     + 'Unit.TFoo) or wildcards (*Customer*). Returns file:line, the qualified '
-    + 'name, its kind and the declaration line. Faster and more precise than '
-    + 'grep for Object Pascal declarations.",'
+    + 'name, its kind and the declaration (one written over several lines '
+    + 'joined). Faster and more precise than grep for Object Pascal '
+    + 'declarations. A name the index does not hold is answered with the '
+    + 'Pascal files outside it - units no project uses - that write it.",'
     + '"inputSchema":{"type":"object","properties":{'
     + '"query":{"type":"string","description":"Name, qualified name or '
     + 'wildcard pattern"},'
@@ -8513,8 +9001,10 @@ begin
     + 'in, which usually answers the question without opening the file. '
     + 'Symbols are addressed by name (TFoo, '
     + 'TFoo.Bar, Unit.TFoo.Bar) or by file + line + name. Result paths are '
-    + 'relative to ' + AWs.Root + '. The index re-reads changed files before '
-    + 'every call, so results match the files on disk.';
+    + 'relative to ' + AWs.Root + '. The index holds what the projects '
+    + 'compile - their `uses` closure, not every file of the directory. It '
+    + 're-reads changed files before every call, so results match the files '
+    + 'on disk, and names them: one you did not edit is someone else''s edit.';
 end;
 
 function CallTool(AWs: TMcpWorkspace; const AName: string; AArgs: TJSONObject;

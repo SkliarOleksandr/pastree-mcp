@@ -68,6 +68,14 @@ $b = Run-Cli @()
 Check 'status' (Block $b 'status') @('member AppA', 'member AppB', 'analysis 0:', 'every `uses` name resolved') @('analysis 1:')
 Check 'find' (Block $b 'find {"query":"TCircle"}') @('Shared\uShapes.pas:21  TCircle (class)')
 Check 'find wildcard' (Block $b 'find {"query":"*Circ*"') @('AppB\uAppB.pas:11  TBigCircle', 'Shared\uShapes.pas:21  TCircle')
+# A declaration written over several lines is one row, whole - or, longer than
+# a row, cut at a parameter boundary with its end kept.
+Check 'find joined' (Block $b 'find {"query":"TWideBox.Configure"}') @("AppB\uBoxes.pas:71  TWideBox.Configure (function)  function Configure(const AFirstName: string; ASecondValue: Integer; const AThirdName: string = 'third'; AFourthFlag: Boolean = False): Boolean;")
+Check 'find joined cut' (Block $b 'find {"query":"TWideBox.Many"}') @('AppB\uBoxes.pas:74  TWideBox.Many (procedure)  procedure Many(const AAlphaName, ABetaName, AGammaName: string; ADeltaCount, AEpsilonCount, AZetaCount: Integer; const AEtaText, AThetaText, ...); virtual;')
+# A name no declaration matches: what the index is, and where the name is
+# written outside it - in a unit no project uses - or that it is nowhere.
+Check 'find outside the index' (Block $b 'find {"query":"OrphanRoutine"}') @('no declaration matches `OrphanRoutine` among the ', ' units indexed - what the 2 projects of Fixture.groupproj compile: 7 of their own, ', "``OrphanRoutine`` is written in 1 file(s) that no indexed project uses - no tool here sees them:`n  AppB\uOrphan.pas:8  procedure OrphanRoutine;")
+Check 'find nowhere' (Block $b 'find {"query":"NothingAnywhere"}') @('no declaration matches `NothingAnywhere` among the ', 'no Pascal file outside them writes `NothingAnywhere` either (1 searched, under the group directory')
 Check 'definition' (Block $b 'definition {"symbol":"TCircle.Area"') @('declared at Shared\uShapes.pas:26', 'implemented at Shared\uShapes.pas:53', 'Result := Pi * FRadius * FRadius;')
 Check 'source' (Block $b 'source {"symbol":"TCircle.Area"}') @('TCircle.Area (function) implemented at Shared\uShapes.pas:53-56', "53  function TCircle.Area: Double;`n54  begin", "56  end;`n") @('declared at')
 Check 'source both' (Block $b 'source {"symbol":"TCircle.Area", "part"') @('TCircle.Area (function) declared at Shared\uShapes.pas:26', "26      function Area: Double; override;`nimplemented at Shared\uShapes.pas:53-56")
@@ -99,6 +107,7 @@ Check 'members library' (Block $b 'members {"symbol":"IShape"') @('IShape <- IIn
 Check 'members none match' (Block $b 'members {"symbol":"TCircle", "match"') @('no members named like *Nothing*')
 Check 'members empty' (Block $b 'members {"symbol":"TEmpty"}') @('TEmpty (AppA\uMembers.pas:48): no members') @('(library')
 Check 'members not a type' (Block $b 'members {"symbol":"RunA"}') @('RunA is a procedure - `members` takes a type')
+Check 'members joined' (Block $b 'members {"symbol":"TWideBox"}') @("  public`n    71  function Configure(const AFirstName: string; ASecondValue: Integer; const AThirdName: string = 'third'; AFourthFlag: Boolean = False): Boolean;`n", '74  procedure Many(const AAlphaName, ABetaName, AGammaName: string; ADeltaCount, AEpsilonCount, AZetaCount: Integer; const AEtaText, AThetaText, ...); virtual;')
 # "AppA\tuAppA.pas" in JSON is a tab, not a backslash: say so, not "invalid characters in path".
 Check 'control character' (Block $b 'outline {"file":"AppA') @('`file` holds a control character (#9)')
 Check 'references' (Block $b 'references {"symbol":"TShape.Area"}') @('1 references in 1 files', "  RunA`n    22  Writeln(LShape.Describe")
@@ -130,6 +139,7 @@ Check 'callers inherited' (Block $b 'callers {"symbol":"TShapeBox.Changed"}') @(
 Check 'callers override' (Block $b 'callers {"symbol":"TBigBox.Changed"}') @('all through TShapeBox.Changed (virtual)', "  TShapeBox.SetItem`n    44  Changed;") @('59  ')
 Check 'callers none' (Block $b 'callers {"symbol":"NeverCalled"}') @('callers of NeverCalled (AppB\uBoxes.pas:31) - none found')
 Check 'callers not a routine' (Block $b 'callers {"symbol":"TCircle"}') @('TCircle is a class - `callers` takes a routine')
+Check 'callers outside the index' (Block $b 'callers {"symbol":"OrphanRoutine"}') @('no declaration named `OrphanRoutine` among the ', 'a local or a parameter is addressed by', 'AppB\uOrphan.pas:8  procedure OrphanRoutine;')
 # callees: each routine a body reaches, at its declaration. A virtual call on
 # a TShape may run every override below it (project B's too); a property
 # write to a field calls nothing.
@@ -187,6 +197,8 @@ Check 'compile no member' (Block $b 'compile {"member":"NoSuch"}') @('no member 
 Check 'compile bad show' (Block $b 'compile {"show"') @('`show` is new, warnings or all')
 Check 'compile nothing changed' (Block $b 'compile {}') @('no file has changed since the server started - name the `member` to build (the group has: AppA, AppB)')
 Check 'outline' (Block $b 'outline {"file":"Shared') @('21  type TCircle = class', '27    property Radius: Double', '53  function TCircle.Area: Double', '40 implementation')
+# A parameter list whole: PasTree's outline cuts one at 80 characters.
+Check 'outline signature' (Block $b 'outline {"file":"AppB') @("71    function Configure(const AFirstName: string; ASecondValue: Integer; const AThirdName: string = 'third'; AFourthFlag: Boolean = False): Boolean`n", '85  procedure TWideBox.Many(const AAlphaName, ABetaName, AGammaName: string; ADeltaCount, AEpsilonCount, AZetaCount: Integer; const AEtaText, AThetaText, AIotaText: string)') @('...')
 Check 'unit_deps' (Block $b 'unit_deps') @('uShapes is used by 3 units', 'AppB\uAppB.pas:8')
 Check 'diagnostics' (Block $b 'diagnostics') @('no diagnostics')
 Check 'ambiguous' (Block $b 'references {"symbol":"Area"}') @('is ambiguous - 5 declarations', 'IShape.Area', 'TBigCircle.Area')
@@ -281,7 +293,8 @@ try {
     $text = $text.Replace("    FreeAndNil(LShape);", "    FreeAndNil(LShape);`r`n    TCircle.Create(5).Free;`r`n    NoSuchName := 1;")
     [IO.File]::WriteAllText($unit, $text, $utf8)
     $r = Rpc 4 'tools/call' '{"name":"related","arguments":{"relation":"creations","symbol":"TCircle"}}'
-    Check 'call after edit' (ToolText $r) @('(index: re-analyzed 1 changed file(s)', 'creations of TCircle', ': 2', 'TCircle.Create(5).Free;')
+    # The note names the file: one the agent did not edit is someone else's.
+    Check 'call after edit' (ToolText $r) @('(index: re-analyzed 1 changed file(s) in ', ' ms: AppA\uAppA.pas)', 'creations of TCircle', ': 2', 'TCircle.Create(5).Free;')
     $r = Rpc 5 'tools/call' '{"name":"diagnostics","arguments":{}}'
     Check 'diagnostics after edit' (ToolText $r) @('AppA\uAppA.pas:26:5: ', "'NoSuchName' (in RunA)")
     # A diff removing a routine the edited unit still calls: impact names the
@@ -318,9 +331,18 @@ try {
     if ($order -contains 11) { Write-Host 'FAIL a cancelled compile was answered'; $script:failures++ }
     Check 'compile after a cancel' (ToolText $script:replies[12]) @('compile AppA (Win32 Debug): built in')
 
-    $r = Rpc 13 'tools/call' '{"name":"no_such_tool","arguments":{}}'
+    # A project file changed: the workspace reloads, and the note names it.
+    (Get-Item (Join-Path $copy 'AppA\AppA.dproj')).LastWriteTime = (Get-Date).AddSeconds(5)
+    $r = Rpc 13 'tools/call' '{"name":"find","arguments":{"query":"TCircle"}}'
+    Check 'call after a project file changed' (ToolText $r) @('(index: project file(s) changed: AppA\AppA.dproj; the workspace was reloaded)', 'Shared\uShapes.pas:21  TCircle (class)')
+    # A unit deleted: its analysis is rebuilt, and the note names it.
+    Remove-Item (Join-Path $copy 'AppB\uBoxes.pas')
+    $r = Rpc 14 'tools/call' '{"name":"find","arguments":{"query":"TShapeBox"}}'
+    Check 'call after a delete' (ToolText $r) @('(index: rebuilt in ', ' ms; deleted: AppB\uBoxes.pas)', 'no declaration matches `TShapeBox`')
+
+    $r = Rpc 15 'tools/call' '{"name":"no_such_tool","arguments":{}}'
     if (-not $r.result.isError) { Write-Host 'FAIL unknown tool not reported as isError'; $script:failures++ }
-    $r = Rpc 14 'no/such/method' '{}'
+    $r = Rpc 16 'no/such/method' '{}'
     if ($r.error.code -ne -32601) { Write-Host 'FAIL unknown method not -32601'; $script:failures++ }
 
     $stdin.Close()

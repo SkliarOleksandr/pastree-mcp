@@ -18,7 +18,8 @@ exactly the uses the compiler would bind, one line each.
   parsed once, and every search runs across all of them.
 - **Always current.** Before each call, files changed on disk are re-analyzed,
   one module at a time, so line numbers in answers match the files the agent
-  just edited.
+  just edited - and the answer names them, so an edit made by someone else
+  shows.
 - **Built for an agent.** Symbols are addressed by name (`TFoo.Bar`) or by file,
   line and identifier - no column counting. Answers are compact text:
   relative paths, grouped by file and by the routine each row sits in,
@@ -33,7 +34,7 @@ or **16 s / 4.3 GB** under the exact one. Typical calls take 60-500 ms.
 | Tool | Answers |
 | --- | --- |
 | `status` | What is loaded: members, analyses, unit counts, unit names that do not resolve, load progress |
-| `find` | Declarations by name, qualified name or wildcard, project units first |
+| `find` | Declarations by name, qualified name or wildcard, project units first; for a name the index does not hold, the Pascal files outside it that write it |
 | `definition` | Where a symbol is declared and implemented, optionally with the source that follows |
 | `source` | The exact text of one declaration - a routine's body, a whole type, a constant - numbered, with the comment above it |
 | `members` | What a class, record or interface has, inherited members included, under the type declaring each - or what can be called on a variable, by its type |
