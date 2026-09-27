@@ -31,16 +31,32 @@ uses
   System.JSON,
   PasMcp.Workspace;
 
+type
+  // A tool whose answer comes later - `compile`, a build of seconds to
+  // minutes. CallTool hands it back instead of an answer; Work then runs on
+  // a thread of its own and must not read the index, so the calls behind it
+  // are answered meanwhile; Finish runs where the tools run (it may read the
+  // index) and answers. Cancel is called from another thread, any time
+  // before Finish.
+  TDeferredTool = class
+  public
+    procedure Work; virtual; abstract;
+    function Finish(out AIsError: Boolean): string; virtual; abstract;
+    procedure Cancel; virtual; abstract;
+  end;
+
 function ToolDefinitions: TJSONArray;
 function ServerInstructions(AWs: TMcpWorkspace): string;
+// The answer to a call - or '' and ADeferred, for a tool that answers later.
+// AProgress, when set, gets a line of status from a tool that reports: set by
+// the server when the call carries a progress token.
 function CallTool(AWs: TMcpWorkspace; const AName: string; AArgs: TJSONObject;
-  out AIsError: Boolean): string;
-
-var
-  // Set by the server around a tools/call that asked for progress
-  // (params._meta.progressToken): a long tool - `compile` - reports through
-  // it, which also keeps the client from timing the call out as idle.
-  ToolProgress: TProc<string>;
+  out AIsError: Boolean; out ADeferred: TDeferredTool;
+  const AProgress: TProc<string> = nil): string;
+// CallTool to its answer, a deferred tool's work done on the calling thread:
+// the CLI's way.
+function CallToolNow(AWs: TMcpWorkspace; const AName: string;
+  AArgs: TJSONObject; out AIsError: Boolean): string;
 
 implementation
 
@@ -7680,11 +7696,12 @@ begin
   end;
 end;
 
-function MemberProgress(AIndex, ACount: Integer): TProc<string>;
+function MemberProgress(const ABase: TProc<string>;
+  AIndex, ACount: Integer): TProc<string>;
 var
   LProgress: TProc<string>;
 begin
-  LProgress := ToolProgress;
+  LProgress := ABase;
   if not Assigned(LProgress) then
     Exit(nil);
   Result :=
@@ -7902,7 +7919,7 @@ var
     LM: TMcpMember;
     LErrs: Integer;
   begin
-    LM := AWs.Members[R.Member];
+    LM := R.Spec.Member;
     Result := LM.Name + ' (' + PlatformName(LM.Platform) + IfThen(LM.Config <>
       '', ' ' + LM.Config, '') + '): ';
     // An F2063 follows from the used unit's own errors, and is folded under
@@ -7983,7 +8000,7 @@ begin
 
     for var R in AResults do
     begin
-      LName := AWs.Members[R.Member].Name;
+      LName := R.Spec.Member.Name;
       for var LMsg in R.Messages do
         case LMsg.Kind of
           bmError:
@@ -8121,34 +8138,115 @@ begin
   end;
 end;
 
-{ `compile` (SPEC 9.4): the members a change reaches, built by the real
-  compiler into a directory of the server's own (PasMcp.Build), answered
-  with the errors and what the change added to the warnings and hints. }
-function ToolCompile(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
+type
+  { `compile` (SPEC 9.4): the members a change reaches, built by the real
+    compiler into a directory of the server's own (PasMcp.Build), answered
+    with the errors and what the change added to the warnings and hints.
+    Three steps: which members (NewCompileJob, where the tools run), their
+    builds (Work, on a thread of its own - specs only, never the index), the
+    answer (Finish, where the tools run again: routine names and source
+    lines come from the index). }
+  TCompileJob = class(TDeferredTool)
+  private
+    FWs: TMcpWorkspace;
+    FSpecs: TArray<TBuildSpec>;
+    FResults: TArray<TBuildResult>;
+    FWhy, FShow, FFresh: string;
+    FLimit: Integer;
+    FRebuild: Boolean;
+    FProgress: TProc<string>;
+    FCancel: TBuildCancel;
+  public
+    constructor Create(AWs: TMcpWorkspace; const AMembers: TArray<Integer>;
+      const AWhy, AShow: string; ALimit: Integer; ARebuild: Boolean;
+      const AProgress: TProc<string>);
+    destructor Destroy; override;
+    procedure Work; override;
+    function Finish(out AIsError: Boolean): string; override;
+    procedure Cancel; override;
+    // The freshness note of the call, said with the answer.
+    property Fresh: string read FFresh write FFresh;
+  end;
+
+constructor TCompileJob.Create(AWs: TMcpWorkspace;
+  const AMembers: TArray<Integer>; const AWhy, AShow: string; ALimit: Integer;
+  ARebuild: Boolean; const AProgress: TProc<string>);
+begin
+  inherited Create;
+  FWs := AWs;
+  for var LIdx in AMembers do
+    FSpecs := FSpecs + [MemberBuildSpec(AWs, LIdx)];
+  FWhy := AWhy;
+  FShow := AShow;
+  FLimit := ALimit;
+  FRebuild := ARebuild;
+  FProgress := AProgress;
+  FCancel := TBuildCancel.Create;
+end;
+
+destructor TCompileJob.Destroy;
+begin
+  FCancel.Free;
+  inherited;
+end;
+
+procedure TCompileJob.Work;
+begin
+  FResults := nil;
+  for var LK := 0 to High(FSpecs) do
+  begin
+    if FCancel.Cancelled then
+      Break;
+    FResults := FResults + [BuildMember(FSpecs[LK], FRebuild,
+      MemberProgress(FProgress, LK, Length(FSpecs)), FCancel)];
+  end;
+end;
+
+function TCompileJob.Finish(out AIsError: Boolean): string;
 var
+  LFresh: string;
+  LNotes: TArray<string>;
+begin
+  AIsError := False;
+  if FCancel.Cancelled then
+    Exit('compile cancelled');
+  // Files may have changed while it built; the routine names and source
+  // lines of the answer come from them as they are now.
+  FWs.EnsureFresh(LFresh);
+  for var LI := 0 to High(FResults) do
+    if FResults[LI].Ran then
+    begin
+      ResolveTruncated(FWs, FResults[LI]);
+      CompareWithBaseline(FResults[LI], FWs.ChangedFiles);
+    end;
+  Result := CompileAnswer(FWs, FResults, FWhy, FShow, FLimit);
+  LNotes := nil;
+  if Trim(FFresh) <> '' then
+    LNotes := LNotes + [FFresh.TrimRight([' ', ';'])];
+  if Trim(LFresh) <> '' then
+    LNotes := LNotes + [LFresh.TrimRight([' ', ';'])];
+  if Length(LNotes) > 0 then
+    Result := '(index: ' + String.Join('; ', LNotes) + ')' + sLineBreak + Result;
+end;
+
+procedure TCompileJob.Cancel;
+begin
+  FCancel.Cancel;
+end;
+
+function NewCompileJob(AWs: TMcpWorkspace; AArgs: TJSONObject;
+  const AProgress: TProc<string>): TCompileJob;
+var
+  LShow, LWhy: string;
   LMembers: TArray<Integer>;
-  LResults: TArray<TBuildResult>;
-  LRes: TBuildResult;
-  LWhy, LShow: string;
 begin
   LShow := LowerCase(ArgStr(AArgs, 'show', 'new'));
   if not MatchText(LShow, ['new', 'warnings', 'all']) then
     raise EToolError.Create('`show` is new, warnings or all');
   LMembers := CompileMembers(AWs, AArgs, LWhy);
-  LResults := nil;
-  for var LK := 0 to High(LMembers) do
-  begin
-    LRes := BuildMember(AWs, LMembers[LK], ArgBool(AArgs, 'rebuild', False),
-      MemberProgress(LK, Length(LMembers)));
-    if LRes.Ran then
-    begin
-      ResolveTruncated(AWs, LRes);
-      CompareWithBaseline(LRes, AWs.ChangedFiles);
-    end;
-    LResults := LResults + [LRes];
-  end;
-  Result := CompileAnswer(AWs, LResults, LWhy, LShow,
-    EnsureRange(ArgInt(AArgs, 'limit', 60), 1, 5000));
+  Result := TCompileJob.Create(AWs, LMembers, LWhy, LShow,
+    EnsureRange(ArgInt(AArgs, 'limit', 60), 1, 5000),
+    ArgBool(AArgs, 'rebuild', False), AProgress);
 end;
 
 { ---- the catalogue ----------------------------------------------------------- }
@@ -8314,8 +8412,9 @@ const
     + 'against): the project''s output, its .dcu files and the source tree '
     + 'are not touched, and pre- and post-build events are not run. Takes '
     + 'seconds for a small change, minutes for a first build or a rebuild of '
-    + 'a large member: use `diagnostics` while editing, `compile` before '
-    + 'saying a change is done.",'
+    + 'a large member - the other tools answer meanwhile, and cancelling the '
+    + 'call stops the build: use `diagnostics` while editing, `compile` '
+    + 'before saying a change is done.",'
     + '"inputSchema":{"type":"object","properties":{'
     + '"member":{"type":"string","description":"Group members to build, by '
     + 'name: AppA, or AppA,AppB. Default: those the files changed this '
@@ -8419,13 +8518,16 @@ begin
 end;
 
 function CallTool(AWs: TMcpWorkspace; const AName: string; AArgs: TJSONObject;
-  out AIsError: Boolean): string;
+  out AIsError: Boolean; out ADeferred: TDeferredTool;
+  const AProgress: TProc<string>): string;
 var
   LFresh: string;
   LSW: TStopwatch;
   LFreshMs: Int64;
+  LJob: TCompileJob;
 begin
   AIsError := False;
+  ADeferred := nil;
   LSW := TStopwatch.StartNew;
   LFreshMs := 0;
   try
@@ -8467,7 +8569,14 @@ begin
     else if AName = 'impact' then
       Result := ToolImpact(AWs, AArgs)
     else if AName = 'compile' then
-      Result := ToolCompile(AWs, AArgs)
+    begin
+      // Answered by the job, the freshness note with it.
+      LJob := NewCompileJob(AWs, AArgs, AProgress);
+      LJob.Fresh := LFresh;
+      LFresh := '';
+      ADeferred := LJob;
+      Result := '';
+    end
     else if AName = 'related' then
       Result := ToolRelated(AWs, AArgs)
     else if AName = 'outline' then
@@ -8494,9 +8603,35 @@ begin
       Log('tool %s raised %s: %s', [AName, E.ClassName, E.Message]);
     end;
   end;
-  Log('tool %s: %d ms (freshness check %d ms), %d chars%s', [AName,
-    LSW.ElapsedMilliseconds, LFreshMs, Length(Result), IfThen(AIsError,
-    ', error', '')]);
+  Log('tool %s: %d ms (freshness check %d ms), %s%s', [AName,
+    LSW.ElapsedMilliseconds, LFreshMs, IfThen(ADeferred <> nil,
+    'answered when its work is done', IntToStr(Length(Result)) + ' chars'),
+    IfThen(AIsError, ', error', '')]);
+end;
+
+function CallToolNow(AWs: TMcpWorkspace; const AName: string;
+  AArgs: TJSONObject; out AIsError: Boolean): string;
+var
+  LJob: TDeferredTool;
+begin
+  Result := CallTool(AWs, AName, AArgs, AIsError, LJob, nil);
+  if LJob = nil then
+    Exit;
+  try
+    try
+      LJob.Work;
+      Result := LJob.Finish(AIsError);
+    except
+      on E: Exception do
+      begin
+        AIsError := True;
+        Result := 'internal error: ' + E.ClassName + ': ' + E.Message;
+        Log('tool %s raised %s: %s', [AName, E.ClassName, E.Message]);
+      end;
+    end;
+  finally
+    LJob.Free;
+  end;
 end;
 
 end.

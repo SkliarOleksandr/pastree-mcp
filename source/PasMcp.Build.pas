@@ -35,8 +35,13 @@ unit PasMcp.Build;
     is read from its pipe. Both are read by ParseLine.
   - The child gets a pipe of its own for output and NUL for input, and the
     server's std handles are made non-inheritable before it starts: stdout
-    is the protocol. A job object holds the process tree, so a timeout, or
-    the server exiting mid-build, leaves no msbuild or dcc behind.
+    is the protocol. A job object holds the process tree, so a timeout, a
+    cancellation, or the server exiting mid-build leaves no msbuild or dcc
+    behind.
+  - BuildMember runs on a thread of its own, beside the tool calls, and reads
+    nothing but its TBuildSpec: the workspace belongs to the thread that runs
+    the tools. MemberBuildSpec, MemberBuildDir and CompareWithBaseline's
+    caller run on that one.
 
   What is new (CompareWithBaseline): with Make, dcc reports a unit's warnings
   only when it recompiles it, so the comparison is per unit. A unit this
@@ -50,9 +55,31 @@ interface
 
 uses
   System.SysUtils,
+  PasMcp.Studio,
   PasMcp.Workspace;
 
 type
+  // A build's cancellation: set by the thread that reads the client
+  // (notifications/cancelled), polled by the one running the compiler, which
+  // then kills the process tree.
+  TBuildCancel = class
+  private
+    FCancelled: Integer;
+  public
+    procedure Cancel;
+    function Cancelled: Boolean;
+  end;
+
+  // What a member's build needs, copied from the workspace by the thread
+  // that owns it: the build itself runs on another thread and never reads
+  // the workspace, whose members a reload replaces.
+  TBuildSpec = record
+    Index: Integer;       // into TMcpWorkspace.Members when it was taken
+    Member: TMcpMember;
+    Studio: TMcpStudio;
+    Dir: string;          // MemberBuildDir
+  end;
+
   TBuildMsgKind = (
     bmError,         // E and F codes
     bmWarning,       // W codes
@@ -78,10 +105,11 @@ type
   end;
 
   TBuildResult = record
-    Member: Integer;
+    Spec: TBuildSpec;
     Ran: Boolean;          // False: nothing was started, Error says why
     Ok: Boolean;           // the compiler exited with 0
     TimedOut: Boolean;
+    Cancelled: Boolean;
     Ms: Int64;
     Dir: string;           // the member's build directory
     OutputFile: string;    // the exe, dll or bpl this build wrote
@@ -103,10 +131,14 @@ var
 // The directory member AMember of AWs is built in.
 function MemberBuildDir(AWs: TMcpWorkspace; AMember: Integer): string;
 
-// Builds member AMember. AProgress, when set, gets a status line as the build
-// starts and every few seconds while the compiler runs.
-function BuildMember(AWs: TMcpWorkspace; AMember: Integer; ARebuild: Boolean;
-  const AProgress: TProc<string>): TBuildResult;
+// Member AMember's build spec. On the thread that owns AWs.
+function MemberBuildSpec(AWs: TMcpWorkspace; AMember: Integer): TBuildSpec;
+
+// Builds the member of ASpec - on any thread. AProgress, when set, gets a
+// status line as the build starts and every few seconds while the compiler
+// runs; ACancel, when set and cancelled, stops it.
+function BuildMember(const ASpec: TBuildSpec; ARebuild: Boolean;
+  const AProgress: TProc<string>; ACancel: TBuildCancel): TBuildResult;
 
 // Marks each warning and hint of AResult new or not against the previous
 // compiles of its unit here, lists in AResult.Gone those no longer reported,
@@ -126,9 +158,9 @@ uses
   System.Diagnostics,
   System.RegularExpressions,
   System.Generics.Collections,
+  System.SyncObjs,
   Winapi.Windows,
   PasTree.Platforms,
-  PasMcp.Studio,
   PasMcp.Log;
 
 const
@@ -145,6 +177,23 @@ const
   BASELINE_FILE = 'diagnostics.txt';
   BASELINE_HEADER = '# pastree-mcp compile baseline 1';
   PROBE_FILE = 'probe.txt';
+
+{ ---- TBuildCancel ------------------------------------------------------------- }
+
+procedure TBuildCancel.Cancel;
+begin
+  TInterlocked.Exchange(FCancelled, 1);
+end;
+
+function TBuildCancel.Cancelled: Boolean;
+begin
+  Result := TInterlocked.CompareExchange(FCancelled, 0, 0) <> 0;
+end;
+
+function IsCancelled(ACancel: TBuildCancel): Boolean;
+begin
+  Result := (ACancel <> nil) and ACancel.Cancelled;
+end;
 
 { ---- the build directory ------------------------------------------------------ }
 
@@ -173,6 +222,14 @@ begin
     THashFNV1a32.GetHashString(LowerCase(AWs.ProjectFile))),
     SafeName(LM.Name + '-' + PlatformName(LM.Platform) + IfThen(LM.Config <> '',
     '-' + LM.Config, '')));
+end;
+
+function MemberBuildSpec(AWs: TMcpWorkspace; AMember: Integer): TBuildSpec;
+begin
+  Result.Index := AMember;
+  Result.Member := AWs.Members[AMember];
+  Result.Studio := AWs.Studio;
+  Result.Dir := MemberBuildDir(AWs, AMember);
 end;
 
 { ---- the environment ---------------------------------------------------------- }
@@ -316,14 +373,17 @@ type
     Error: string;
     ExitCode: Cardinal;
     TimedOut: Boolean;
+    Cancelled: Boolean;
     Output: TBytes;
   end;
 
 // Runs AExe with AArgs in ADir under AEnvBlock, stdout and stderr into one
-// pipe, until it exits or ATimeoutMs passes. ATick gets the elapsed
-// milliseconds every PROGRESS_EVERY_MS.
+// pipe, until it exits, ATimeoutMs passes or ACancel is cancelled - the last
+// two kill the process tree. ATick gets the elapsed milliseconds every
+// PROGRESS_EVERY_MS.
 function RunProcess(const AExe, AArgs, ADir, AEnvBlock: string;
-  ATimeoutMs: Cardinal; const ATick: TProc<Int64>): TRunOutcome;
+  ATimeoutMs: Cardinal; const ATick: TProc<Int64>;
+  ACancel: TBuildCancel): TRunOutcome;
 var
   LSA: TSecurityAttributes;
   LReadPipe, LWritePipe, LNul, LJob: THandle;
@@ -421,9 +481,11 @@ begin
           LDone := True;
         WAIT_TIMEOUT:
           begin
-            if LSW.ElapsedMilliseconds >= ATimeoutMs then
+            if (LSW.ElapsedMilliseconds >= ATimeoutMs) or IsCancelled(ACancel)
+            then
             begin
-              Result.TimedOut := True;
+              Result.TimedOut := not IsCancelled(ACancel);
+              Result.Cancelled := IsCancelled(ACancel);
               if LJob <> 0 then
                 TerminateJobObject(LJob, 1)
               else
@@ -680,7 +742,7 @@ end;
 // (SetMakeOptions only sets a property) at diagnostic verbosity, which logs
 // every property as evaluated.
 function Probe(const ADproj, AMsbuild, AArgsTail, ADir, AEnvBlock: string;
-  out AProbe: TProbe): Boolean;
+  ACancel: TBuildCancel; out AProbe: TProbe): Boolean;
 var
   LFile, LLog, LStamp, LName, LValue: string;
   LLines: TArray<string>;
@@ -709,8 +771,9 @@ begin
   LRun := RunProcess(AMsbuild, Quoted(ADproj) + ' /t:SetMakeOptions' + AArgsTail
     + ' /nologo /nodeReuse:false /noconsolelogger ' + Quoted('/flp:logfile=' +
     LLog + ';verbosity=diagnostic;encoding=utf-8'), TPath.GetDirectoryName(ADproj),
-    AEnvBlock, PROBE_TIMEOUT_MS, nil);
-  if not LRun.Started or (LRun.ExitCode <> 0) or not TFile.Exists(LLog) then
+    AEnvBlock, PROBE_TIMEOUT_MS, nil, ACancel);
+  if not LRun.Started or LRun.Cancelled or (LRun.ExitCode <> 0) or
+    not TFile.Exists(LLog) then
     Exit(False);
   // `Name = value` from column 1, sorted by name, up to the next section
   // (`Initial Items:`). A value may run over several lines, blank ones
@@ -804,14 +867,14 @@ begin
   end;
 end;
 
-function BuildMember(AWs: TMcpWorkspace; AMember: Integer; ARebuild: Boolean;
-  const AProgress: TProc<string>): TBuildResult;
+function BuildMember(const ASpec: TBuildSpec; ARebuild: Boolean;
+  const AProgress: TProc<string>; ACancel: TBuildCancel): TBuildResult;
 var
   LM: TMcpMember;
   LEnv: TStringList;
   LEnvBlock, LError, LProjectDir, LExe, LArgs, LTail, LLog, LDevDcu, LDcuDir,
     LPaths, LName, LDir, LOutText: string;
-  LIsDproj: Boolean;
+  LIsDproj, LOwned: Boolean;
   LProbe: TProbe;
   LBefore, LAfter: TDictionary<string, TDateTime>;
   LOld: TDateTime;
@@ -823,6 +886,7 @@ var
   LProgress: TProc<string>;
   LSaved: TStringList;
   LMutex: THandle;
+  LWaits: Integer;
 
   function Sub(const AName: string): string;
   begin
@@ -831,17 +895,17 @@ var
 
 begin
   Result := Default(TBuildResult);
-  Result.Member := AMember;
-  LM := AWs.Members[AMember];
+  Result.Spec := ASpec;
+  LM := ASpec.Member;
   LName := LM.Name;
-  LDir := MemberBuildDir(AWs, AMember);
+  LDir := ASpec.Dir;
   Result.Dir := LDir;
   if LM.Error <> '' then
   begin
     Result.Error := LM.Error;
     Exit;
   end;
-  if not AWs.Studio.Found then
+  if not ASpec.Studio.Found then
   begin
     Result.Error := 'no RAD Studio installation is registered';
     Exit;
@@ -854,14 +918,38 @@ begin
   end;
   LProjectDir := TPath.GetDirectoryName(LM.ProjectFile);
   LDcuDir := Sub('dcu');
-  // Two sessions on one group share the build directory: one build of a
-  // member at a time, or two dcc write the same .dcu files.
+  // Two builds of one member write the same .dcu files: one at a time -
+  // two sessions on one group, or two calls of one session, now that a
+  // build runs beside the calls.
+  LOwned := False;
   LMutex := CreateMutex(nil, False, PChar('Local\pastree-mcp-build-' +
     THashFNV1a32.GetHashString(LowerCase(LDir))));
   if LMutex <> 0 then
-    while WaitForSingleObject(LMutex, PROGRESS_EVERY_MS) = WAIT_TIMEOUT do
-      if Assigned(AProgress) then
-        AProgress('waiting for another compile of ' + LName + ' to end');
+  begin
+    LWaits := 0;
+    repeat
+      case WaitForSingleObject(LMutex, 1000) of
+        WAIT_OBJECT_0, WAIT_ABANDONED:
+          LOwned := True;
+        WAIT_TIMEOUT:
+          begin
+            Inc(LWaits);
+            if Assigned(AProgress) and (LWaits mod (PROGRESS_EVERY_MS div 1000)
+              = 1) then
+              AProgress('waiting for another compile of ' + LName + ' to end');
+          end;
+      else
+        Break;   // not a mutex we can wait on: build unguarded
+      end;
+    until LOwned or IsCancelled(ACancel);
+    if not LOwned and IsCancelled(ACancel) then
+    begin
+      CloseHandle(LMutex);
+      Result.Cancelled := True;
+      Result.Error := 'cancelled';
+      Exit;
+    end;
+  end;
   LEnv := nil;
   try
     try
@@ -879,7 +967,7 @@ begin
       end;
     end;
     Result.FirstBuild := not TFile.Exists(Sub(BASELINE_FILE));
-    LEnv := BuildEnvironment(AWs.Studio, LError);
+    LEnv := BuildEnvironment(ASpec.Studio, LError);
     if LError <> '' then
     begin
       Result.Error := LError;
@@ -901,7 +989,8 @@ begin
         LTail := LTail + ' ' + Quoted('/p:Config=' + LM.Config);
       // The developer's own build as MSBuild evaluates the .dproj: where its
       // .dcu files are, and the events this build does not run.
-      if Probe(LM.ProjectFile, LExe, LTail, LDir, LEnvBlock, LProbe) then
+      if Probe(LM.ProjectFile, LExe, LTail, LDir, LEnvBlock, ACancel, LProbe)
+      then
       begin
         if LProbe.PreBuildEvent <> '' then
           Result.NotRun := Result.NotRun + ['pre-build event: ' +
@@ -950,10 +1039,10 @@ begin
     end
     else
     begin
-      LExe := TPath.Combine(AWs.Studio.Root, 'bin\' + IfThen(LM.Platform =
+      LExe := TPath.Combine(ASpec.Studio.Root, 'bin\' + IfThen(LM.Platform =
         pfWin64, 'dcc64.exe', 'dcc32.exe'));
       LPaths := String.Join(';', LM.SearchPaths +
-        AWs.Studio.SearchPath(LM.Platform));
+        ASpec.Studio.SearchPath(LM.Platform));
       LArgs := '-Q ' + Switch('-N0', LDcuDir) + ' ' + Switch('-E', Sub('exe'))
         + ' ' + Switch('-LE', Sub('bpl')) + ' ' + Switch('-LN', Sub('dcp'))
         + ' ' + Switch('-NH', Sub('hpp')) + ' ' + Switch('-NO', Sub('obj'));
@@ -985,7 +1074,7 @@ begin
       LStart := Now;
       LSW := TStopwatch.StartNew;
       LRun := RunProcess(LExe, LArgs, LProjectDir, LEnvBlock, BUILD_TIMEOUT_MS,
-        LTick);
+        LTick, ACancel);
       Result.Ms := LSW.ElapsedMilliseconds;
       if not LRun.Started then
       begin
@@ -994,6 +1083,12 @@ begin
       end;
       Result.Ran := True;
       Result.TimedOut := LRun.TimedOut;
+      Result.Cancelled := LRun.Cancelled;
+      if LRun.Cancelled then
+      begin
+        Result.Error := 'cancelled';
+        Exit;
+      end;
       Result.Ok := not LRun.TimedOut and (LRun.ExitCode = 0);
       LOutText := DecodeOem(LRun.Output);
       if LLog <> '' then
@@ -1035,17 +1130,16 @@ begin
     end;
   finally
     LEnv.Free;
-    if LMutex <> 0 then
-    begin
+    if LOwned then
       ReleaseMutex(LMutex);
+    if LMutex <> 0 then
       CloseHandle(LMutex);
-    end;
     Log('compile %s: %s in %d ms, %d messages, %d units compiled%s%s', [LName,
-      IfThen(Result.Ok, 'built', IfThen(Result.Ran, 'failed', 'not started: '
-      + Result.Error)), Result.Ms, Length(Result.Messages),
-      Length(Result.Compiled), IfThen(Result.SeededFrom <> '',
-      Format(', seeded with %d .dcu files', [Result.SeededCount]), ''),
-      IfThen(Result.TimedOut, ', TIMED OUT', '')]);
+      IfThen(Result.Cancelled, 'cancelled', IfThen(Result.Ok, 'built',
+      IfThen(Result.Ran, 'failed', 'not started: ' + Result.Error))),
+      Result.Ms, Length(Result.Messages), Length(Result.Compiled),
+      IfThen(Result.SeededFrom <> '', Format(', seeded with %d .dcu files',
+      [Result.SeededCount]), ''), IfThen(Result.TimedOut, ', TIMED OUT', '')]);
   end;
 end;
 

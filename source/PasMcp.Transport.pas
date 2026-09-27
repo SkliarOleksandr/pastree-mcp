@@ -8,14 +8,16 @@ unit PasMcp.Transport;
 
   Reads the raw stdin handle rather than Readln: Readln decodes through the
   console code page, and a non-ASCII identifier in a request would arrive
-  mangled. Writes go out as one WriteFile per message so a message is never
-  interleaved with anything else.
+  mangled. A message is written whole under a lock: the reader answers the
+  handshake, the executor answers calls, and a deferred tool's thread sends
+  progress - two of them at once would interleave their bytes.
 }
 
 interface
 
 uses
-  System.SysUtils;
+  System.SysUtils,
+  System.SyncObjs;
 
 type
   TMcpTransport = class
@@ -24,8 +26,10 @@ type
     FBuf: TBytes;
     FLen: Integer;
     FEof: Boolean;
+    FWriteLock: TCriticalSection;
   public
     constructor Create;
+    destructor Destroy; override;
     // Next non-empty line, or False at end of input (the client closed stdin -
     // the MCP way of saying "shut down").
     function ReadMessage(out AJson: string): Boolean;
@@ -43,6 +47,13 @@ begin
   FIn := GetStdHandle(STD_INPUT_HANDLE);
   FOut := GetStdHandle(STD_OUTPUT_HANDLE);
   SetLength(FBuf, 65536);
+  FWriteLock := TCriticalSection.Create;
+end;
+
+destructor TMcpTransport.Destroy;
+begin
+  FWriteLock.Free;
+  inherited;
 end;
 
 function TMcpTransport.ReadMessage(out AJson: string): Boolean;
@@ -97,13 +108,18 @@ var
   LPos: Integer;
 begin
   LBytes := TEncoding.UTF8.GetBytes(AJson + #10);
-  LPos := 0;
-  while LPos < Length(LBytes) do
-  begin
-    if not WriteFile(FOut, LBytes[LPos], Length(LBytes) - LPos, LWritten, nil)
-    then
-      Exit;
-    Inc(LPos, LWritten);
+  FWriteLock.Enter;
+  try
+    LPos := 0;
+    while LPos < Length(LBytes) do
+    begin
+      if not WriteFile(FOut, LBytes[LPos], Length(LBytes) - LPos, LWritten,
+        nil) then
+        Exit;
+      Inc(LPos, LWritten);
+    end;
+  finally
+    FWriteLock.Leave;
   end;
 end;
 

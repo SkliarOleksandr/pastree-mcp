@@ -6,7 +6,8 @@
 #      group-wide merge (and its de-duplication) is what answers.
 #   3. MCP over stdio on a COPY of the fixture - the handshake, tools/list, a
 #      call, then an edit on disk and the same kind of call again: the index
-#      must notice the edit by itself.
+#      must notice the edit by itself. Then compile: with progress, a call
+#      answered while a build runs, a cancelled build left unanswered.
 #
 # Line numbers of the fixture are pinned below; move a declaration there and
 # update the expectation with it.
@@ -232,18 +233,32 @@ try {
     $stdin.AutoFlush = $true
     $stdin.NewLine = "`n"
 
-    # The reply to the request; the notifications before it (progress) are
-    # collected in $script:notes.
+    # Replies may come out of order - a compile's after the calls sent behind
+    # it - so they are kept by id; notifications (progress) are collected in
+    # $script:notes.
     $script:notes = ''
-    function Rpc([int]$Id, [string]$Method, [string]$ParamsJson) {
+    $script:replies = @{}
+    function Send([int]$Id, [string]$Method, [string]$ParamsJson) {
         $stdin.WriteLine('{"jsonrpc":"2.0","id":' + $Id + ',"method":"' + $Method + '","params":' + $ParamsJson + '}')
+    }
+    # Reads until the reply to $Id; returns the ids of the replies read, in
+    # the order they came.
+    function ReadUntil([int]$Id) {
+        $seen = @()
         while ($true) {
             $line = $proc.StandardOutput.ReadLine()
-            if ($null -eq $line) { throw "server closed stdout after $Method" }
+            if ($null -eq $line) { throw "server closed stdout waiting for reply $Id" }
             $msg = $line | ConvertFrom-Json
-            if ($null -ne $msg.id) { return $msg }
-            $script:notes += $line + "`n"
+            if ($null -eq $msg.id) { $script:notes += $line + "`n"; continue }
+            $seen += [int]$msg.id
+            $script:replies[[int]$msg.id] = $msg
+            if ([int]$msg.id -eq $Id) { return ,$seen }
         }
+    }
+    function Rpc([int]$Id, [string]$Method, [string]$ParamsJson) {
+        Send $Id $Method $ParamsJson
+        $null = ReadUntil $Id
+        return $script:replies[$Id]
     }
     # Line breaks as the CLI blocks have them, so one expectation reads the same
     # in both parts.
@@ -287,10 +302,25 @@ try {
     [IO.File]::WriteAllText($unit, $text, $utf8)
     $r = Rpc 8 'tools/call' '{"name":"compile","arguments":{}}'
     Check 'compile new hint' (ToolText $r) @('compile AppA (Win32 Debug): built in', 'warnings - none new (1 old, not listed)', "hints - 1 new:`nAppA\uAppA.pas`n  18  H2164 Variable 'LUnused' is declared but never used in 'RunA' (in RunA)`n        LUnused: Integer;") @('first build here')
+    # A call sent while a build runs is answered before the build is: the
+    # build has a thread of its own.
+    Send 9 'tools/call' '{"name":"compile","arguments":{"member":"AppA","rebuild":true}}'
+    Send 10 'tools/call' '{"name":"find","arguments":{"query":"TCircle"}}'
+    $order = ReadUntil 9
+    if (($order -notcontains 10) -or ($order.IndexOf(10) -gt $order.IndexOf(9))) { Write-Host "FAIL a call sent during a compile waited for it (replies: $($order -join ', '))"; $script:failures++ }
+    Check 'find during compile' (ToolText $script:replies[10]) @('Shared\uShapes.pas:21  TCircle (class)')
+    Check 'compile beside a call' (ToolText $script:replies[9]) @('compile AppA (Win32 Debug): built in', ' lines compiled')
+    # A cancelled compile is not answered, and leaves the member buildable.
+    Send 11 'tools/call' '{"name":"compile","arguments":{"member":"AppA","rebuild":true}}'
+    $stdin.WriteLine('{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":11,"reason":"smoke"}}')
+    Send 12 'tools/call' '{"name":"compile","arguments":{"member":"AppA"}}'
+    $order = ReadUntil 12
+    if ($order -contains 11) { Write-Host 'FAIL a cancelled compile was answered'; $script:failures++ }
+    Check 'compile after a cancel' (ToolText $script:replies[12]) @('compile AppA (Win32 Debug): built in')
 
-    $r = Rpc 9 'tools/call' '{"name":"no_such_tool","arguments":{}}'
+    $r = Rpc 13 'tools/call' '{"name":"no_such_tool","arguments":{}}'
     if (-not $r.result.isError) { Write-Host 'FAIL unknown tool not reported as isError'; $script:failures++ }
-    $r = Rpc 10 'no/such/method' '{}'
+    $r = Rpc 14 'no/such/method' '{}'
     if ($r.error.code -ne -32601) { Write-Host 'FAIL unknown method not -32601'; $script:failures++ }
 
     $stdin.Close()

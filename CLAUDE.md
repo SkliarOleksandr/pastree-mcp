@@ -105,7 +105,7 @@ Delphi targets for that), AppB with dcc - into a temporary directory per run.
   time and approximate tokens of each answer. A change to a tool's output is a
   change to what every agent session pays; look at the numbers.
 
-## Three traps
+## Four traps
 
 **stdout is the protocol.** One stray `Writeln` - here or in anything linked -
 and the client drops the connection with a JSON parse error naming no cause.
@@ -120,6 +120,14 @@ is the common case and never content. Read text with `TFile.ReadAllText` /
 `ReadAllLines` (BOM-aware) or through PasTree, never byte by byte by hand. In
 pastree-lsp one BOM made a whole file resolve nothing while the log said only
 `no identifier at`.
+
+**The index has one reader.** Tool calls run on one executor thread
+(`PasMcp.Server`); a deferred tool's `Work` (`compile`'s build) runs on
+another and must not touch `TMcpWorkspace` or a PasTree model - it gets
+copies (`TBuildSpec`) taken on the executor, and its answer is built back
+there. Queries hydrate units and the freshness check replaces the navigator,
+so a second reader races, and the race shows as a wrong answer now and then
+or an access violation no smoke run repeats.
 
 ## Where the answers are
 

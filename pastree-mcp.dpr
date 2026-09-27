@@ -194,7 +194,7 @@ begin
         Continue;
       end;
       LSW := TStopwatch.StartNew;
-      LText := CallTool(GWs, LCall.Tool, TJSONObject(LArgs), LIsError);
+      LText := CallToolNow(GWs, LCall.Tool, TJSONObject(LArgs), LIsError);
       LSW.Stop;
       // UTF-8 straight to the handle: Writeln would go through the console
       // code page, and a redirected run must read like the MCP answer does.
