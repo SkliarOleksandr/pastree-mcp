@@ -24,10 +24,9 @@ log lines, commit messages, tool descriptions - because it outlives the
 conversation and the next reader may be a stranger or a future session.
 
 **Everything written to Alex is in Russian** - the report of what was done,
-summaries, questions, the explanation of a tool - in full, not a shortened
-retelling. It is the language he works in: a report in English is one he
-has to ask for again. Quoted tool output, code and identifiers stay as they
-are.
+summaries, questions, explanations - in full, not a shortened retelling. It
+is the language he works in: a report in English is one he has to ask for
+again. Quoted tool output, code and identifiers stay as they are.
 
 **Only the plain hyphen `-`. Never an em dash (U+2014) or en dash (U+2013).**
 They are non-ASCII, and `dcc` on a legacy code page, `cmd.exe` and the diff
@@ -78,7 +77,9 @@ build.bat [RAD Studio version] [--yes]
 
 It must end with `built, smoke test passed`. `tests\smoke.ps1` runs every tool
 through the CLI (both group policies) and once through real MCP stdio with an
-edit on disk in between; the expectations pin fixture line numbers.
+edit on disk in between; the expectations pin fixture line numbers. `compile`
+really builds the fixture - AppA with MSBuild (its `.dproj` imports the
+Delphi targets for that), AppB with dcc - into a temporary directory per run.
 
 - **A running server holds the exe**: Claude Code keeps `out\pastree-mcp.exe`
   running per session. `build.bat` renames it aside (Windows allows renaming a
@@ -92,7 +93,10 @@ edit on disk in between; the expectations pin fixture line numbers.
   different program without a word.
 - **PasTree `..\object-pascal-tree` may be under edit by another session.**
   Read the commit line `build.bat` prints; check `git status` there before
-  touching anything, never `git add -A` there.
+  touching anything, never `git add -A` there. To build against its last
+  commit rather than someone's half-done change: `git -C ..\object-pascal-tree
+  archive HEAD source | tar -x -C <dir>`, then `set PASTREE=<dir>` before
+  `build.bat`.
 - **A new tool gets smoke rows, the empty case included** - a call over the
   fixture and one where the walk finds nothing (no members, no callers).
   pastree-lsp shipped an access violation on an empty scope that no request

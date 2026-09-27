@@ -41,6 +41,7 @@ or **16 s / 4.3 GB** under the exact one. Typical calls take 60-500 ms.
 | `callers` | Who calls a routine - through the virtual method it overrides, an interface method it implements or a property it is the accessor of too, bare `inherited;` included - and, with `depth`, who calls those |
 | `callees` | What a routine calls - the overload each call binds to, a property's getter or setter, the overrides and implementations a virtual or interface call may run - and, with `depth`, what those call |
 | `impact` | What a change reaches, from `git diff` output or the declarations about to change: which projects of the group to build and test, the declarations touched with what they override and are called through, their callers or uses, the units a changed interface recompiles, and the calls a removed routine left behind |
+| `compile` | Builds the members a change reaches with the real compiler (MSBuild over the `.dproj`) into a directory of its own, and answers with the errors - each with its routine and source line - and the warnings and hints the change added. Nothing of the project is overwritten and build events are not run; the first build starts from the developer's own `.dcu` files |
 | `related` | `descendants`, `overrides`, `implementations`, `assignments`, `creations`, `destructions` |
 | `outline` | The structure of one unit with line numbers, without reading it |
 | `diagnostics` | PasTree's semantic errors for a file or the whole group, from the files on disk now, each naming its routine |
@@ -105,6 +106,7 @@ them over grep. A new session is needed after registering or rebuilding.
 | `--platform <p>` | per project | Override every member's platform: `Win32`, `Win64` |
 | `--config <c>` | per project | Build configuration: `Debug`, `Release` |
 | `--groups <p>` | `shared` | `shared`: one analysis per platform. `strict`: one per distinct configuration. See SPEC.md |
+| `--build-dir <dir>` | `%TEMP%\pastree-mcp` | Where `compile` builds: a directory per group, member and configuration, kept between sessions so a build is incremental |
 | `--log <file\|none>` | beside the project | `<project>-pastree-mcp.log`, truncated per run |
 
 ### Trying tools without a client

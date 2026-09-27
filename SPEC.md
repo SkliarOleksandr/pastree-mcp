@@ -56,7 +56,7 @@ Common rules:
   column). A search runs in every analysis holding that site and the rows are
   merged and de-duplicated by hit site.
 - **Order**: the group's own files first, then libraries; by file and line.
-- **Where a row sits**: `references`, `callers`, `impact`, the statement relations of
+- **Where a row sits**: `references`, `callers`, `impact`, `compile`, the statement relations of
   `related` (`assignments`, `creations`, `destructions`) and `diagnostics` name the
   innermost routine or type around each row - `TFoo.Save`, `TFoo.Save.Helper`
   in a nested routine, `TFoo` for a member declaration - so "who uses X" is
@@ -90,6 +90,7 @@ Common rules:
 | `callers` | `FindReferences` per source, `MethodAt`+`FindOverrides`, `FindDescendants`, `FindMemberX`, `GotoBareInherited`, `XDescendsFrom`, `WithTargetTypeX` | `references` folded to the routines the calls sit in, and what a reference search cannot see. A call is written against a *source*: the routine; a virtual method it overrides (the chain climbed from its class, stopping at the root or a `reintroduce`); an interface method it implements - a same-named method of an interface that its class, an ancestor or a descendant lists, or that one extends, when the member that name finds from the listing class is the routine or a method it overrides (`FindImplementations` is not asked: it answers only for the interface a class lists itself); a property it is the getter (reads) or setter (writes) of. Through a virtual slot a row counts only when the receiver's static type may hold an object that runs this implementation (`LSquare.Area` bound to `TShape.Area` never runs `TCircle.Area`; a property read on a class that overrides the getter runs the override), and `inherited X` never dispatches. A bare `inherited;` names nothing: the overrides below the class - for a constructor that is not virtual, the same-named constructors of its descendants - are scanned for one, and `GotoBareInherited` says what it calls. Each reference is classified from the tree: a call, or the routine handed on - `@Foo`, `OnClick := Foo`, a procedure passed as an argument - tagged `[not a call]` and not followed. A function named without parentheses is a call unless assigned to something procedural; as an argument it is taken for a call. `depth` 1-4 follows the routines the calls sit in, own files only (a library routine is shown, not followed), each site once; `limit` (150) caps the rows over all levels, and a level past it is not searched - the answer says so (a getter read 379 times, depth 3 and no cap: 34 s, 81k tokens). Tags: `via X` for a row bound to another source - dropped from the rows and said once above them when every first-level row shares it; `-> X` on a deeper row, the routine of the level above it reaches; overloads of one name told apart by declaration line. A routine searched and found uncalled is named at the end, and a published one (or in the unnamed first section of a `TPersistent` descendant) gets the note that a `.dfm` may bind it (9.5). A destructor points to `related destructions`. |
 | `callees` | the body's `RefMap`/`ExtRefMap`, `RefUse`, `PropertyRedeclPrev`, `GotoBareInherited`, `FindMemberX` over a class index (`AncestorOfX`, `ListedInterfaces`) built once per call | What a routine calls - `callers` from the other end. The body is walked from the tree - its block, its local declarations and anonymous methods, not its nested routines, which are callees of their own - and each name is taken for what it binds to: the overload the compiler chose (PasTree writes it into the maps), a property's getter or setter for a read or a write (a republished `property X;` takes its ancestor's), what a bare `inherited;` runs; a routine handed on (`OnClick := Foo`, `@Foo`) is `[not a call]`, classified as in `callers`. One row per routine reached, at its declaration line, grouped by file under its type, with the lines of its calls: `[at 19, 31]`. A virtual call made on an object - not on a type name, not `inherited X` - adds what that object may run: for its static class and every class below, the method the slot finds there, its own or the nearest ancestor's - so an override between the method's class and the object's is found (a property's accessor binds where the property is declared), not only those below. An interface call: the same over every class taking the interface on, listing it or one extending it. `[via X]` names what the call is written against. More than 10 such methods, merged over the analyses, are counted, not listed: a base class's hook called on Self has a dozen or two in a real group. Calls through a method pointer or a procedural variable are named - what they run is assigned at run time - and built-ins listed once. `depth` 1-4 follows the routines reached, own files and with a body, each once; a row below the first level names its caller, `[TFoo.Load at 40]`; `limit` (150) caps the rows over all levels. Not seen: a record's operators and implicit conversions, a for-in's enumerator, `X[I]` over a default array property, a method resolution clause (`procedure IFoo.Bar = Baz`). |
 | `impact` | the walk of `callers` over several roots, `FindReferences`, `FindUnitReferences`, `FindImplementations`, each model's `UsesList`, the model `Diags` | What a change reaches, in one answer: `callers`, `related overrides` and `unit_deps` at once, and the question none of them answers - which members of the group to build and test. Given a unified diff (`git diff` output the agent passes as text - the server runs no git) or declarations (`symbol`, `symbols`, file + line + name). A diff's paths resolve against the group directory or a directory above it: git writes them from the repository root, which may hold more than the group. Its `+` and context lines must read as the file on disk does - compared with every character past ASCII dropped, since a diff that went through a console may carry those in another encoding - or the file is refused by name: a diff of another state numbers another file. A changed line of code touches the innermost declaration around its tokens: a routine as a whole (a nested routine, an anonymous method, a local are its routine's), a type, a variable, constant or property of a unit or a type; of those met on one line, one holding another is left out (the `;` after `property X ... read FX` is the class's token). A line with no token of its own (a directive) is the point between the tokens around it. A run of removed lines beside added code is read from the added lines alone - its removal point, between two members, would name the class - and a run that only removes is that point; out of a type, the members it removes are named rather than the type. Outside every declaration, the place: a uses clause, initialization, finalization, a main block, exports. Comment-only lines touch nothing (read from the diff's text, so removed lines too). A type every line of which is added is new: listed alone, its members and their implementations folded into it. A removed routine, property or type - declared on a removed line and on no added one, so a changed signature is not a removal - or a field removed from a type is named with the own-unit diagnostics still quoting its name: the calls a rename or a deletion left behind. **Members to build and test**: those whose closure holds a changed unit (a form's unit, an include's includers, a `.dproj`'s own member) - a member's closure is what its main source reaches through `uses`, read per member in its own analysis, since an analysis holds several (section 4); a file compiled into fewer members than the list is tagged with them. A unit whose interface section changed says how many units use it, their names up to 8 (the dependents' own recompile, and where to run `diagnostics`). Each declaration says the method it overrides (the chain's nearest link - what a changed signature must still match), the interface methods and properties it is also called through, its overrides and, for an interface method, its implementations - 10 each, then counted. Then the walk of `callers` from all of them at once: a declaration that is no routine is searched for its uses, a field also through the property that reads or writes it; with several roots a row names the one it reaches (`-> X`). 40 roots are searched (the walk is the time: about 125 ms a root on the client group), 100 declarations listed, `limit` (150) rows. `depth` as in `callers`. |
+| `compile` | none: MSBuild (a `.dproj`) or dcc (a bare `.dpr`/`.dpk`) as a process of its own; `impact`'s member closures for which members; the tree for the routine of a row | The members a change reaches, built by the real compiler: those named (`member`), those compiling `file`, else those the files changed this session reach (what the freshness check of section 5 found). MSBuild over the member's `.dproj` with its platform and configuration, target `Make` - `Build` also runs AutoIncBuildNumber, which rewrites the `.dproj` of a project that increments its build number; a bare `.dpr`/`.dpk`, dcc directly with the member's paths and the registry search path. Every output - exe, dcu, bpl, dcp, hpp, obj, resources, type library - goes to the member's build directory (`--build-dir`, default `%TEMP%\pastree-mcp\<group>-<hash>\<member>-<platform>-<config>`), and pre- and post-build events are not run: the answer names them. The first build seeds the dcu directory with the developer's own `.dcu` files, from where MSBuild evaluates `DCC_DcuOutput` to (a probe: a target that does nothing, at diagnostic verbosity), so dcc recompiles what changed since, as the IDE's Compile would. The environment is rsvars.bat's plus the IDE's own variables, which the library path names. The answer: per member, built or FAILED, the time, dcc's line count and the exe; the errors, own files first, each under its file with the routine it sits in and the source line below; an F2063 (could not compile used unit) folded under the unit whose errors caused it; build errors that are not the code's (MSBuild's own, a resource or type library tool); the search path directories that do not exist when a unit was not found; then the warnings and hints of the group's own files that are new since the member's previous compile, the rest counted. New is per unit, since `Make` reports a unit's warnings only when it recompiles it: a unit recompiled has its stored warnings replaced, one not recompiled keeps them, and a unit never compiled here before counts as new only in a file changed this session. `show: warnings` lists every warning of the group's files, `all` every hint too; library units are counted only. dcc cuts a message's `file(line)` at 128 characters, and MSBuild then does not see it as an error at all: the file is found by the prefix, the line by the name the message quotes when exactly one line writes it. Progress notifications while it runs, when the call carries a token (section 7). `limit` (60) caps the rows. |
 | `related` | `TypeAt`+`FindDescendants`, `MethodAt`+`FindOverrides`, `InterfaceMethodAt`+`FindImplementations` / `InterfaceAt`+`FindInterfaceImplementors`, `AssignableAt`+`FindAssignments`, `ClassAt`+`FindCreations`/`FindDestructions` | The `...At` test runs at the declaration site - it normalizes (method to its declaration, alias to its type) and refuses what the relation cannot mean, which becomes an error naming what was needed. Rows are grouped by file like every answer; a descendant names its parent (`<- TParent`) below the first level, and a tagged row whose source line repeats the previous row's (an override chain is one signature) shows only its tag. An indented tree was tried first: it repeats a path per row and cost as much as grep on a 250-class hierarchy. |
 | `outline` | `PasModuleOutline` | Sections, uses, includes, types with members, routines with signatures, each with its line. `owner` and `section` filter; `members: false` keeps only types and bodies. |
 | `diagnostics` | model `Diags` | Own units by default. Each unit reports from ONE analysis - its owner (section 4) - so a unit analyzed under two configurations does not report twice. Over the limit, a per-file count comes first. |
@@ -179,12 +180,18 @@ MCP over stdio: one JSON-RPC message per line, UTF-8 (not LSP's
 `Content-Length` framing). Methods: `initialize` (with `instructions` - what
 the tools are for and when to prefer them over grep; Claude Code shows this to
 the model), `ping`, `tools/list`, `tools/call`. Notifications are ignored.
-Revision `2025-06-18`; an older one a client asks for is echoed.
+Revision `2025-06-18`; an older one a client asks for is echoed. A
+`tools/call` whose params carry `_meta.progressToken` gets
+`notifications/progress` from a tool that reports - `compile`, as a member's
+build starts and every 5 s while the compiler runs. Claude Code aborts a call
+to a stdio server that sends neither a response nor a progress notification
+for 30 minutes (its MCP documentation; `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`
+changes it), and its wall-clock limit is about 28 hours.
 
 The initial analysis runs on a background thread, so the handshake is
 immediate. A tool call waits for it up to 100 s, then answers "still loading"
 with `isError`. Everything after that runs on the request thread, one call at
-a time.
+a time - a `compile` holds the calls behind it until its build ends.
 
 stdout carries protocol only. The log goes to stderr (Claude Code keeps it)
 and to `<project>-pastree-mcp.log` beside the project.
@@ -407,6 +414,48 @@ default.
 - **Which RAD Studio** is the one the server already resolved (`--studio`),
   so the compiler matches the library paths the analysis used.
 
+Done in 0.9.0, section 3. No PasTree change. What the plan did not foresee
+was found on the client group before the tool was written, by building its
+members the usual way - MSBuild from a RAD Studio prompt, only with the
+outputs redirected so nothing of the developer's was overwritten:
+
+- **The IDE's own environment variables.** The library path names a variable
+  for every third-party directory, one the IDE defines for itself (Tools >
+  Options > Environment Variables). A command-line MSBuild does not know it:
+  the smallest member stopped in 1 s at `F2613 Unit 'JVJclUtils' not found`,
+  under 214 "Directory not found" hints - 69 KB of output. `compile` sets
+  them as the IDE does, from the registry.
+- **The build events.** Nearly every member runs a pre-build tool that
+  rewrites a version resource in the source tree, with git calls; the
+  server's post-build event runs the new exe to rewrite two JSON files of the
+  repository. Not run, and named in the answer.
+- **A build from nothing does not build.** In an empty directory dcc
+  recompiles every library unit whose source is on the path, and a DevExpress
+  unit does not compile under the current compiler: the main member fails in
+  5.7 s. The developer's builds work only from their old .dcu files. So the
+  first build copies them - 3,847 files, 319 MB, 3.5 s - from where MSBuild
+  evaluates `DCC_DcuOutput` to, and dcc recompiles what changed since.
+- **`Build` rewrites the `.dproj`** of a project that increments its build
+  number (AutoIncBuildNumber runs after it); `Make` does not.
+- **dcc cuts a message's `file(line)` at 128 characters**, and MSBuild then
+  passes the line on as text: its summary counts only the F2063 that
+  followed. The file is recovered by its prefix, the line by the name the
+  message quotes.
+- **What is new has to be per unit.** `Make` reports a unit's warnings only
+  when it recompiles it, so a whole-build comparison would call every warning
+  of an untouched unit gone. Hints are listed when new, like warnings, rather
+  than left out: a new one is usually the change's own (a local left unused).
+
+Measured there, the answer against MSBuild's console output for the same
+build at its default verbosity: a small member (994 .dcu files), 3.5 s and
+119 tokens against 41 KB (about 10k tokens) for two warnings in library units
+and one of MSBuild's own; the
+main member, 16.4 s for the 27,200 lines changed since the developer's build
+and 146 tokens against 34 KB for no diagnostic at all - 15.7 s again with
+nothing changed, the link of an 80 MB exe; the Win64 server, 17.2 s where
+the same build from nothing took 48 s. The source tree was unchanged after
+each, ignored files included.
+
 ### 9.5 Forms
 
 A `.dfm` (or `.fmx`) binds components to published fields and events to
@@ -497,7 +546,7 @@ gap between the answers and the truth.
    entry point they need is public.
 2. `callers` (done, 0.5.0), `callees` (done, 0.7.0), `impact` (done,
    0.8.0).
-3. `compile`.
+3. `compile` (done, 0.9.0).
 4. Forms (9.5) - the largest gap, and new library work.
 5. `rename_plan`, `change_plan`.
 6. `lint` (the two `uses` rules first), `metrics`.

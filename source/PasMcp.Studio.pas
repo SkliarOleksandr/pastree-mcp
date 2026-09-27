@@ -22,6 +22,7 @@ unit PasMcp.Studio;
 interface
 
 uses
+  System.Generics.Collections,
   PasTree.Platforms;
 
 type
@@ -33,6 +34,17 @@ type
     // Registry library + browsing paths, then the Studio source trees; only
     // existing directories, de-duplicated, in that order.
     function LibraryPaths(APlatform: TPasPlatform): TArray<string>;
+    // The registry library `Search Path` alone, expanded the same way: what
+    // dcc searches for a project with no search path of its own (`compile`
+    // of a bare .dpr). Not the browsing path or the source trees - dcc would
+    // recompile the sources it found there.
+    function SearchPath(APlatform: TPasPlatform): TArray<string>;
+    // The IDE's own environment variables (Tools > Options > Environment
+    // Variables, the registry's `Environment Variables` key), values as
+    // stored: one may name another, or the process environment, as $(NAME).
+    // The IDE sets them for every build it runs, and a library path names
+    // them - a command-line build without them loses those directories.
+    function IdeVariables: TArray<TPair<string, string>>;
   end;
 
 // AWanted = '' picks $BDS when set, else the highest installed version.
@@ -49,7 +61,6 @@ uses
   System.Classes,
   System.IOUtils,
   System.Math,
-  System.Generics.Collections,
   System.Generics.Defaults,
   System.Win.Registry,
   Winapi.Windows;
@@ -151,7 +162,10 @@ begin
   Result := Root <> '';
 end;
 
-function TMcpStudio.LibraryPaths(APlatform: TPasPlatform): TArray<string>;
+// The registry library paths of APlatform, expanded: the `Search Path`, and
+// with ABrowsing the `Browsing Path` and the Studio source trees after it.
+function RegistryPaths(const AStudio: TMcpStudio; APlatform: TPasPlatform;
+  ABrowsing: Boolean): TArray<string>;
 const
   SOURCE_TREES: array[0..8] of string = ('source\rtl\sys',
     'source\rtl\common', 'source\rtl\win', 'source\rtl\win\winrt',
@@ -206,7 +220,7 @@ var
 
 begin
   Result := nil;
-  if not Found then
+  if not AStudio.Found then
     Exit;
   if APlatform = pfWin64 then
     LPlat := 'Win64'
@@ -218,24 +232,22 @@ begin
   LNames := TStringList.Create;
   LReg := TRegistry.Create(KEY_READ);
   try
-    LVars.AddOrSetValue('bds', Root);
-    LVars.AddOrSetValue('bdslib', TPath.Combine(Root, 'lib'));
+    LVars.AddOrSetValue('bds', AStudio.Root);
+    LVars.AddOrSetValue('bdslib', TPath.Combine(AStudio.Root, 'lib'));
     LVars.AddOrSetValue('platform', LPlat);
+    for var LPair in AStudio.IdeVariables do
+      LVars.AddOrSetValue(LowerCase(LPair.Key), LPair.Value);
     LReg.RootKey := HKEY_CURRENT_USER;
-    LKey := '\' + BDS_KEY + '\' + Version;
-    if LReg.OpenKeyReadOnly(LKey + '\Environment Variables') then
-    begin
-      LReg.GetValueNames(LNames);
-      for var LName in LNames do
-        LVars.AddOrSetValue(LowerCase(LName), LReg.ReadString(LName));
-    end;
+    LKey := '\' + BDS_KEY + '\' + AStudio.Version;
     if LReg.OpenKeyReadOnly(LKey + '\Library\' + LPlat) then
     begin
       AddPaths(LReg.ReadString('Search Path'));
-      AddPaths(LReg.ReadString('Browsing Path'));
+      if ABrowsing then
+        AddPaths(LReg.ReadString('Browsing Path'));
     end;
-    for var LSub in SOURCE_TREES do
-      AddPaths(TPath.Combine(Root, LSub));
+    if ABrowsing then
+      for var LSub in SOURCE_TREES do
+        AddPaths(TPath.Combine(AStudio.Root, LSub));
     Result := LList.ToArray;
   finally
     LReg.Free;
@@ -243,6 +255,43 @@ begin
     LVars.Free;
     LSeen.Free;
     LList.Free;
+  end;
+end;
+
+function TMcpStudio.LibraryPaths(APlatform: TPasPlatform): TArray<string>;
+begin
+  Result := RegistryPaths(Self, APlatform, True);
+end;
+
+function TMcpStudio.SearchPath(APlatform: TPasPlatform): TArray<string>;
+begin
+  Result := RegistryPaths(Self, APlatform, False);
+end;
+
+function TMcpStudio.IdeVariables: TArray<TPair<string, string>>;
+var
+  LReg: TRegistry;
+  LNames: TStringList;
+begin
+  Result := nil;
+  if not Found then
+    Exit;
+  LNames := TStringList.Create;
+  LReg := TRegistry.Create(KEY_READ);
+  try
+    LReg.RootKey := HKEY_CURRENT_USER;
+    if LReg.OpenKeyReadOnly('\' + BDS_KEY + '\' + Version +
+      '\Environment Variables') then
+    begin
+      LReg.GetValueNames(LNames);
+      for var LName in LNames do
+        if LName <> '' then
+          Result := Result + [TPair<string, string>.Create(LName,
+            LReg.ReadString(LName))];
+    end;
+  finally
+    LReg.Free;
+    LNames.Free;
   end;
 end;
 

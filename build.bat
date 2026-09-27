@@ -8,7 +8,10 @@ rem closed - nothing here is loaded by it - but a Claude Code session may be
 rem running out\pastree-mcp.exe as its MCP server; see the rename below.
 rem
 rem Requires PasTree as a sibling: ..\object-pascal-tree. It is the only
-rem dependency, linked from source through -U.
+rem dependency, linked from source through -U. PASTREE set in the
+rem environment builds against another copy instead - a snapshot of a commit
+rem (git archive HEAD source) while the sibling is under edit by another
+rem session, whose half-done change would otherwise go into this exe.
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
@@ -16,7 +19,7 @@ call "%~dp0scripts\ide.bat" %*
 if errorlevel 1 exit /b 1
 call "%BDSROOT%\bin\rsvars.bat"
 
-set PASTREE=..\object-pascal-tree
+if not defined PASTREE set PASTREE=..\object-pascal-tree
 if not exist "%PASTREE%\source" (
   echo === PasTree not found next to this repo, cloning it ===
   git clone https://github.com/SkliarOleksandr/object-pascal-tree.git "%PASTREE%"

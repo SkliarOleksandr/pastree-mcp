@@ -38,8 +38,12 @@ function Run-Cli([string[]]$ExtraArgs) {
     # Windows PowerShell 5.1 turns every stderr line of a native command into
     # an error record, and under 'Stop' the first log line would end the test.
     $ErrorActionPreference = 'Continue'
-    $out = & $Exe --project $group --log none --script (Join-Path $here 'smoke.calls') @ExtraArgs 2>$null
+    # `compile` builds in a directory of its own: a fresh one per run, so the
+    # run's first build of a member is a first build.
+    $buildDir = Join-Path ([IO.Path]::GetTempPath()) ('pastree-mcp-smoke-build-' + [Guid]::NewGuid().ToString('N'))
+    $out = & $Exe --project $group --log none --build-dir $buildDir --script (Join-Path $here 'smoke.calls') @ExtraArgs 2>$null
     $ErrorActionPreference = 'Stop'
+    Remove-Item -Recurse -Force $buildDir -ErrorAction SilentlyContinue
     if ($LASTEXITCODE -ne 0) { throw "pastree-mcp exited with $LASTEXITCODE" }
     $blocks = [ordered]@{}
     $key = $null
@@ -167,6 +171,20 @@ Check 'impact comments' (Block $b 'impact {"diff":"--- a/Shared/uShapes.pas\n+++
 Check 'impact mismatch' (Block $b 'impact {"diff":"--- a/Shared/uShapes.pas\n+++ b/Shared/uShapes.pas\n@@ -55 ') @('the diff does not match the file on disk: line 55 reads `Result := Pi * FRadius * FRadius;`') @('TCircle.Area (function)')
 Check 'impact not a diff' (Block $b 'impact {"diff":"not a diff"}') @('no file in `diff`')
 Check 'impact nothing' (Block $b 'impact {}') @('give `diff`')
+# compile: MSBuild for AppA (its .dproj), dcc directly for AppB (a bare .dpr).
+# The first build has nothing to compare with: a warning in a file this
+# session did not change is counted, not listed. The second compiles only the
+# program - uMembers is not recompiled, so its warning is not reported again,
+# and not gone either.
+Check 'compile' (Block $b 'compile {"member":"AppA"}') @('compile AppA (Win32 Debug): built in', '278 lines compiled', 'AppA-Win32-Debug\exe\AppA.exe', 'first build here: every unit compiled', 'warnings - none in files changed this session (1 elsewhere, not listed)')
+Check 'compile again' (Block $b 'compile {"member":"AppA", "limit"') @('compile AppA (Win32 Debug): built in', '13 lines compiled', 'no errors, warnings or hints') @('first build here')
+Check 'compile bare dpr' (Block $b 'compile {"member":"AppB"}') @('compile AppB (Win32): built in', 'AppB-Win32\exe\AppB.exe', 'first build here', 'no errors, warnings or hints')
+Check 'compile file' (Block $b 'compile {"file"') @('compile - 2 members, those compiling Shared\uShapes.pas', '  AppA (Win32 Debug): built in', '  AppB (Win32): built in', 'no errors, warnings or hints')
+# A rebuild recompiles uMembers: its warning again, known, so not new.
+Check 'compile rebuild' (Block $b 'compile {"member":"AppA", "rebuild"') @('278 lines compiled', "warnings - 1 in the group's files:`nAppA\uMembers.pas", '  37  W1055 PUBLISHED caused RTTI', "to be added to type 'TDerived' (in TDerived)`n        published") @('[new]')
+Check 'compile no member' (Block $b 'compile {"member":"NoSuch"}') @('no member named NoSuch - the group has: AppA, AppB')
+Check 'compile bad show' (Block $b 'compile {"show"') @('`show` is new, warnings or all')
+Check 'compile nothing changed' (Block $b 'compile {}') @('no file has changed since the server started - name the `member` to build (the group has: AppA, AppB)')
 Check 'outline' (Block $b 'outline {"file":"Shared') @('21  type TCircle = class', '27    property Radius: Double', '53  function TCircle.Area: Double', '40 implementation')
 Check 'unit_deps' (Block $b 'unit_deps') @('uShapes is used by 3 units', 'AppB\uAppB.pas:8')
 Check 'diagnostics' (Block $b 'diagnostics') @('no diagnostics')
@@ -190,15 +208,17 @@ Check 'strict callees' (Block $b 'callees {"symbol":"TotalArea"}') @('1 call rea
 Check 'strict impact' (Block $b 'impact {"symbol":"TCircle.Area"}') @('members to build and test: AppA, AppB (all 2)', 'callers - 3 calls in 3 routines')
 Check 'strict impact unit' (Block $b 'impact {"symbol":"uMembers"}') @('members to build and test: AppA (not reached: AppB)')
 Check 'strict impact diff' (Block $b 'impact {"diff":"diff --git') @('members to build and test: AppA, AppB (all 2)', 'AppB\uBoxes.pas  [AppB]', 'Shared\uShapes.pas - interface changed, used by 3 units: AppB, uAppA, uAppB', 'callers and uses - 5 in 4 routines')
+Check 'strict compile file' (Block $b 'compile {"file"') @('compile - 2 members, those compiling Shared\uShapes.pas', '  AppA (Win32 Debug): built in', '  AppB (Win32): built in')
 
 # ---- 3. MCP over stdio, with an edit in between ------------------------------------
 Write-Host '--- MCP over stdio'
 $copy = Join-Path ([IO.Path]::GetTempPath()) ('pastree-mcp-smoke-' + [Guid]::NewGuid().ToString('N'))
 Copy-Item -Recurse $fixture $copy
+$mcpBuild = $copy + '-build'
 try {
     $psi = New-Object Diagnostics.ProcessStartInfo
     $psi.FileName = $Exe
-    $psi.Arguments = '--project "' + (Join-Path $copy 'Fixture.groupproj') + '" --log none'
+    $psi.Arguments = '--project "' + (Join-Path $copy 'Fixture.groupproj') + '" --log none --build-dir "' + $mcpBuild + '"'
     $psi.UseShellExecute = $false
     $psi.RedirectStandardInput = $true
     $psi.RedirectStandardOutput = $true
@@ -212,20 +232,29 @@ try {
     $stdin.AutoFlush = $true
     $stdin.NewLine = "`n"
 
+    # The reply to the request; the notifications before it (progress) are
+    # collected in $script:notes.
+    $script:notes = ''
     function Rpc([int]$Id, [string]$Method, [string]$ParamsJson) {
         $stdin.WriteLine('{"jsonrpc":"2.0","id":' + $Id + ',"method":"' + $Method + '","params":' + $ParamsJson + '}')
-        $line = $proc.StandardOutput.ReadLine()
-        if ($null -eq $line) { throw "server closed stdout after $Method" }
-        return ($line | ConvertFrom-Json)
+        while ($true) {
+            $line = $proc.StandardOutput.ReadLine()
+            if ($null -eq $line) { throw "server closed stdout after $Method" }
+            $msg = $line | ConvertFrom-Json
+            if ($null -ne $msg.id) { return $msg }
+            $script:notes += $line + "`n"
+        }
     }
-    function ToolText($Reply) { return [string]$Reply.result.content[0].text }
+    # Line breaks as the CLI blocks have them, so one expectation reads the same
+    # in both parts.
+    function ToolText($Reply) { return ([string]$Reply.result.content[0].text).Replace("`r`n", "`n") }
 
     $r = Rpc 1 'initialize' '{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}'
     Check 'initialize' ($r | ConvertTo-Json -Depth 6) @('"name":  "pastree"', 'instructions', '"tools"')
     $stdin.WriteLine('{"jsonrpc":"2.0","method":"notifications/initialized"}')
     $r = Rpc 2 'tools/list' '{}'
     $names = ($r.result.tools | ForEach-Object { $_.name }) -join ','
-    Check 'tools/list' $names @('status', 'find', 'definition', 'source', 'members', 'references', 'callers', 'callees', 'impact', 'related', 'outline', 'diagnostics', 'unit_deps')
+    Check 'tools/list' $names @('status', 'find', 'definition', 'source', 'members', 'references', 'callers', 'callees', 'impact', 'compile', 'related', 'outline', 'diagnostics', 'unit_deps')
     $r = Rpc 3 'tools/call' '{"name":"related","arguments":{"relation":"creations","symbol":"TCircle"}}'
     Check 'call before edit' (ToolText $r) @('creations of TCircle', ': 1')
     if ($r.result.isError) { Write-Host 'FAIL call before edit reported isError'; $script:failures++ }
@@ -244,10 +273,24 @@ try {
     # call that no longer resolves.
     $r = Rpc 6 'tools/call' '{"name":"impact","arguments":{"diff":"--- a/AppA/uAppA.pas\n+++ b/AppA/uAppA.pas\n@@ -7,3 +7,2 @@\n procedure RunA;\n-procedure NoSuchName;\n \n"}}'
     Check 'impact after edit' (ToolText $r) @('AppA\uAppA.pas - interface changed, used by 1 unit: AppA', 'removed: NoSuchName (procedure) - still named at AppA\uAppA.pas:26 (in RunA)')
+    # compile with no arguments builds what the edited file reaches: AppA.
+    # The compiler's error, under the routine, with the line; progress on the
+    # way, since the call carries a progress token.
+    $r = Rpc 7 'tools/call' '{"name":"compile","arguments":{},"_meta":{"progressToken":"smoke-1"}}'
+    Check 'compile after edit' (ToolText $r) @('compile AppA (Win32 Debug): FAILED in', ', 1 error', "errors - 1:`nAppA\uAppA.pas`n  26  E2003 Undeclared identifier: 'NoSuchName' (in RunA)`n        NoSuchName := 1;") @('AppB')
+    Check 'compile progress' $script:notes @('"method":"notifications/progress"', '"progressToken":"smoke-1"', 'compile: building AppA (Win32 Debug)')
+    # The error fixed, a local left unused: the hint is new - uAppA never
+    # compiled here before, and this session changed it - while uMembers,
+    # compiled now for the first time too, keeps its warning as old.
+    $text = [IO.File]::ReadAllText($unit)
+    $text = $text.Replace("    NoSuchName := 1;`r`n", '').Replace("  LShape: TShape;`r`n", "  LShape: TShape;`r`n  LUnused: Integer;`r`n")
+    [IO.File]::WriteAllText($unit, $text, $utf8)
+    $r = Rpc 8 'tools/call' '{"name":"compile","arguments":{}}'
+    Check 'compile new hint' (ToolText $r) @('compile AppA (Win32 Debug): built in', 'warnings - none new (1 old, not listed)', "hints - 1 new:`nAppA\uAppA.pas`n  18  H2164 Variable 'LUnused' is declared but never used in 'RunA' (in RunA)`n        LUnused: Integer;") @('first build here')
 
-    $r = Rpc 7 'tools/call' '{"name":"no_such_tool","arguments":{}}'
+    $r = Rpc 9 'tools/call' '{"name":"no_such_tool","arguments":{}}'
     if (-not $r.result.isError) { Write-Host 'FAIL unknown tool not reported as isError'; $script:failures++ }
-    $r = Rpc 8 'no/such/method' '{}'
+    $r = Rpc 10 'no/such/method' '{}'
     if ($r.error.code -ne -32601) { Write-Host 'FAIL unknown method not -32601'; $script:failures++ }
 
     $stdin.Close()
@@ -255,6 +298,7 @@ try {
 }
 finally {
     Remove-Item -Recurse -Force $copy -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force $mcpBuild -ErrorAction SilentlyContinue
 }
 
 if ($script:failures -gt 0) {

@@ -124,6 +124,8 @@ type
     FConfigStamps: TDictionary<string, TMcpFileStamp>;
     FListed: TDictionary<string, Boolean>;   // every member's files, lower
     FOwner: TDictionary<string, Integer>;    // own file, lower -> analysis
+    FChanged: TList<string>;                 // see ChangedFiles
+    FChangedSeen: TDictionary<string, Boolean>;
     FReady: TEvent;
     FLock: TCriticalSection;
     FState: string;
@@ -152,6 +154,11 @@ type
     // Re-analyzes whatever changed on disk since the last look. AReport says
     // what was done ('' = nothing had changed).
     procedure EnsureFresh(out AReport: string);
+    // The files EnsureFresh found changed on disk since the load, in the order
+    // it met them: this session's edits (and the developer's). `compile`
+    // builds the members they reach, and on a member's first build lists the
+    // warnings in them - there is no earlier build to tell new from old.
+    function ChangedFiles: TArray<string>;
     // A file of the group itself - under the group directory, or listed by a
     // member - as opposed to a library unit the closure pulled in.
     function IsOwnFile(const APath: string): Boolean;
@@ -292,6 +299,8 @@ begin
   FConfigStamps := TDictionary<string, TMcpFileStamp>.Create;
   FListed := TDictionary<string, Boolean>.Create;
   FOwner := TDictionary<string, Integer>.Create;
+  FChanged := TList<string>.Create;
+  FChangedSeen := TDictionary<string, Boolean>.Create;
   FReady := TEvent.Create(nil, True, False, '');
   FLock := TCriticalSection.Create;
   FState := 'not started';
@@ -303,9 +312,16 @@ begin
   FConfigStamps.Free;
   FListed.Free;
   FOwner.Free;
+  FChanged.Free;
+  FChangedSeen.Free;
   FReady.Free;
   FLock.Free;
   inherited;
+end;
+
+function TMcpWorkspace.ChangedFiles: TArray<string>;
+begin
+  Result := FChanged.ToArray;
 end;
 
 procedure TMcpWorkspace.SetState(const AText: string);
@@ -841,6 +857,12 @@ begin
           LChanged.Add(LA.Paths[LPair.Key]);
       if not LGone and (LChanged.Count = 0) then
         Continue;
+      for var LFile in LChanged do
+        if not FChangedSeen.ContainsKey(LowerCase(LFile)) then
+        begin
+          FChangedSeen.Add(LowerCase(LFile), True);
+          FChanged.Add(LFile);
+        end;
       LSW := TStopwatch.StartNew;
       LNeedRebuild := '';
       if LGone then

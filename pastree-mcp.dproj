@@ -88,6 +88,7 @@
         <DCCReference Include="source\PasMcp.Studio.pas"/>
         <DCCReference Include="source\PasMcp.GroupProj.pas"/>
         <DCCReference Include="source\PasMcp.Workspace.pas"/>
+        <DCCReference Include="source\PasMcp.Build.pas"/>
         <DCCReference Include="source\PasMcp.Tools.pas"/>
         <DCCReference Include="source\PasMcp.Server.pas"/>
         <BuildConfiguration Include="Base">

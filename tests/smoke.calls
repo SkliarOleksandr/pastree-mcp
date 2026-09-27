@@ -65,6 +65,14 @@ impact {"diff":"--- a/Shared/uShapes.pas\n+++ b/Shared/uShapes.pas\n@@ -4 +4 @@\
 impact {"diff":"--- a/Shared/uShapes.pas\n+++ b/Shared/uShapes.pas\n@@ -55 +55 @@\n-  Result := Pi * FRadius * FRadius;\n+  Result := 2 * Pi * FRadius;\n"}
 impact {"diff":"not a diff"}
 impact {}
+compile {"member":"AppA"}
+compile {"member":"AppA", "limit":60}
+compile {"member":"AppB"}
+compile {"file":"Shared\\uShapes.pas"}
+compile {"member":"AppA", "rebuild":true, "show":"warnings"}
+compile {"member":"NoSuch"}
+compile {"show":"some"}
+compile {}
 outline {"file":"Shared\\uShapes.pas"}
 unit_deps {"unit":"uShapes"}
 diagnostics {}

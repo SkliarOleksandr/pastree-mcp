@@ -21,6 +21,7 @@ program pastree_mcp;
   Options: --project <.groupproj|.dproj|.dpr> (default: the only .groupproj,
   else the only .dproj, in the current directory), --studio <BDS version>,
   --platform <Win32|Win64>, --config <Debug|Release>, --groups <shared|strict>,
+  --build-dir <dir> (where `compile` builds; default %TEMP%\pastree-mcp),
   --log <file|none>, --version.
 }
 
@@ -40,6 +41,7 @@ uses
   PasMcp.Studio in 'source\PasMcp.Studio.pas',
   PasMcp.GroupProj in 'source\PasMcp.GroupProj.pas',
   PasMcp.Workspace in 'source\PasMcp.Workspace.pas',
+  PasMcp.Build in 'source\PasMcp.Build.pas',
   PasMcp.Tools in 'source\PasMcp.Tools.pas',
   PasMcp.Server in 'source\PasMcp.Server.pas';
 
@@ -139,6 +141,8 @@ begin
       GConfig := Next
     else if SameText(ParamStr(LIdx), '--log') then
       GLog := Next
+    else if SameText(ParamStr(LIdx), '--build-dir') then
+      BuildRoot := TPath.GetFullPath(Next)
     else if SameText(ParamStr(LIdx), '--groups') then
     begin
       if SameText(Next, 'strict') then

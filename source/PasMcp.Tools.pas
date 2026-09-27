@@ -27,6 +27,7 @@ unit PasMcp.Tools;
 interface
 
 uses
+  System.SysUtils,
   System.JSON,
   PasMcp.Workspace;
 
@@ -35,10 +36,15 @@ function ServerInstructions(AWs: TMcpWorkspace): string;
 function CallTool(AWs: TMcpWorkspace; const AName: string; AArgs: TJSONObject;
   out AIsError: Boolean): string;
 
+var
+  // Set by the server around a tools/call that asked for progress
+  // (params._meta.progressToken): a long tool - `compile` - reports through
+  // it, which also keeps the client from timing the call out as idle.
+  ToolProgress: TProc<string>;
+
 implementation
 
 uses
-  System.SysUtils,
   System.Classes,
   System.StrUtils,
   System.Character,
@@ -53,7 +59,9 @@ uses
   PasTree.Sema.Model,
   PasTree.Sema.Project,
   PasTree.Sema.Nav,
-  PasMcp.Log;
+  PasTree.Platforms,
+  PasMcp.Log,
+  PasMcp.Build;
 
 type
   EToolError = class(Exception);
@@ -7477,6 +7485,672 @@ begin
   end;
 end;
 
+{ ---- compile ------------------------------------------------------------------ }
+
+function HasTrue(const AFlags: TArray<Boolean>): Boolean;
+begin
+  for var LFlag in AFlags do
+    if LFlag then
+      Exit(True);
+  Result := False;
+end;
+
+// The members compiling AFile: a unit, a program, or an include file through
+// the own units that include it.
+function ReachingMembers(AWs: TMcpWorkspace; AReach: TMemberReach;
+  const AFile: string): TArray<Integer>;
+begin
+  Result := AReach.MembersOf(AFile);
+  if Length(Result) > 0 then
+    Exit;
+  for var LA in AWs.Analyses do
+    for var LMid := 0 to LA.Proj.ModelCount - 1 do
+      if AWs.IsOwnFile(LA.Proj.ModelFile(LMid)) and
+        (FileIdOf(LA.Proj.Model(LMid), AFile) > 0) then
+        for var LIdx in AReach.MembersOf(LA.Proj.ModelFile(LMid)) do
+          if not HasInt(Result, LIdx) then
+            Result := Result + [LIdx];
+end;
+
+// The members `compile` builds (SPEC 9.4): those named, those compiling
+// `file`, else those the files changed this session reach. AWhy says which
+// rule chose them, for the answer.
+function CompileMembers(AWs: TMcpWorkspace; AArgs: TJSONObject;
+  out AWhy: string): TArray<Integer>;
+var
+  LNames, LChanged, LShown: TArray<string>;
+  LV: TJSONValue;
+  LFound: Integer;
+  LReach: TMemberReach;
+  LFile, LAll: string;
+  LIn: TArray<Boolean>;
+begin
+  Result := nil;
+  AWhy := '';
+  SetLength(LIn, Length(AWs.Members));
+  LAll := '';
+  for var LM in AWs.Members do
+    LAll := LAll + IfThen(LAll <> '', ', ', '') + LM.Name;
+  LNames := ArgStr(AArgs, 'member').Split([',', ';', ' '],
+    TStringSplitOptions.ExcludeEmpty);
+  if AArgs <> nil then
+  begin
+    LV := AArgs.GetValue('members');
+    if LV is TJSONArray then
+    begin
+      for var LItem in TJSONArray(LV) do
+        if Trim(LItem.Value) <> '' then
+          LNames := LNames + [Trim(LItem.Value)];
+    end
+    else if (LV <> nil) and not (LV is TJSONNull) then
+      LNames := LNames + LV.Value.Split([',', ';', ' '],
+        TStringSplitOptions.ExcludeEmpty);
+  end;
+  if Length(LNames) > 0 then
+    for var LName in LNames do
+    begin
+      LFound := -1;
+      for var LIdx := 0 to High(AWs.Members) do
+        if SameText(AWs.Members[LIdx].Name, Trim(LName)) then
+          LFound := LIdx;
+      if LFound < 0 then
+        raise EToolError.CreateFmt('no member named %s - the group has: %s',
+          [Trim(LName), LAll]);
+      LIn[LFound] := True;
+    end
+  else
+  begin
+    LReach := TMemberReach.Create(AWs);
+    try
+      if ArgStr(AArgs, 'file') <> '' then
+      begin
+        LFile := ArgFile(AWs, AArgs);
+        for var LIdx in ReachingMembers(AWs, LReach, LFile) do
+          LIn[LIdx] := True;
+        AWhy := 'those compiling ' + AWs.RelPath(LFile);
+        if not HasTrue(LIn) then
+          raise EToolError.CreateFmt('no member of the group compiles %s',
+            [AWs.RelPath(LFile)]);
+      end
+      else
+      begin
+        LChanged := AWs.ChangedFiles;
+        if Length(LChanged) = 0 then
+        begin
+          if Length(AWs.Members) <> 1 then
+            raise EToolError.CreateFmt('no file has changed since the server '
+              + 'started - name the `member` to build (the group has: %s), or a '
+              + '`file`', [LAll]);
+          LIn[0] := True;
+        end
+        else
+        begin
+          for var LOne in LChanged do
+            for var LIdx in ReachingMembers(AWs, LReach, LOne) do
+              LIn[LIdx] := True;
+          AWhy := 'those compiling the ' + Plural(Length(LChanged), 'file') +
+            ' changed this session';
+          if not HasTrue(LIn) then
+          begin
+            LShown := nil;
+            for var LOne in LChanged do
+              if Length(LShown) < 3 then
+                LShown := LShown + [AWs.RelPath(LOne)];
+            raise EToolError.CreateFmt('no member of the group compiles the '
+              + 'files changed this session (%s) - name the `member` to build '
+              + '(the group has: %s)', [String.Join(', ', LShown), LAll]);
+          end;
+        end;
+      end;
+    finally
+      LReach.Free;
+    end;
+  end;
+  for var LIdx := 0 to High(LIn) do
+    if LIn[LIdx] then
+      Result := Result + [LIdx];
+end;
+
+// The first 'quoted' name of a compiler message: E2003 Undeclared
+// identifier: 'Foo'; F2063 Could not compile used unit 'uFoo.pas'.
+function QuotedName(const AText: string): string;
+var
+  LFrom, LTo: Integer;
+begin
+  Result := '';
+  LFrom := Pos('''', AText);
+  if LFrom = 0 then
+    Exit;
+  LTo := Pos('''', AText, LFrom + 1);
+  if LTo > LFrom then
+    Result := Copy(AText, LFrom + 1, LTo - LFrom - 1);
+end;
+
+// dcc cut the "file(line)" of a message at 128 characters: the file is the
+// own or library unit whose path starts so, when exactly one does; the line,
+// the one line of it that writes the name the message quotes, when exactly
+// one does. Otherwise the line stays unknown.
+procedure ResolveTruncated(AWs: TMcpWorkspace; var AResult: TBuildResult);
+var
+  LCands: TDictionary<string, string>;
+  LFile, LName: string;
+  LLines: TArray<string>;
+  LAt: Integer;
+begin
+  for var LI := 0 to High(AResult.Messages) do
+  begin
+    if not AResult.Messages[LI].Truncated then
+      Continue;
+    if not TFile.Exists(AResult.Messages[LI].FileName) then
+    begin
+      LCands := TDictionary<string, string>.Create;
+      try
+        for var LA in AWs.Analyses do
+          for var LMid := 0 to LA.Proj.ModelCount - 1 do
+          begin
+            LFile := LA.Proj.ModelFile(LMid);
+            if StartsText(AResult.Messages[LI].FileName, LFile) then
+              LCands.AddOrSetValue(LowerCase(LFile), LFile);
+          end;
+        if LCands.Count <> 1 then
+          Continue;
+        for var LOne in LCands.Values do
+          AResult.Messages[LI].FileName := LOne;
+      finally
+        LCands.Free;
+      end;
+    end;
+    LName := QuotedName(AResult.Messages[LI].Text);
+    if (LName = '') or not IsValidIdent(LName, True) then
+      Continue;
+    LLines := ReadLines(AResult.Messages[LI].FileName);
+    LAt := 0;
+    for var LN := 0 to High(LLines) do
+      if FindWord(LLines[LN], LName) > 0 then
+      begin
+        if LAt <> 0 then
+        begin
+          LAt := -1;
+          Break;
+        end;
+        LAt := LN + 1;
+      end;
+    if LAt > 0 then
+      AResult.Messages[LI].Line := LAt;
+  end;
+end;
+
+function MemberProgress(AIndex, ACount: Integer): TProc<string>;
+var
+  LProgress: TProc<string>;
+begin
+  LProgress := ToolProgress;
+  if not Assigned(LProgress) then
+    Exit(nil);
+  Result :=
+    procedure(AText: string)
+    begin
+      if ACount > 1 then
+        LProgress(Format('compile %d/%d: %s', [AIndex + 1, ACount, AText]))
+      else
+        LProgress('compile: ' + AText);
+    end;
+end;
+
+type
+  // A message as the answer lists it: merged over the members built, which
+  // compile a shared unit each and report its warnings each.
+  TCompileRow = record
+    Msg: TBuildMsg;
+    Members: TArray<string>;
+    Own: Boolean;
+  end;
+
+function Seconds(AMs: Int64): string;
+begin
+  Result := FormatFloat('0.0', AMs / 1000, TFormatSettings.Invariant) + ' s';
+end;
+
+function CompileAnswer(AWs: TMcpWorkspace; const AResults: TArray<TBuildResult>;
+  const AWhy, AShow: string; ALimit: Integer): string;
+var
+  LSb: TStringBuilder;
+  LGone: TList<TCompileRow>;
+  LIndex: TDictionary<string, Integer>;
+  LEnclosing: TEnclosing;
+  LLines: TDictionary<string, TArray<string>>;
+  LMulti, LFirstOnly: Boolean;
+  LBudget, LBuilt, LNewW, LNewH, LOwnW, LOwnH, LLibW, LLibH, LListed: Integer;
+  LErrFiles: TDictionary<string, Boolean>;
+  LFolded, LMissing: TArray<string>;
+  LErrors, LSetup, LWarn, LHint, LSetupWarn: TList<TCompileRow>;
+  LNotFound: Boolean;
+  LName: string;
+
+  procedure Merge(AList: TList<TCompileRow>; const AMsg: TBuildMsg;
+    const AMember: string; AKeyed: Boolean);
+  var
+    LKey: string;
+    LAt: Integer;
+    LRow: TCompileRow;
+  begin
+    LKey := IntToStr(Ord(AMsg.Kind)) + '|' + LowerCase(AMsg.FileName) + '|' +
+      IntToStr(AMsg.Line) + '|' + IntToStr(AMsg.Col) + '|' + AMsg.Code + '|' +
+      AMsg.Text;
+    if AKeyed and LIndex.TryGetValue(LKey, LAt) then
+    begin
+      LRow := AList[LAt];
+      if IndexText(AMember, LRow.Members) < 0 then
+        LRow.Members := LRow.Members + [AMember];
+      LRow.Msg.IsNew := LRow.Msg.IsNew or AMsg.IsNew;
+      AList[LAt] := LRow;
+      Exit;
+    end;
+    LRow := Default(TCompileRow);
+    LRow.Msg := AMsg;
+    LRow.Members := [AMember];
+    LRow.Own := AWs.IsOwnFile(AMsg.FileName);
+    AList.Add(LRow);
+    if AKeyed then
+      LIndex.Add(LKey, AList.Count - 1);
+  end;
+
+  function Sorted(AList: TList<TCompileRow>): TArray<TCompileRow>;
+  begin
+    Result := AList.ToArray;
+    TArray.Sort<TCompileRow>(Result, TComparer<TCompileRow>.Construct(
+      function(const L, R: TCompileRow): Integer
+      begin
+        Result := Ord(R.Own) - Ord(L.Own);
+        if Result = 0 then
+          Result := CompareText(L.Msg.FileName, R.Msg.FileName);
+        if Result = 0 then
+          Result := L.Msg.Line - R.Msg.Line;
+      end));
+  end;
+
+  function SourceLine(const AFile: string; ALine: Integer): string;
+  var
+    LText: TArray<string>;
+  begin
+    Result := '';
+    if ALine <= 0 then
+      Exit;
+    if not LLines.TryGetValue(LowerCase(AFile), LText) then
+    begin
+      LText := ReadLines(AFile);
+      LLines.Add(LowerCase(AFile), LText);
+    end;
+    if ALine <= Length(LText) then
+      Result := CleanLine(LText[ALine - 1]);
+  end;
+
+  // Rows grouped by file: line, code and text, the routine around it, the
+  // source line below; `limit` counts them over every section.
+  procedure AppendRows(const ARows: TArray<TCompileRow>; ANewTag: Boolean);
+  var
+    LLast, LWhere, LLine, LSrc: string;
+    LLeft: Integer;
+  begin
+    LLast := #0;
+    LLeft := Length(ARows);
+    for var LRow in ARows do
+    begin
+      if LBudget <= 0 then
+      begin
+        LSb.AppendLine(Format('  ... %d more (raise `limit`)', [LLeft]));
+        Exit;
+      end;
+      Dec(LLeft);
+      Dec(LBudget);
+      if not SameText(LRow.Msg.FileName, LLast) then
+      begin
+        LLast := LRow.Msg.FileName;
+        if LRow.Msg.FileName = '' then
+          LSb.AppendLine('(no file)')
+        else
+          LSb.AppendLine(AWs.RelPath(LRow.Msg.FileName));
+      end;
+      LWhere := '';
+      if (LRow.Msg.Line > 0) and (LRow.Msg.FileName <> '') then
+        LWhere := LEnclosing.NameAt(LRow.Msg.FileName, LRow.Msg.Line,
+          LRow.Msg.Col, False);
+      if LRow.Msg.Line > 0 then
+        LLine := '  ' + IntToStr(LRow.Msg.Line) + '  '
+      else
+        LLine := '  ?  ';
+      LLine := LLine + Trim(LRow.Msg.Code + ' ' + LRow.Msg.Text);
+      if LWhere <> '' then
+        LLine := LLine + ' (in ' + LWhere + ')';
+      if ANewTag and LRow.Msg.IsNew then
+        LLine := LLine + ' [new]';
+      if LMulti and (Length(LRow.Members) < LBuilt) then
+        LLine := LLine + ' [' + String.Join(', ', LRow.Members) + ']';
+      if LRow.Msg.Truncated and (LRow.Msg.Line > 0) then
+        LLine := LLine + ' [dcc cut the path at 128 characters: the line is '
+          + 'the one writing ''' + QuotedName(LRow.Msg.Text) + ''']'
+      else if LRow.Msg.Truncated then
+        LLine := LLine + ' [dcc cut the path at 128 characters: line unknown]';
+      LSb.AppendLine(LLine);
+      LSrc := SourceLine(LRow.Msg.FileName, LRow.Msg.Line);
+      if LSrc <> '' then
+        LSb.AppendLine('        ' + LSrc);
+    end;
+  end;
+
+  function Filter(AList: TList<TCompileRow>; AOwnOnly, ANewOnly: Boolean):
+    TArray<TCompileRow>;
+  begin
+    Result := nil;
+    for var LRow in Sorted(AList) do
+      if (not AOwnOnly or LRow.Own) and (not ANewOnly or LRow.Msg.IsNew) then
+        Result := Result + [LRow];
+  end;
+
+  // "warnings - 2 new (5 unchanged, 12 in library units, not listed):"
+  procedure AppendKind(AList: TList<TCompileRow>; const ANoun: string;
+    AAll: Boolean; ANew, AOwn, ALib: Integer);
+  var
+    LRest: TArray<string>;
+    LListedRows: TArray<TCompileRow>;
+  begin
+    if AList.Count = 0 then
+      Exit;
+    LRest := nil;
+    if AAll then
+    begin
+      LListedRows := Filter(AList, True, False);
+      if ANew > 0 then
+        LRest := LRest + [Format('%d new', [ANew])];
+      if ALib > 0 then
+        LRest := LRest + [Format('%d in library units, not listed', [ALib])];
+      LSb.AppendLine(Format('%s - %d in the group''s files%s:', [ANoun,
+        AOwn, IfThen(Length(LRest) > 0, ' (' + String.Join(', ', LRest) + ')',
+        '')]));
+      AppendRows(LListedRows, True);
+      Exit;
+    end;
+    LListedRows := Filter(AList, True, True);
+    // Old: reported by the previous compile of its unit, or - a unit not
+    // compiled here before - in a file this session did not change.
+    if AOwn - Length(LListedRows) > 0 then
+      LRest := LRest + [Format('%d %s', [AOwn - Length(LListedRows),
+        IfThen(LFirstOnly, 'elsewhere', 'old')])];
+    if ALib > 0 then
+      LRest := LRest + [Format('%d in library units', [ALib])];
+    if LFirstOnly then
+      LSb.Append(Format('%s - %s in files changed this session', [ANoun,
+        IfThen(Length(LListedRows) > 0, IntToStr(Length(LListedRows)),
+        'none')]))
+    else if Length(LListedRows) > 0 then
+      LSb.Append(Format('%s - %d new', [ANoun, Length(LListedRows)]))
+    else
+      LSb.Append(ANoun + ' - none new');
+    if Length(LRest) > 0 then
+      LSb.Append(' (' + String.Join(', ', LRest) + ', not listed)');
+    if Length(LListedRows) > 0 then
+    begin
+      LSb.AppendLine(':');
+      AppendRows(LListedRows, False);
+    end
+    else
+      LSb.AppendLine;
+  end;
+
+  function MemberLine(const R: TBuildResult; const AIndent: string): string;
+  var
+    LM: TMcpMember;
+    LErrs: Integer;
+  begin
+    LM := AWs.Members[R.Member];
+    Result := LM.Name + ' (' + PlatformName(LM.Platform) + IfThen(LM.Config <>
+      '', ' ' + LM.Config, '') + '): ';
+    // An F2063 follows from the used unit's own errors, and is folded under
+    // them: not counted, unless there is nothing else.
+    LErrs := 0;
+    for var LMsg in R.Messages do
+      if (LMsg.Kind in [bmError, bmSetupError]) and
+        not SameText(LMsg.Code, 'F2063') then
+        Inc(LErrs);
+    if LErrs = 0 then
+      for var LMsg in R.Messages do
+        if LMsg.Kind in [bmError, bmSetupError] then
+          Inc(LErrs);
+    if not R.Ran then
+      Result := Result + 'not built - ' + R.Error
+    else if R.TimedOut then
+      Result := Result + 'stopped after ' + Seconds(R.Ms) +
+        ' - the build ran too long'
+    else if R.Ok then
+      Result := Result + 'built in ' + Seconds(R.Ms) + IfThen(R.Lines <> '',
+        ', ' + R.Lines + ' compiled', '')
+    else
+      Result := Result + 'FAILED in ' + Seconds(R.Ms) + ', ' +
+        Plural(LErrs, 'error');
+    if R.Ok and (R.OutputFile <> '') then
+      Result := Result + sLineBreak + AIndent + 'output: ' + R.OutputFile;
+    if R.Ran and R.FirstBuild then
+    begin
+      if R.SeededFrom <> '' then
+        Result := Result + sLineBreak + AIndent + Format('first build here: '
+          + 'started from the %d .dcu files of %s', [R.SeededCount,
+          AWs.RelPath(R.SeededFrom)])
+      else
+        Result := Result + sLineBreak + AIndent + 'first build here: every '
+          + 'unit compiled - no .dcu directory of an earlier build to start from';
+    end;
+    // Said once, and again when the build fails - a file a skipped event
+    // generates may be why.
+    if (Length(R.NotRun) > 0) and (R.FirstBuild or not R.Ok) then
+      Result := Result + sLineBreak + AIndent + 'not run: ' +
+        String.Join('; ', R.NotRun);
+  end;
+
+begin
+  LSb := TStringBuilder.Create;
+  LGone := TList<TCompileRow>.Create;
+  LIndex := TDictionary<string, Integer>.Create;
+  LEnclosing := TEnclosing.Create(AWs);
+  LLines := TDictionary<string, TArray<string>>.Create;
+  LErrFiles := TDictionary<string, Boolean>.Create;
+  LErrors := TList<TCompileRow>.Create;
+  LSetup := TList<TCompileRow>.Create;
+  LWarn := TList<TCompileRow>.Create;
+  LHint := TList<TCompileRow>.Create;
+  LSetupWarn := TList<TCompileRow>.Create;
+  try
+    LMulti := Length(AResults) > 1;
+    LBuilt := 0;
+    LFirstOnly := True;
+    for var R in AResults do
+      if R.Ran then
+      begin
+        Inc(LBuilt);
+        LFirstOnly := LFirstOnly and R.FirstBuild;
+      end;
+    if LBuilt = 0 then
+      LFirstOnly := False;
+
+    if not LMulti then
+      LSb.AppendLine('compile ' + MemberLine(AResults[0], '  '))
+    else
+    begin
+      LSb.AppendLine(Format('compile - %d members%s', [Length(AResults),
+        IfThen(AWhy <> '', ', ' + AWhy, '')]));
+      for var R in AResults do
+        LSb.AppendLine('  ' + MemberLine(R, '    '));
+    end;
+
+    for var R in AResults do
+    begin
+      LName := AWs.Members[R.Member].Name;
+      for var LMsg in R.Messages do
+        case LMsg.Kind of
+          bmError:
+            Merge(LErrors, LMsg, LName, True);
+          bmSetupError:
+            Merge(LSetup, LMsg, LName, True);
+          bmWarning:
+            Merge(LWarn, LMsg, LName, True);
+          bmHint:
+            Merge(LHint, LMsg, LName, True);
+          bmSetupWarning:
+            Merge(LSetupWarn, LMsg, LName, True);
+          bmMissingDir:
+            if IndexText(LMsg.Text, LMissing) < 0 then
+              LMissing := LMissing + [LMsg.Text];
+        end;
+      for var LMsg in R.Gone do
+        Merge(LGone, LMsg, LName, True);
+    end;
+
+    LBudget := ALimit;
+    // An F2063 "could not compile used unit X" follows from X's own errors;
+    // it is folded when those are listed.
+    for var LRow in LErrors do
+      if not SameText(LRow.Msg.Code, 'F2063') then
+        LErrFiles.AddOrSetValue(LowerCase(ExtractFileName(LRow.Msg.FileName)),
+          True);
+    LNotFound := False;
+    for var LI := LErrors.Count - 1 downto 0 do
+    begin
+      if SameText(LErrors[LI].Msg.Code, 'F2063') and LErrFiles.ContainsKey(
+        LowerCase(ExtractFileName(QuotedName(LErrors[LI].Msg.Text)))) then
+      begin
+        LFolded := LFolded + [AWs.RelPath(LErrors[LI].Msg.FileName)];
+        LErrors.Delete(LI);
+        Continue;
+      end;
+      if MatchText(LErrors[LI].Msg.Code, ['F2613', 'F1026']) then
+        LNotFound := True;
+    end;
+    if LErrors.Count > 0 then
+    begin
+      LSb.AppendLine(Format('errors - %d:', [LErrors.Count]));
+      AppendRows(Sorted(LErrors), False);
+      if Length(LFolded) > 0 then
+        LSb.AppendLine(Format('  and %s using them could not compile: %s',
+          [Plural(Length(LFolded), 'unit'), String.Join(', ', LFolded)]));
+    end;
+    if LSetup.Count > 0 then
+    begin
+      LSb.AppendLine(Format('build errors, not in the code - %d:',
+        [LSetup.Count]));
+      for var LRow in Sorted(LSetup) do
+        LSb.AppendLine('  ' + IfThen(LRow.Msg.FileName <> '',
+          AWs.RelPath(LRow.Msg.FileName) + ': ', '') + Trim(LRow.Msg.Code + ' '
+          + LRow.Msg.Text));
+    end;
+    if LNotFound and (Length(LMissing) > 0) then
+    begin
+      LSb.AppendLine(Format('search path directories that do not exist - %d:',
+        [Length(LMissing)]));
+      for var LI := 0 to Min(High(LMissing), 9) do
+        LSb.AppendLine('  ' + LMissing[LI]);
+      if Length(LMissing) > 10 then
+        LSb.AppendLine(Format('  ... %d more', [Length(LMissing) - 10]));
+    end;
+
+    LNewW := 0;
+    LOwnW := 0;
+    LLibW := 0;
+    for var LRow in LWarn do
+      if not LRow.Own then
+        Inc(LLibW)
+      else
+      begin
+        Inc(LOwnW);
+        if LRow.Msg.IsNew then
+          Inc(LNewW);
+      end;
+    LNewH := 0;
+    LOwnH := 0;
+    LLibH := 0;
+    for var LRow in LHint do
+      if not LRow.Own then
+        Inc(LLibH)
+      else
+      begin
+        Inc(LOwnH);
+        if LRow.Msg.IsNew then
+          Inc(LNewH);
+      end;
+    AppendKind(LWarn, 'warnings', AShow <> 'new', LNewW, LOwnW, LLibW);
+    AppendKind(LHint, 'hints', AShow = 'all', LNewH, LOwnH, LLibH);
+    if (AShow = 'all') and (LSetupWarn.Count > 0) then
+    begin
+      LSb.AppendLine(Format('build warnings - %d:', [LSetupWarn.Count]));
+      for var LRow in Sorted(LSetupWarn) do
+        LSb.AppendLine('  ' + IfThen(LRow.Msg.FileName <> '',
+          AWs.RelPath(LRow.Msg.FileName) + ': ', '') + Trim(LRow.Msg.Code + ' '
+          + LRow.Msg.Text));
+    end;
+    if LGone.Count > 0 then
+    begin
+      LSb.AppendLine(Format('gone since the previous compile - %d:',
+        [LGone.Count]));
+      LListed := 0;
+      for var LRow in Sorted(LGone) do
+      begin
+        if LListed = 10 then
+        begin
+          LSb.AppendLine(Format('  ... %d more', [LGone.Count - 10]));
+          Break;
+        end;
+        Inc(LListed);
+        LSb.AppendLine(Format('  %s:%d  %s %s', [AWs.RelPath(LRow.Msg.FileName),
+          LRow.Msg.Line, LRow.Msg.Code, LRow.Msg.Text]));
+      end;
+    end;
+    if (LBuilt > 0) and (LErrors.Count + LSetup.Count + LWarn.Count +
+      LHint.Count = 0) then
+      LSb.AppendLine('no errors, warnings or hints');
+    Result := LSb.ToString.TrimRight;
+  finally
+    LSetupWarn.Free;
+    LHint.Free;
+    LWarn.Free;
+    LSetup.Free;
+    LErrors.Free;
+    LErrFiles.Free;
+    LLines.Free;
+    LEnclosing.Free;
+    LIndex.Free;
+    LGone.Free;
+    LSb.Free;
+  end;
+end;
+
+{ `compile` (SPEC 9.4): the members a change reaches, built by the real
+  compiler into a directory of the server's own (PasMcp.Build), answered
+  with the errors and what the change added to the warnings and hints. }
+function ToolCompile(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
+var
+  LMembers: TArray<Integer>;
+  LResults: TArray<TBuildResult>;
+  LRes: TBuildResult;
+  LWhy, LShow: string;
+begin
+  LShow := LowerCase(ArgStr(AArgs, 'show', 'new'));
+  if not MatchText(LShow, ['new', 'warnings', 'all']) then
+    raise EToolError.Create('`show` is new, warnings or all');
+  LMembers := CompileMembers(AWs, AArgs, LWhy);
+  LResults := nil;
+  for var LK := 0 to High(LMembers) do
+  begin
+    LRes := BuildMember(AWs, LMembers[LK], ArgBool(AArgs, 'rebuild', False),
+      MemberProgress(LK, Length(LMembers)));
+    if LRes.Ran then
+    begin
+      ResolveTruncated(AWs, LRes);
+      CompareWithBaseline(LRes, AWs.ChangedFiles);
+    end;
+    LResults := LResults + [LRes];
+  end;
+  Result := CompileAnswer(AWs, LResults, LWhy, LShow,
+    EnsureRange(ArgInt(AArgs, 'limit', 60), 1, 5000));
+end;
+
 { ---- the catalogue ----------------------------------------------------------- }
 
 const
@@ -7629,6 +8303,33 @@ const
     + '"limit":{"type":"integer","description":"Max caller rows over all '
     + 'levels (default 150)"}}}},' +
 
+    '{"name":"compile","description":"Build with the real compiler - MSBuild '
+    + 'over the member''s .dproj, its own platform and configuration - and '
+    + 'answer with what it reports: the errors, each with the routine it is '
+    + 'in and its source line, then the warnings and hints new since that '
+    + 'member''s previous compile (the old ones are counted). With no '
+    + 'arguments it builds the members of the group that compile the files '
+    + 'changed this session. Everything is written to a directory of the '
+    + 'server''s own (the answer names the exe it built, to run tests '
+    + 'against): the project''s output, its .dcu files and the source tree '
+    + 'are not touched, and pre- and post-build events are not run. Takes '
+    + 'seconds for a small change, minutes for a first build or a rebuild of '
+    + 'a large member: use `diagnostics` while editing, `compile` before '
+    + 'saying a change is done.",'
+    + '"inputSchema":{"type":"object","properties":{'
+    + '"member":{"type":"string","description":"Group members to build, by '
+    + 'name: AppA, or AppA,AppB. Default: those the files changed this '
+    + 'session reach"},'
+    + '"file":{"type":"string","description":"Or build the members that '
+    + 'compile this file"},'
+    + '"show":{"type":"string","enum":["new","warnings","all"],"description":'
+    + '"new (default): the errors, and the warnings and hints not reported '
+    + 'before; warnings: every warning in the group''s files; all: every hint '
+    + 'too"},'
+    + '"rebuild":{"type":"boolean","description":"Recompile every unit, not '
+    + 'only what changed (default false)"},'
+    + '"limit":{"type":"integer","description":"Max rows (default 60)"}}}},' +
+
     '{"name":"related","description":"Relations across the group. '
     + 'descendants: classes/interfaces below a type. overrides: the virtual '
     + 'chain of a method. implementations: classes implementing an interface '
@@ -7702,7 +8403,10 @@ begin
     + 'routine calls (with the overrides and implementations a virtual or '
     + 'interface call may run), `impact` what a change reaches - pass `git '
     + 'diff` output or the symbols you will change: callers, overrides, and '
-    + 'which projects of the group to build and test, `related` answers '
+    + 'which projects of the group to build and test, `compile` builds them '
+    + 'with the real compiler into a directory of its own (nothing of the '
+    + 'project is overwritten) and lists the errors and the warnings the '
+    + 'change added - run it before saying a change is done, `related` answers '
     + 'hierarchy/override/implementation/assignment/'
     + 'creation questions, `outline` shows a unit''s structure with line '
     + 'numbers, `unit_deps` its uses graph, `diagnostics` checks name '
@@ -7762,6 +8466,8 @@ begin
       Result := ToolCallees(AWs, AArgs)
     else if AName = 'impact' then
       Result := ToolImpact(AWs, AArgs)
+    else if AName = 'compile' then
+      Result := ToolCompile(AWs, AArgs)
     else if AName = 'related' then
       Result := ToolRelated(AWs, AArgs)
     else if AName = 'outline' then

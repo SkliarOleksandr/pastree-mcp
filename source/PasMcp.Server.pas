@@ -12,6 +12,13 @@ unit PasMcp.Server;
   Requests are answered in order, one at a time, on the calling thread. A
   tool call waits for the initial analysis (see PasMcp.Tools.CallTool); the
   handshake and `status` never do.
+
+  A tools/call whose params carry `_meta.progressToken` gets
+  notifications/progress while it runs, from a tool that reports
+  (PasMcp.Tools.ToolProgress: `compile`). Claude Code aborts a call to a
+  stdio server that sends neither a response nor a progress notification for
+  30 minutes (its MCP documentation), so a notification keeps a long build
+  alive, and the message shows what it is doing.
 }
 
 interface
@@ -28,6 +35,7 @@ type
     FTransport: TMcpTransport;
     procedure Reply(AId: TJSONValue; AResult: TJSONValue);
     procedure ReplyError(AId: TJSONValue; ACode: Integer; const AMsg: string);
+    procedure Progress(AToken: TJSONValue; ACount: Integer; const AText: string);
     function Initialize(AParams: TJSONObject): TJSONObject;
     function ToolsCall(AParams: TJSONObject): TJSONObject;
   public
@@ -95,6 +103,27 @@ begin
   end;
 end;
 
+procedure TMcpServer.Progress(AToken: TJSONValue; ACount: Integer;
+  const AText: string);
+var
+  LMsg, LParams: TJSONObject;
+begin
+  LMsg := TJSONObject.Create;
+  try
+    LMsg.AddPair('jsonrpc', '2.0');
+    LMsg.AddPair('method', 'notifications/progress');
+    LParams := TJSONObject.Create;
+    LParams.AddPair('progressToken', AToken.Clone as TJSONValue);
+    // Must increase with every notification; there is no total to give.
+    LParams.AddPair('progress', TJSONNumber.Create(ACount));
+    LParams.AddPair('message', AText);
+    LMsg.AddPair('params', LParams);
+    FTransport.WriteMessage(LMsg.ToJSON);
+  finally
+    LMsg.Free;
+  end;
+end;
+
 function TMcpServer.Initialize(AParams: TJSONObject): TJSONObject;
 var
   LVersion: string;
@@ -129,18 +158,37 @@ var
   LIsError: Boolean;
   LContent: TJSONArray;
   LItem: TJSONObject;
-  LV: TJSONValue;
+  LV, LToken: TJSONValue;
+  LCount: Integer;
 begin
   LName := '';
   LArgs := nil;
+  LToken := nil;
   if AParams <> nil then
   begin
     LName := AParams.GetValue<string>('name', '');
     LV := AParams.GetValue('arguments');
     if LV is TJSONObject then
       LArgs := TJSONObject(LV);
+    LV := AParams.GetValue('_meta');
+    if LV is TJSONObject then
+      LToken := TJSONObject(LV).GetValue('progressToken');
   end;
-  LText := CallTool(FWs, LName, LArgs, LIsError);
+  LCount := 0;
+  if (LToken <> nil) and not (LToken is TJSONNull) and (LName = 'compile') then
+    Log('tools/call %s: the client takes progress notifications', [LName]);
+  if (LToken <> nil) and not (LToken is TJSONNull) then
+    ToolProgress :=
+      procedure(AText: string)
+      begin
+        Inc(LCount);
+        Progress(LToken, LCount, AText);
+      end;
+  try
+    LText := CallTool(FWs, LName, LArgs, LIsError);
+  finally
+    ToolProgress := nil;
+  end;
   Result := TJSONObject.Create;
   LContent := TJSONArray.Create;
   LItem := TJSONObject.Create;

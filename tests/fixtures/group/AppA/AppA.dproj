@@ -13,4 +13,7 @@
         <DCCReference Include="uAppA.pas"/>
         <DCCReference Include="uMembers.pas"/>
     </ItemGroup>
+    <!-- What makes it an MSBuild project `compile` can build, as the IDE
+         writes every .dproj. -->
+    <Import Project="$(BDS)\Bin\CodeGear.Delphi.Targets" Condition="Exists('$(BDS)\Bin\CodeGear.Delphi.Targets')"/>
 </Project>
