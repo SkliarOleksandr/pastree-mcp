@@ -1,4 +1,5 @@
-# Smoke test over tests\fixtures\group (two projects sharing a unit).
+# Smoke test over tests\fixtures\group: two projects sharing a unit, and a VCL
+# one (AppF) whose forms bind components and handlers by name.
 #
 # Three parts, each exercising a different path:
 #   1. CLI, shared policy - every tool once, answers checked by substring.
@@ -65,7 +66,7 @@ function Block($Blocks, [string]$Prefix) {
 # ---- 1. shared policy ---------------------------------------------------------
 Write-Host '--- CLI, shared policy'
 $b = Run-Cli @()
-Check 'status' (Block $b 'status') @('member AppA', 'member AppB', 'analysis 0:', 'every `uses` name resolved') @('analysis 1:')
+Check 'status' (Block $b 'status') @('member AppA', 'member AppB', 'member AppF', 'analysis 0:', 'every `uses` name resolved') @('analysis 1:')
 Check 'find' (Block $b 'find {"query":"TCircle"}') @('Shared\uShapes.pas:21  TCircle (class)')
 Check 'find wildcard' (Block $b 'find {"query":"*Circ*"') @('AppB\uAppB.pas:11  TBigCircle', 'Shared\uShapes.pas:21  TCircle')
 # A declaration written over several lines is one row, whole - or, longer than
@@ -74,7 +75,7 @@ Check 'find joined' (Block $b 'find {"query":"TWideBox.Configure"}') @("AppB\uBo
 Check 'find joined cut' (Block $b 'find {"query":"TWideBox.Many"}') @('AppB\uBoxes.pas:74  TWideBox.Many (procedure)  procedure Many(const AAlphaName, ABetaName, AGammaName: string; ADeltaCount, AEpsilonCount, AZetaCount: Integer; const AEtaText, AThetaText, ...); virtual;')
 # A name no declaration matches: what the index is, and where the name is
 # written outside it - in a unit no project uses - or that it is nowhere.
-Check 'find outside the index' (Block $b 'find {"query":"OrphanRoutine"}') @('no declaration matches `OrphanRoutine` among the ', ' units indexed - what the 2 projects of Fixture.groupproj compile: 7 of their own, ', "``OrphanRoutine`` is written in 1 file(s) that no indexed project uses - no tool here sees them:`n  AppB\uOrphan.pas:8  procedure OrphanRoutine;")
+Check 'find outside the index' (Block $b 'find {"query":"OrphanRoutine"}') @('no declaration matches `OrphanRoutine` among the ', ' units indexed - what the 3 projects of Fixture.groupproj compile: 13 of their own, ', "``OrphanRoutine`` is written in 1 file(s) that no indexed project uses - no tool here sees them:`n  AppB\uOrphan.pas:8  procedure OrphanRoutine;")
 Check 'find nowhere' (Block $b 'find {"query":"NothingAnywhere"}') @('no declaration matches `NothingAnywhere` among the ', 'no Pascal file outside them writes `NothingAnywhere` either (1 searched, under the group directory')
 Check 'definition' (Block $b 'definition {"symbol":"TCircle.Area"') @('declared at Shared\uShapes.pas:26', 'implemented at Shared\uShapes.pas:53', 'Result := Pi * FRadius * FRadius;')
 Check 'source' (Block $b 'source {"symbol":"TCircle.Area"}') @('TCircle.Area (function) implemented at Shared\uShapes.pas:53-56', "53  function TCircle.Area: Double;`n54  begin", "56  end;`n") @('declared at')
@@ -161,10 +162,10 @@ Check 'callees abstract' (Block $b 'callees {"symbol":"TShape.Area"}') @('TShape
 Check 'callees not a routine' (Block $b 'callees {"symbol":"TCircle"}') @('TCircle is a class - `callees` takes a routine')
 # impact: the members a change reaches, the declarations it touches with what
 # they are called through, their callers or uses.
-Check 'impact' (Block $b 'impact {"symbol":"TCircle.Area"}') @('impact of TCircle.Area', 'members to build and test: AppA, AppB (all 2)', "Shared\uShapes.pas`n  26  TCircle.Area (function) - overrides TShape.Area; also through IShape.Area (interface); overridden in TBigCircle (AppB\uAppB.pas:13)", 'callers - 3 calls in 3 routines', "  RunA`n    22  [via TShape.Area]", "  TotalArea`n    75  [via IShape.Area]")
+Check 'impact' (Block $b 'impact {"symbol":"TCircle.Area"}') @('impact of TCircle.Area', 'members to build and test: AppA, AppB (not reached: AppF)', "Shared\uShapes.pas`n  26  TCircle.Area (function) - overrides TShape.Area; also through IShape.Area (interface); overridden in TBigCircle (AppB\uAppB.pas:13)", 'callers - 3 calls in 3 routines', "  RunA`n    22  [via TShape.Area]", "  TotalArea`n    75  [via IShape.Area]")
 # A unit of one project reaches that project alone.
-Check 'impact one member' (Block $b 'impact {"symbol":"NeverCalled"}') @('members to build and test: AppB (not reached: AppA)', "AppB\uBoxes.pas`n  31  NeverCalled (procedure)", 'callers - none found') @('no callers found')
-Check 'impact unit' (Block $b 'impact {"symbol":"uMembers"}') @('members to build and test: AppA (not reached: AppB)', 'AppA\uMembers.pas - used by 1 unit: AppA') @('callers')
+Check 'impact one member' (Block $b 'impact {"symbol":"NeverCalled"}') @('members to build and test: AppB (not reached: AppA, AppF)', "AppB\uBoxes.pas`n  31  NeverCalled (procedure)", 'callers - none found') @('no callers found')
+Check 'impact unit' (Block $b 'impact {"symbol":"uMembers"}') @('members to build and test: AppA (not reached: AppB, AppF)', 'AppA\uMembers.pas - used by 1 unit: AppA') @('callers')
 # A field: its uses, through the property that reads and writes it too.
 Check 'impact field' (Block $b 'impact {"symbol":"TCircle.FRadius"}') @('23  TCircle.FRadius (field) - also through TCircle.Radius (property)', 'uses - 4 in 3 routines', "  RunA`n    21  [via TCircle.Radius]", "  TCircle.Create`n    50  FRadius := ARadius;")
 # Several roots: a row names the one it reaches, a file of fewer members
@@ -174,7 +175,7 @@ Check 'impact depth' (Block $b 'impact {"symbols":["TCircle.Area", "NeverCalled"
 # A diff: its lines to declarations, a uses clause, a removed routine, a
 # changed interface section and who uses it, a file no project compiles. A
 # member edited in a class is the member, not the class.
-Check 'impact diff' (Block $b 'impact {"diff":"diff --git') @('impact of the diff - 5 files, 3 declarations changed', 'members to build and test: AppA, AppB (all 2)', "AppA\uAppA.pas  [AppA]`n  12  uses clause", "AppB\uAppB.pas  [AppB]`n  removed: Obsolete (procedure) - nothing unresolved names it", '37  TShapeBox.GetItem (function) - also through TShapeBox.Item (property read)', 'Shared\uShapes.pas - interface changed, used by 3 units: AppB, uAppA, uAppB', "  27  TCircle.Radius (property)`n  55  TCircle.Area (function)", 'other files, not Pascal source: README.md', 'callers and uses - 5 in 4 routines', '21  [-> TCircle.Radius]', '53  [-> TShapeBox.GetItem via TShapeBox.Item]') @('TCircle (class)')
+Check 'impact diff' (Block $b 'impact {"diff":"diff --git') @('impact of the diff - 5 files, 3 declarations changed', 'members to build and test: AppA, AppB (not reached: AppF)', "AppA\uAppA.pas  [AppA]`n  12  uses clause", "AppB\uAppB.pas  [AppB]`n  removed: Obsolete (procedure) - nothing unresolved names it", '37  TShapeBox.GetItem (function) - also through TShapeBox.Item (property read)', 'Shared\uShapes.pas - interface changed, used by 3 units: AppB, uAppA, uAppB', "  27  TCircle.Radius (property)`n  55  TCircle.Area (function)", 'other files, not Pascal source: README.md', 'callers and uses - 5 in 4 routines', '21  [-> TCircle.Radius]', '53  [-> TShapeBox.GetItem via TShapeBox.Item]') @('TCircle (class)')
 # A field removed from a class is named, and the class is not a root.
 Check 'impact removed field' (Block $b 'impact {"diff":"--- a/AppA/uMembers.pas') @('no declaration changed', 'AppA\uMembers.pas - interface changed, used by 1 unit: AppA', 'removed: FGone (field) - nothing unresolved names it') @('TBase (class)', 'uses -')
 Check 'impact comments' (Block $b 'impact {"diff":"--- a/Shared/uShapes.pas\n+++ b/Shared/uShapes.pas\n@@ -4 ') @('no declaration changed', 'Shared\uShapes.pas (comments only)')
@@ -190,12 +191,15 @@ Check 'impact nothing' (Block $b 'impact {}') @('give `diff`')
 Check 'compile' (Block $b 'compile {"member":"AppA"}') @('compile AppA (Win32 Debug): built in', '278 lines compiled', 'AppA-Win32-Debug\exe\AppA.exe', 'first build here: every unit compiled', 'warnings - none in files changed this session (1 elsewhere, not listed)')
 Check 'compile again' (Block $b 'compile {"member":"AppA", "limit"') @('compile AppA (Win32 Debug): built in', '13 lines compiled', 'no errors, warnings or hints') @('first build here')
 Check 'compile bare dpr' (Block $b 'compile {"member":"AppB"}') @('compile AppB (Win32): built in', 'AppB-Win32\exe\AppB.exe', 'first build here', 'no errors, warnings or hints')
+# The forms member: dcc converts its text form files to binary as it links
+# them, so a malformed one fails here; the binary one is linked as it is.
+Check 'compile forms' (Block $b 'compile {"member":"AppF"}') @('compile AppF (Win32): built in', 'AppF-Win32\exe\AppF.exe', 'no errors, warnings or hints')
 Check 'compile file' (Block $b 'compile {"file"') @('compile - 2 members, those compiling Shared\uShapes.pas', '  AppA (Win32 Debug): built in', '  AppB (Win32): built in', 'no errors, warnings or hints')
 # A rebuild recompiles uMembers: its warning again, known, so not new.
 Check 'compile rebuild' (Block $b 'compile {"member":"AppA", "rebuild"') @('278 lines compiled', "warnings - 1 in the group's files:`nAppA\uMembers.pas", '  37  W1055 PUBLISHED caused RTTI', "to be added to type 'TDerived' (in TDerived)`n        published") @('[new]')
-Check 'compile no member' (Block $b 'compile {"member":"NoSuch"}') @('no member named NoSuch - the group has: AppA, AppB')
+Check 'compile no member' (Block $b 'compile {"member":"NoSuch"}') @('no member named NoSuch - the group has: AppA, AppB, AppF')
 Check 'compile bad show' (Block $b 'compile {"show"') @('`show` is new, warnings or all')
-Check 'compile nothing changed' (Block $b 'compile {}') @('no file has changed since the server started - name the `member` to build (the group has: AppA, AppB)')
+Check 'compile nothing changed' (Block $b 'compile {}') @('no file has changed since the server started - name the `member` to build (the group has: AppA, AppB, AppF)')
 Check 'outline' (Block $b 'outline {"file":"Shared') @('21  type TCircle = class', '27    property Radius: Double', '53  function TCircle.Area: Double', '40 implementation')
 # A parameter list whole: PasTree's outline cuts one at 80 characters.
 Check 'outline signature' (Block $b 'outline {"file":"AppB') @("71    function Configure(const AFirstName: string; ASecondValue: Integer; const AThirdName: string = 'third'; AFourthFlag: Boolean = False): Boolean`n", '85  procedure TWideBox.Many(const AAlphaName, ABetaName, AGammaName: string; ADeltaCount, AEpsilonCount, AZetaCount: Integer; const AEtaText, AThetaText, AIotaText: string)') @('...')
@@ -218,9 +222,9 @@ Check 'strict members' (Block $b 'members {"symbol":"TDerived"}') @('8 members',
 # project B's alone.
 Check 'strict callees' (Block $b 'callees {"symbol":"TotalArea"}') @('1 call reaching 5 routines', "  TBigCircle`n    13  [at 75 via IShape.Area]")
 # Each member's closure read from its own analysis.
-Check 'strict impact' (Block $b 'impact {"symbol":"TCircle.Area"}') @('members to build and test: AppA, AppB (all 2)', 'callers - 3 calls in 3 routines')
-Check 'strict impact unit' (Block $b 'impact {"symbol":"uMembers"}') @('members to build and test: AppA (not reached: AppB)')
-Check 'strict impact diff' (Block $b 'impact {"diff":"diff --git') @('members to build and test: AppA, AppB (all 2)', 'AppB\uBoxes.pas  [AppB]', 'Shared\uShapes.pas - interface changed, used by 3 units: AppB, uAppA, uAppB', 'callers and uses - 5 in 4 routines')
+Check 'strict impact' (Block $b 'impact {"symbol":"TCircle.Area"}') @('members to build and test: AppA, AppB (not reached: AppF)', 'callers - 3 calls in 3 routines')
+Check 'strict impact unit' (Block $b 'impact {"symbol":"uMembers"}') @('members to build and test: AppA (not reached: AppB, AppF)')
+Check 'strict impact diff' (Block $b 'impact {"diff":"diff --git') @('members to build and test: AppA, AppB (not reached: AppF)', 'AppB\uBoxes.pas  [AppB]', 'Shared\uShapes.pas - interface changed, used by 3 units: AppB, uAppA, uAppB', 'callers and uses - 5 in 4 routines')
 Check 'strict compile file' (Block $b 'compile {"file"') @('compile - 2 members, those compiling Shared\uShapes.pas', '  AppA (Win32 Debug): built in', '  AppB (Win32): built in')
 
 # ---- 3. MCP over stdio, with an edit in between ------------------------------------

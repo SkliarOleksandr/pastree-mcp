@@ -134,7 +134,9 @@ server would start with. The report sets the tokens of the answer against the
 grep output with and without context lines, and sorts every grep hit: in the
 answer, in a comment or string, or a namesake - and the answer rows grep did
 not find. `-Detail N` lists those hits. The baseline is a lower bound: one pass
-per pattern, no file opened to tell hits apart.
+per pattern, no file opened to tell hits apart. A `grep` line searches the
+Pascal sources; `grep-dfm` the text form files (`.dfm`, `.fmx`) with them, and
+skips a binary form file, as ripgrep does.
 
 ## Status
 

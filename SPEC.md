@@ -527,6 +527,25 @@ gap between the answers and the truth.
   (`inherited Foo: TFoo`) resolves against its ancestor's form.
 - The file is found beside the unit through `{$R *.dfm}`; a unit with that
   directive and no file is itself worth reporting.
+- PasTree reads and binds form files since 0.59.0 (`PasTree.Dfm`,
+  `TPasFormBinder`, `TPasNavigator.FindFormSites`): the rules are TReader's,
+  a binary file is converted in memory and listed, and each site says what
+  it is (component, class, handler, component reference), on which component
+  and how it is reached (own, inline frame, another module's Name).
+- Its questions come first: the `forms-*` rows of `tests\fixture.bench`, over
+  the fixture's AppF - a data module named from a form, a frame placed
+  inline with its button's handler set by the host, an inherited form that
+  rebinds a click and binds its parent's handler on a component of its own,
+  a binary form file. The bench's `grep-dfm` searches the text form files
+  with the sources, one call as a grep with no file filter, and skips a
+  binary one as ripgrep does. Measured on the client group before the
+  server reads a form: 1,075 form files, 5 of them binary, 846 inherited,
+  126 with an inline frame. A cancel button's handler, which no code calls
+  and of which `callers` says "none found", is a name written on 261 lines
+  of sources and forms, one of them the binding asked about; a panel field
+  of one name is declared by 22 classes and reopened by 222 form files; the
+  components of the main form are 7,188 lines of `.dfm`, 82k tokens to read
+  with the inherited forms behind it.
 
 ### 9.6 Refactoring and new code
 

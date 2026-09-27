@@ -6,5 +6,8 @@
         <Projects Include="AppB\AppB.dpr">
             <Dependencies/>
         </Projects>
+        <Projects Include="AppF\AppF.dpr">
+            <Dependencies/>
+        </Projects>
     </ItemGroup>
 </Project>

@@ -60,3 +60,8 @@ LICENSE text eol=lf
 # Compiled/binary output that may end up tracked: never touched.
 *.res   binary
 *.ico   binary
+
+# A form file saved binary, the resource format older IDEs wrote - a fixture
+# of what the server must read without grep's help. The `*.dfm` rule above
+# would turn its bytes into CRLF text.
+tests/fixtures/group/AppF/uBinaryForm.dfm binary

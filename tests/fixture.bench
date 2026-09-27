@@ -12,6 +12,10 @@
 #   grep <regex>                what an agent without the server would grep,
 #                               case-insensitive, over the group's sources
 #   grep-in <path> <regex>      the same over the files under one path
+#   grep-dfm <regex>            the same over the sources and the text form
+#                               files (.dfm, .fmx) together, one call - a grep
+#                               with no file filter; binary form files are
+#                               skipped, as ripgrep skips them
 #   descendants <class>         grep for `= class(<names>` level by level from
 #                               <class>, every name of a level in one call
 #   read <file> [<from> <count>]  a file (or lines of one) it would read, 2000
@@ -31,7 +35,7 @@ call related {"relation":"creations", "symbol":"TCircle"}
 grep TCircle\.Create\b
 
 == descendants-shape | Which classes derive from TShape, directly or not?
-call related {"relation":"descendants", "symbol":"TShape"}
+call related {"relation":"descendants", "symbol":"uShapes.TShape"}
 descendants TShape
 
 == outline-shapes | What is in uShapes?
@@ -72,3 +76,48 @@ also outline {"file":"AppA\\uMembers.pas", "owner":"TDerived"}
 also outline {"file":"AppA\\uMembers.pas", "owner":"TBase"}
 grep \b(TDerived|TBase)\s*=\s*class\b
 read AppA\uMembers.pas 15 25
+
+# ---- forms (SPEC 9.5) ----------------------------------------------------------
+# What AppF's .dfm files bind by name, which no search of the Pascal sources
+# sees. The calls are the ones that answer once the server reads forms - `form`
+# is a tool still to be built; until then their answers are the gap.
+
+== forms-refs-handler | Where is TfrmMain.btnSaveClick used, the forms included?
+call references {"symbol":"TfrmMain.btnSaveClick"}
+grep-dfm \bbtnSaveClick\b
+
+== forms-callers-handler | What runs TfrmMain.btnSaveClick? No code calls it.
+call callers {"symbol":"TfrmMain.btnSaveClick"}
+grep-dfm \bbtnSaveClick\b
+
+== forms-refs-component | Where is the TfrmMain.edtName component used?
+call references {"symbol":"TfrmMain.edtName"}
+grep-dfm \bedtName\b
+
+== forms-refs-frame | Where is the TfraName frame used, placed inline included?
+call references {"symbol":"TfraName"}
+grep-dfm \bTfraName\b
+
+== forms-refs-module | What names the data module's pmActions menu?
+call references {"symbol":"TdmData.pmActions"}
+grep-dfm \bpmActions\b
+
+== forms-refs-binary | Where is TfrmBinary.btnBinaryClick bound? Its form file is binary.
+call references {"symbol":"TfrmBinary.btnBinaryClick"}
+grep-dfm \bbtnBinaryClick\b
+
+== forms-impact-handler | What must change with TfrmMain.btnSaveClick renamed?
+call impact {"symbol":"TfrmMain.btnSaveClick"}
+grep-dfm \bbtnSaveClick\b
+
+== forms-form-main | What does frmMain contain, and which method does each component run?
+call form {"file":"AppF\\uMainForm.pas"}
+also outline {"file":"AppF\\uMainForm.pas", "owner":"TfrmMain"}
+read AppF\uMainForm.dfm
+read AppF\uFrame.dfm
+
+== forms-form-child | What does frmChild contain - what it inherits included?
+call form {"file":"AppF\\uChildForm.pas"}
+also outline {"file":"AppF\\uChildForm.pas", "owner":"TfrmChild"}
+read AppF\uChildForm.dfm
+read AppF\uMainForm.dfm

@@ -20,7 +20,10 @@
 # The baseline is a LOWER bound on what an agent pays: it counts one pass of
 # each pattern and no file opened to disambiguate. The files grep searches are
 # the Delphi sources under the group directory (git's view of them when it is
-# a repository - ripgrep's view too).
+# a repository - ripgrep's view too); a `grep-dfm` line searches the text form
+# files (.dfm, .fmx) with them, where a form binds its handlers and
+# components by name. A binary form file is skipped, as ripgrep skips it -
+# the agent does not see what it binds.
 param(
     [Parameter(Mandatory = $true)][string]$Project,
     [Parameter(Mandatory = $true)][string]$Bench,
@@ -66,6 +69,12 @@ public class BenchCorpus {
     public List<string> Paths = new List<string>();
     List<string[]> raw = new List<string[]>();
     List<string[]> code = new List<string[]>();
+    // Form files (.dfm, .fmx) are searched by grep-dfm only: a plain grep
+    // line keeps the Pascal sources it always searched, so earlier reports
+    // stay comparable.
+    List<bool> form = new List<bool>();
+    public int FormFiles;
+    public int BinaryForms;     // skipped, as ripgrep skips a file with a NUL
 
     static readonly Encoding Utf8Strict = new UTF8Encoding(false, true);
     static readonly Encoding Ansi = Encoding.GetEncoding(1252);
@@ -86,17 +95,29 @@ public class BenchCorpus {
         return s.Split('\n');
     }
 
-    public void Add(string relPath, string fullPath) {
+    public void Add(string relPath, string fullPath, bool isForm) {
+        if (isForm) {
+            // A binary form file (resource format or a bare TPF0 stream) is
+            // not text to grep: Claude Code's Grep, ripgrep, shows nothing
+            // of it.
+            byte[] b = File.ReadAllBytes(fullPath);
+            if (Array.IndexOf(b, (byte)0) >= 0) { BinaryForms++; return; }
+            FormFiles++;
+        }
         string[] lines = ReadLines(fullPath);
         Paths.Add(relPath);
         raw.Add(lines);
         code.Add(Blank(lines));
+        form.Add(isForm);
     }
 
     public string Text(int file, int line) { return raw[file][line - 1]; }
 
-    public int Lines {
-        get { int n = 0; foreach (string[] l in raw) n += l.Length; return n; }
+    // Lines of the Pascal sources, or of the form files.
+    public int LinesOf(bool forms) {
+        int n = 0;
+        for (int f = 0; f < raw.Count; f++) if (form[f] == forms) n += raw[f].Length;
+        return n;
     }
 
     // Comments, directives and string literals replaced by spaces, columns kept.
@@ -150,7 +171,7 @@ public class BenchCorpus {
         while (level.Count > 0) {
             List<string> esc = new List<string>();
             foreach (string n in level) esc.Add(Regex.Escape(n));
-            BenchGrep g = Grep(@"=\s*class\s*\(\s*(" + string.Join("|", esc.ToArray()) + @")\s*[,)<]", context, "");
+            BenchGrep g = Grep(@"=\s*class\s*\(\s*(" + string.Join("|", esc.ToArray()) + @")\s*[,)<]", context, "", false);
             all.Calls++;
             all.Chars += g.Chars; all.CharsCtx += g.CharsCtx;
             all.Hits.AddRange(g.Hits);
@@ -164,10 +185,11 @@ public class BenchCorpus {
         return all;
     }
 
-    public BenchGrep Grep(string pattern, int context, string pathPrefix) {
+    public BenchGrep Grep(string pattern, int context, string pathPrefix, bool forms) {
         Regex re = new Regex(pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
         BenchGrep g = new BenchGrep();
         for (int f = 0; f < raw.Count; f++) {
+            if (form[f] && !forms) continue;
             if (pathPrefix.Length > 0 && !Paths[f].StartsWith(pathPrefix, StringComparison.OrdinalIgnoreCase)) continue;
             string[] lines = raw[f];
             string p = Paths[f];
@@ -211,11 +233,12 @@ foreach ($line in [IO.File]::ReadAllLines((Resolve-Path $Bench).Path)) {
     elseif ($t -match '^also\s+(.+)$') { $q.Also += $Matches[1] }
     elseif ($t -match '^grep\s+(.+)$') { $q.Greps += [pscustomobject]@{ Kind = 'grep'; In = ''; Arg = $Matches[1] } }
     elseif ($t -match '^grep-in\s+(\S+)\s+(.+)$') { $q.Greps += [pscustomobject]@{ Kind = 'grep'; In = $Matches[1]; Arg = $Matches[2] } }
+    elseif ($t -match '^grep-dfm\s+(.+)$') { $q.Greps += [pscustomobject]@{ Kind = 'grep-dfm'; In = ''; Arg = $Matches[1] } }
     elseif ($t -match '^descendants\s+(\S+)$') { $q.Greps += [pscustomobject]@{ Kind = 'descendants'; In = ''; Arg = $Matches[1] } }
     elseif ($t -match '^read\s+(\S+)(?:\s+(\d+)\s+(\d+))?$') {
         $q.Reads += [pscustomobject]@{ File = $Matches[1]; From = $Matches[2]; Count = $Matches[3] }
     }
-    else { throw "$Bench($lineNo): expected call, also, grep, grep-in, descendants or read: $t" }
+    else { throw "$Bench($lineNo): expected call, also, grep, grep-in, grep-dfm, descendants or read: $t" }
 }
 foreach ($q in $questions) { if (-not $q.Call) { throw "question $($q.Id) has no call" } }
 
@@ -265,8 +288,11 @@ foreach ($q in $questions) {
 # (file, line) pairs an answer names. Rows: those under a file heading, and
 # file:line written inline (find, descendants). Heading: the file:line of the
 # answer's first line - the symbol's own declaration, which a grep hit is not
-# noise for, but which is not a row grep should have found.
-$src = '\.(pas|dpr|dpk|inc)'
+# noise for, but which is not a row grep should have found. A row of a form
+# file is a site like any other.
+$src = '\.(pas|dpr|dpk|inc|dfm|fmx)'
+$pascal = '\.(pas|dpr|dpk|inc)'
+$forms = '\.(dfm|fmx)'
 function Answer-Sites($Answer) {
     $rows = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
     $heading = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
@@ -303,11 +329,14 @@ try {
 finally { Pop-Location }
 $corpus = New-Object BenchCorpus
 foreach ($r in $rel) {
-    if ($r -notmatch "$src$") { continue }
+    $isForm = $r -match "$forms$"
+    if (-not $isForm -and ($r -notmatch "$pascal$")) { continue }
     $full = Join-Path $root $r
-    if (Test-Path -LiteralPath $full) { $corpus.Add($r.Replace('/', '\'), $full) }
+    if (Test-Path -LiteralPath $full) { $corpus.Add($r.Replace('/', '\'), $full, $isForm) }
 }
-Write-Host ("  corpus: {0} files, {1:N0} lines, {2:N1} s" -f $corpus.Paths.Count, $corpus.Lines, $sw.Elapsed.TotalSeconds)
+$pascalFiles = $corpus.Paths.Count - $corpus.FormFiles
+Write-Host ("  corpus: {0} files, {1:N0} lines; form files {2}, {3:N0} lines, {4} binary skipped; {5:N1} s" -f `
+    $pascalFiles, $corpus.LinesOf($false), $corpus.FormFiles, $corpus.LinesOf($true), $corpus.BinaryForms, $sw.Elapsed.TotalSeconds)
 
 # ---- compare -------------------------------------------------------------------
 function Read-Chars($Read) {
@@ -332,7 +361,7 @@ foreach ($i in 0..($questions.Count - 1)) {
     $otherText = New-Object System.Collections.ArrayList
     foreach ($p in $q.Greps) {
         if ($p.Kind -eq 'descendants') { $g = $corpus.Descendants($p.Arg, $Context) }
-        else { $g = $corpus.Grep($p.Arg, $Context, $p.In) }
+        else { $g = $corpus.Grep($p.Arg, $Context, $p.In, ($p.Kind -eq 'grep-dfm')) }
         $grepChars += $g.Chars; $ctxChars += $g.CharsCtx
         $calls += [Math]::Max($g.Calls, [Math]::Ceiling($g.Hits.Count / $GrepCap))
         foreach ($h in $g.Hits) {
@@ -376,8 +405,9 @@ function Ratio($b, $t) { if ($t -le 0) { return '-' }; return ('{0:N1}x' -f ($b 
 $md = New-Object System.Collections.ArrayList
 [void]$md.Add("# pastree-mcp against grep")
 [void]$md.Add("")
-[void]$md.Add(("Group ``{0}``, policy {1}, {2} questions, {3} files / {4:N0} lines searched by grep, {5} ({6:yyyy-MM-dd HH:mm})." -f `
-    (Split-Path -Leaf $Project), $Groups, $rows.Count, $corpus.Paths.Count, $corpus.Lines, (& $Exe --version 2>$null | Select-Object -First 1), (Get-Date)))
+[void]$md.Add(("Group ``{0}``, policy {1}, {2} questions, {3} files / {4:N0} lines searched by grep - with {5} form files / {6:N0} lines by grep-dfm ({7} binary ones skipped, as grep skips them) - {8} ({9:yyyy-MM-dd HH:mm})." -f `
+    (Split-Path -Leaf $Project), $Groups, $rows.Count, $pascalFiles, $corpus.LinesOf($false), $corpus.FormFiles, $corpus.LinesOf($true),
+    $corpus.BinaryForms, (& $Exe --version 2>$null | Select-Object -First 1), (Get-Date)))
 [void]$md.Add("")
 [void]$md.Add("Tokens are characters / 4. **grep** = the grep output alone plus the reads; **+ctx** = with $Context lines of context, the least it takes to tell a real hit from a namesake. Both are lower bounds: one pass per pattern, no file opened. **calls** = baseline tool calls at Grep's $GrepCap-line page. Hits: **ans** in the answer, **c/s** inside a comment or string, **oth** other (a namesake, or a row the answer lacks); **miss** = answer rows grep did not find. **also** = the tokens of the calls to the other tools it replaces, and how many (`also` lines of the bench).")
 [void]$md.Add("")
@@ -400,6 +430,7 @@ foreach ($r in $rows) {
     foreach ($p in $r.Greps) {
         if ($p.Kind -eq 'descendants') { [void]$md.Add("  - grep, level by level: ``=\s*class\s*\(\s*(<names>)`` from ``$($p.Arg)``") }
         elseif ($p.In) { [void]$md.Add("  - grep in ``$($p.In)``: ``$($p.Arg)``") }
+        elseif ($p.Kind -eq 'grep-dfm') { [void]$md.Add("  - grep, form files too: ``$($p.Arg)``") }
         else { [void]$md.Add("  - grep: ``$($p.Arg)``") }
     }
     foreach ($x in $r.Reads) { [void]$md.Add("  - read: ``$($x.File)$(if ($x.From) { " $($x.From) +$($x.Count)" })``") }

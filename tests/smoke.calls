@@ -33,13 +33,13 @@ references {"symbol":"TShape.Area"}
 references {"file":"AppA\\uAppA.pas", "line":21, "name":"Radius"}
 references {"symbol":"uShapes"}
 references {"symbol":"TCircle.FRadius"}
-related {"relation":"descendants", "symbol":"TShape"}
+related {"relation":"descendants", "symbol":"uShapes.TShape"}
 related {"relation":"overrides", "symbol":"TShape.Area"}
 related {"relation":"implementations", "symbol":"IShape"}
 related {"relation":"implementations", "symbol":"IShape.Area"}
 related {"relation":"assignments", "symbol":"TCircle.FRadius"}
 related {"relation":"creations", "symbol":"TCircle"}
-related {"relation":"destructions", "symbol":"TShape"}
+related {"relation":"destructions", "symbol":"uShapes.TShape"}
 callers {"symbol":"TCircle.Area"}
 callers {"symbol":"TCircle.Area", "depth":3}
 callers {"symbol":"TShapeBox.GetItem", "depth":2}
@@ -74,6 +74,7 @@ impact {}
 compile {"member":"AppA"}
 compile {"member":"AppA", "limit":60}
 compile {"member":"AppB"}
+compile {"member":"AppF"}
 compile {"file":"Shared\\uShapes.pas"}
 compile {"member":"AppA", "rebuild":true, "show":"warnings"}
 compile {"member":"NoSuch"}
