@@ -163,6 +163,9 @@ Check 'callers form and code' (Block $b 'callers {"symbol":"TfrmMain.NameChange"
 Check 'callers form none' (Block $b 'callers {"symbol":"TfrmMain.NeverBound"}') @('- none found', '(TfrmMain.NeverBound: published, and no form file binds it either)')
 Check 'callers form depth' (Block $b 'callers {"symbol":"TfrmMain.Save", "depth":2}') @('- 1 call in 1 routine; depth 2: 2 form bindings', "  TfrmMain.btnSaveClick`n    47  Save;", "  btnSave`n    39  [-> TfrmMain.btnSaveClick]")
 Check 'callers no binding' (Block $b 'callers {"symbol":"TShapeBox.Changed"}') @() @('form binding')
+# A handler the descendant redeclares, bound only in its ancestor's form: a
+# TfrmChild reads uMainForm.dfm too, and its MethodAddress finds its own.
+Check 'callers ancestor form' (Block $b 'callers {"symbol":"TfrmChild.FormCreate"}') @('- no calls, 1 form binding', "AppF\uMainForm.dfm`n  frmMain (root)`n    13  [ancestor's form]  OnCreate = FormCreate")
 # callees: each routine a body reaches, at its declaration. A virtual call on
 # a TShape may run every override below it (project B's too); a property
 # write to a field calls nothing.
@@ -227,6 +230,18 @@ Check 'compile rebuild' (Block $b 'compile {"member":"AppA", "rebuild"') @('278 
 Check 'compile no member' (Block $b 'compile {"member":"NoSuch"}') @('no member named NoSuch - the group has: AppA, AppB, AppF')
 Check 'compile bad show' (Block $b 'compile {"show"') @('`show` is new, warnings or all')
 Check 'compile nothing changed' (Block $b 'compile {}') @('no file has changed since the server started - name the `member` to build (the group has: AppA, AppB, AppF)')
+# form: a form's components, their events and the components they name,
+# with the lines of the form file. An inline frame's child under the frame,
+# its handler the host's; a data module; a binary form file, said so. An
+# inherited form merged with its ancestor's file: a reopened component is
+# the descendant's row, its rebound event the descendant's method, a row
+# from the ancestor names its file. No form: said, for a unit and a class.
+Check 'form' (Block $b 'form {"file":"AppF/uMainForm.pas"}') @('form frmMain: TfrmMain - AppF\uMainForm.dfm', '5 components, 4 events bound, 2 references to components', "1  frmMain: TfrmMain`n13    OnCreate -> TfrmMain.FormCreate`n15    lblName: TLabel`n21      FocusControl -> edtName", '37      PopupMenu -> dmData.pmActions (TdmData.pmActions)', "41    fraName1: TfraName (inline frame)`n47      btnClear: TButton`n48        OnClick -> TfrmMain.fraName1btnClearClick") @('Caption', 'Left')
+Check 'form inherited' (Block $b 'form {"symbol":"TfrmChild"}') @('form frmChild: TfrmChild - AppF\uChildForm.dfm; inherits AppF\uMainForm.dfm', '6 components, 5 events bound', '13    OnCreate -> TfrmChild.FormCreate  (uMainForm.dfm)', "4    btnSave: TButton`n37      PopupMenu -> dmData.pmActions (TdmData.pmActions)  (uMainForm.dfm)`n5      OnClick -> TfrmChild.ChildSaveClick`n", "7    chkConfirm: TCheckBox`n14      OnClick -> TfrmMain.btnSaveClick") @('TfrmMain.btnSaveClick  (uMainForm.dfm)')
+Check 'form module' (Block $b 'form {"file":"AppF/uData.dfm"}') @("4    pmActions: TPopupMenu`n7      miSave: TMenuItem`n9        OnClick -> TdmData.miSaveClick")
+Check 'form binary' (Block $b 'form {"file":"AppF/uBinaryForm.pas"}') @('AppF\uBinaryForm.dfm (binary - lines of its text conversion)', '21      OnClick -> TfrmBinary.btnBinaryClick')
+Check 'form none' (Block $b 'form {"file":"AppA/uAppA.pas"}') @('AppA\uAppA.pas has no form file - no .dfm or .fmx beside it')
+Check 'form not a form class' (Block $b 'form {"symbol":"TCircle"}') @('TCircle has no form file of its own')
 Check 'outline' (Block $b 'outline {"file":"Shared') @('21  type TCircle = class', '27    property Radius: Double', '53  function TCircle.Area: Double', '40 implementation')
 # A parameter list whole: PasTree's outline cuts one at 80 characters.
 Check 'outline signature' (Block $b 'outline {"file":"AppB') @("71    function Configure(const AFirstName: string; ASecondValue: Integer; const AThirdName: string = 'third'; AFourthFlag: Boolean = False): Boolean`n", '85  procedure TWideBox.Many(const AAlphaName, ABetaName, AGammaName: string; ADeltaCount, AEpsilonCount, AZetaCount: Integer; const AEtaText, AThetaText, AIotaText: string)') @('...')
@@ -406,6 +421,10 @@ try {
     [IO.File]::WriteAllText($unit, $text, $utf8)
     $r = Rpc 20 'tools/call' '{"name":"impact","arguments":{"diff":"--- a/AppF/uMainForm.pas\n+++ b/AppF/uMainForm.pas\n@@ -20 +19,0 @@\n-    procedure btnSaveClick(Sender: TObject);\n@@ -44,6 +42,0 @@\n-// Bound by uMainForm.dfm and uChildForm.dfm; no code calls it.\n-procedure TfrmMain.btnSaveClick(Sender: TObject);\n-begin\n-  Save;\n-end;\n-\n"}}'
     Check 'impact removed handler' (ToolText $r) @('removed: TfrmMain.btnSaveClick (procedure) - still bound in a form, which then fails to load: AppF\uMainForm.dfm:39 (btnSave.OnClick), AppF\uChildForm.dfm:14 (chkConfirm.OnClick)') @('nothing unresolved names it')
+    # The same removal seen from the form: the inherited form's own component
+    # still binds the handler that is gone.
+    $r = Rpc 21 'tools/call' '{"name":"form","arguments":{"symbol":"TfrmChild"}}'
+    Check 'form after a removed handler' (ToolText $r) @('1 naming nothing', '14      OnClick -> btnSaveClick - no such published method: the form fails to load')
 
     $r = Rpc 15 'tools/call' '{"name":"no_such_tool","arguments":{}}'
     if (-not $r.result.isError) { Write-Host 'FAIL unknown tool not reported as isError'; $script:failures++ }

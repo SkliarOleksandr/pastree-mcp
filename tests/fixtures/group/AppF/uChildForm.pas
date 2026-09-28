@@ -2,7 +2,8 @@ unit uChildForm;
 
 // An inherited form: uChildForm.dfm reopens a component of its ancestor's with
 // `inherited` and binds its click to a handler of its own, and binds the
-// ancestor's handler on a component it adds.
+// ancestor's handler on a component it adds. It redeclares FormCreate, which
+// only its ancestor's form binds: MethodAddress on a TfrmChild finds its own.
 
 interface
 
@@ -13,6 +14,7 @@ type
   TfrmChild = class(TfrmMain)
     chkConfirm: TCheckBox;
     procedure ChildSaveClick(Sender: TObject);
+    procedure FormCreate(Sender: TObject);
   end;
 
 var
@@ -25,6 +27,11 @@ implementation
 procedure TfrmChild.ChildSaveClick(Sender: TObject);
 begin
   NameChange(Sender);
+end;
+
+procedure TfrmChild.FormCreate(Sender: TObject);
+begin
+  chkConfirm.Checked := True;
 end;
 
 end.

@@ -59,6 +59,7 @@ callers {"symbol":"TfrmMain.btnSaveClick"}
 callers {"symbol":"TfrmMain.NameChange"}
 callers {"symbol":"TfrmMain.NeverBound"}
 callers {"symbol":"TfrmMain.Save", "depth":2}
+callers {"symbol":"TfrmChild.FormCreate"}
 callees {"symbol":"RunA"}
 callees {"symbol":"TotalArea"}
 callees {"symbol":"TShapeBox.BoxClick", "depth":2}
@@ -92,6 +93,12 @@ compile {"member":"AppA", "rebuild":true, "show":"warnings"}
 compile {"member":"NoSuch"}
 compile {"show":"some"}
 compile {}
+form {"file":"AppF/uMainForm.pas"}
+form {"symbol":"TfrmChild"}
+form {"file":"AppF/uData.dfm"}
+form {"file":"AppF/uBinaryForm.pas"}
+form {"file":"AppA/uAppA.pas"}
+form {"symbol":"TCircle"}
 outline {"file":"Shared\\uShapes.pas"}
 outline {"file":"AppB\\uBoxes.pas", "section":"implementation"}
 unit_deps {"unit":"uShapes"}

@@ -1342,6 +1342,10 @@ begin
   LH.Where := FormObjectPath(ASite);
   if ASite.IsBinary then
     LH.FileNote := 'binary - lines of its text conversion';
+  // The line binds the ancestor's method of the name for the ancestor's own
+  // forms too: a rename cannot rewrite it.
+  if ASite.Via = fsvAncestor then
+    LH.Tag := 'ancestor''s form';
   FList.Add(LH);
   Inc(FForms);
 end;
@@ -3556,6 +3560,8 @@ begin
     LRow.Binding := True;
     if (ANode.Level > 0) or FTagRoots then
       LRow.Callee := ANode.Name;
+    if LS.Via = fsvAncestor then
+      LRow.Note := 'ancestor''s form';
     FRows.Add(LRow);
   end;
 end;
@@ -5955,6 +5961,326 @@ begin
   if LResult <> NIL_NODE then
     Result := Result + ': ' + PartText(LResult);
   Result := CutDecl(Result);
+end;
+
+type
+  // A value of the merged form: `OnClick -> TfrmMain.btnSaveClick`.
+  TFormBind = record
+    Prop, Text: string;
+    FileIdx, Line: Integer;
+    Kind: Integer;               // 0 an event, 1 a component, 2 names nothing
+  end;
+
+  // A component of the merged form: the ancestors' objects, reopened by
+  // `inherited X` in the descendants' files.
+  TFormNode = record
+    Name, ClassName: string;
+    Kind: TPasDfmObjectKind;
+    FileIdx, Line: Integer;      // the most derived file that writes it
+    NoField: Boolean;            // named, and no published field is filled
+    Binds: TArray<TFormBind>;
+    Children: TArray<Integer>;
+  end;
+
+{ The component tree of one form (SPEC 9.5): what the Object Inspector shows
+  without the plain properties - each component with its class, the events
+  it binds and to which method, the components it names. An inherited form
+  is merged with its ancestors' form files, as the form designer shows it:
+  `inherited X` reopens the ancestor's X, and a value set in a descendant
+  replaces the ancestor's. The binding is PasTree's (DescribeForm) - TReader's
+  rules: an inline frame's children are the frame's fields, a handler is the
+  root's method. A value that should name something and does not is said:
+  an event whose method is gone fails the form when it loads. }
+function ToolForm(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
+var
+  LFile, LForm, LUnit, LExt, LKey, LText, LLine: string;
+  LA: TMcpAnalysis;
+  LMid, LLimit, LShown, LTotal, LNode, LComponents, LEvents, LRefs,
+    LUnbound: Integer;
+  LT: TTarget;
+  LInfo: TPasFormInfo;
+  LInfos: TList<TPasFormInfo>;
+  LK: TSemaXType;
+  LRole: TPasFormRole;
+  LNodes: TList<TFormNode>;
+  LByKey: TDictionary<string, Integer>;
+  LKeys: TArray<string>;
+  LObjNode: TArray<Integer>;
+  LN: TFormNode;
+  LB: TFormBind;
+  LBx: TPasFormBinding;
+  LFMid, LFSym, LCtx: Integer;
+  LSb, LRows: TStringBuilder;
+  LErrors: TStringList;
+
+  function BindText(const AB: TPasFormBinding; out AKind: Integer): string;
+  var
+    LQ: string;
+  begin
+    if AB.TSym = NIL_SYM then
+    begin
+      AKind := 2;
+      if AB.IsMethod then
+        Exit(Format('%s -> %s - no such published method: the form fails to '
+          + 'load', [AB.PropName, AB.Value]));
+      Exit(Format('%s -> %s - names no component', [AB.PropName, AB.Value]));
+    end;
+    LQ := QualifiedName(LA.Proj.Model(AB.TMid), AB.TSym);
+    if AB.IsMethod then
+    begin
+      AKind := 0;
+      Exit(Format('%s -> %s', [AB.PropName, LQ]));
+    end;
+    AKind := 1;
+    if SameText(AB.Value, Copy(LQ, LastDelimiter('.', LQ) + 1, MaxInt)) then
+      Result := Format('%s -> %s', [AB.PropName, AB.Value])
+    else
+      Result := Format('%s -> %s (%s)', [AB.PropName, AB.Value, LQ]);
+  end;
+
+  function FileNote(AIdx: Integer): string;
+  begin
+    if AIdx = LInfos.Count - 1 then
+      Result := ''
+    else
+      Result := '  (' + ExtractFileName(LInfos[AIdx].FilePath) + ')';
+  end;
+
+  procedure Emit(ANode, ADepth: Integer);
+  var
+    LIndent, LKind: string;
+    LNd: TFormNode;
+  begin
+    LNd := LNodes[ANode];
+    LIndent := StringOfChar(' ', 2 * ADepth);
+    Inc(LTotal);
+    if LShown < LLimit then
+    begin
+      LKind := '';
+      if LNd.Kind = dokInline then
+        LKind := ' (inline frame)';
+      if LNd.NoField then
+        LKind := LKind + ' (no field)';
+      LRows.AppendLine(Format('%d  %s%s: %s%s%s', [LNd.Line, LIndent, LNd.Name,
+        LNd.ClassName, LKind, FileNote(LNd.FileIdx)]));
+      Inc(LShown);
+    end;
+    for var LBd in LNd.Binds do
+    begin
+      Inc(LTotal);
+      if LShown < LLimit then
+      begin
+        LRows.AppendLine(Format('%d  %s  %s%s', [LBd.Line, LIndent, LBd.Text,
+          FileNote(LBd.FileIdx)]));
+        Inc(LShown);
+      end;
+    end;
+    for var LChild in LNd.Children do
+      Emit(LChild, ADepth + 1);
+  end;
+
+begin
+  LLimit := EnsureRange(ArgInt(AArgs, 'limit', 400), 1, 20000);
+  LA := nil;
+  if ArgStr(AArgs, 'file') <> '' then
+  begin
+    LFile := ArgFile(AWs, AArgs);
+    LExt := LowerCase(TPath.GetExtension(LFile));
+    if (LExt = '.dfm') or (LExt = '.fmx') then
+    begin
+      LForm := LFile;
+      LUnit := ChangeFileExt(LFile, '.pas');
+    end
+    else
+    begin
+      LUnit := LFile;
+      LForm := PasDfmFileOfUnit(LFile);
+      if LForm = '' then
+        raise EToolError.CreateFmt('%s has no form file - no .dfm or .fmx '
+          + 'beside it', [AWs.RelPath(LFile)]);
+    end;
+    if not ModelOfFile(AWs, LUnit, LA, LMid) then
+      raise EToolError.CreateFmt('%s is not part of any analyzed project',
+        [AWs.RelPath(LUnit)]);
+  end
+  else if ArgStr(AArgs, 'symbol') <> '' then
+  begin
+    LT := ResolveNamed(AWs, ArgStr(AArgs, 'symbol'), 'class');
+    for var LCand in AWs.Analyses do
+      if LT.Ids[LCand.Index].Mid >= 0 then
+      begin
+        LA := LCand;
+        Break;
+      end;
+    if LA = nil then
+      raise EToolError.CreateFmt('%s is in no analysis', [LT.Name]);
+    LRole := LA.Nav.FormRoleOf(LT.Ids[LA.Index].Mid, LT.Ids[LA.Index].Sym);
+    if LRole.FormFile = '' then
+      raise EToolError.CreateFmt('%s has no form file of its own - no form '
+        + 'file of the group has it as its root class', [LT.Name]);
+    LForm := LRole.FormFile;
+  end
+  else
+    raise EToolError.Create('give `file` (a unit or its .dfm/.fmx) or '
+      + '`symbol` (the form''s class)');
+  if not LA.Nav.DescribeForm(LForm, LInfo) then
+    raise EToolError.CreateFmt('%s: %s', [AWs.RelPath(LForm), LInfo.Error]);
+
+  LInfos := TList<TPasFormInfo>.Create;
+  LNodes := TList<TFormNode>.Create;
+  LByKey := TDictionary<string, Integer>.Create;
+  LSb := TStringBuilder.Create;
+  LRows := TStringBuilder.Create;
+  LErrors := TStringList.Create;
+  try
+    // The ancestors' forms, the deepest first: a library's (TForm's) has
+    // none the group reads.
+    LInfos.Add(LInfo);
+    LK := LA.Proj.CanonTypeX(LA.Proj.AncestorOfX(LInfo.RootClass));
+    for var LDepth := 1 to 32 do
+    begin
+      if not XValid(LK) then
+        Break;
+      LRole := LA.Nav.FormRoleOf(LK.UnitId, LK.Sym);
+      if (LRole.FormFile <> '') and LA.Nav.DescribeForm(LRole.FormFile,
+         LInfo) then
+        LInfos.Insert(0, LInfo);
+      LK := LA.Proj.CanonTypeX(LA.Proj.AncestorOfX(LK));
+    end;
+
+    LComponents := 0;
+    for var LFi := 0 to LInfos.Count - 1 do
+    begin
+      LInfo := LInfos[LFi];
+      if LInfo.Error <> '' then
+        LErrors.Add(Format('%s could not be read whole (%s) - what was read '
+          + 'before is shown', [AWs.RelPath(LInfo.FilePath), LInfo.Error]));
+      SetLength(LObjNode, Length(LInfo.Objects));
+      SetLength(LKeys, Length(LInfo.Objects));
+      for var LO in LInfo.Objects do
+      begin
+        // The key a descendant's `inherited X` reopens: the names from the
+        // root down. An unnamed object is its file's own.
+        if LO.Parent < 0 then
+          LKey := ''
+        else if LO.Name <> '' then
+          LKey := LKeys[LO.Parent] + '.' + LowerCase(LO.Name)
+        else
+          LKey := Format('%s.#%d:%d', [LKeys[LO.Parent], LFi, LO.Obj]);
+        LKeys[LO.Obj] := LKey;
+        if LByKey.TryGetValue(LKey, LNode) then
+          LN := LNodes[LNode]
+        else
+        begin
+          LN := Default(TFormNode);
+          LNode := LNodes.Count;
+          LNodes.Add(LN);
+          LByKey.Add(LKey, LNode);
+          if LO.Parent >= 0 then
+          begin
+            LN := LNodes[LObjNode[LO.Parent]];
+            LN.Children := LN.Children + [LNode];
+            LNodes[LObjNode[LO.Parent]] := LN;
+            Inc(LComponents);
+          end;
+          LN := LNodes[LNode];
+        end;
+        LObjNode[LO.Obj] := LNode;
+        LN.Name := IfThen(LO.Name <> '', LO.Name, '(unnamed)');
+        LN.ClassName := LO.ClassName;
+        if LO.Kind <> dokInherited then
+          LN.Kind := LO.Kind;
+        LN.FileIdx := LFi;
+        LN.Line := LO.Line;
+        LN.NoField := (LO.Parent >= 0) and (LO.Name <> '') and
+          (LO.FieldSym = NIL_SYM);
+        LNodes[LNode] := LN;
+      end;
+      for var LBi in LInfo.Bindings do
+      begin
+        // An ancestor's line runs on an instance of the asked form: its
+        // MethodAddress finds the most derived published method of the name
+        // - a descendant's redeclaration, not the ancestor's.
+        LBx := LBi;
+        if (LFi < LInfos.Count - 1) and LBx.IsMethod and
+           XValid(LInfos[LInfos.Count - 1].RootClass) and
+           LA.Proj.FindMemberX(LInfos[LInfos.Count - 1].RootClass.UnitId,
+           LInfos[LInfos.Count - 1].RootClass, LowerCase(LBx.Value), LFMid,
+           LFSym, LCtx) and (LFMid >= 0) and (LFSym <> NIL_SYM) and
+           (LA.Proj.Model(LFMid).Symbols[LFSym].Kind = skRoutine) and
+           (LA.Proj.Model(LFMid).Symbols[LFSym].Visibility in [svDefault,
+           svPublished]) then
+        begin
+          LBx.TMid := LFMid;
+          LBx.TSym := LFSym;
+        end;
+        LB.Prop := LBx.PropName;
+        LB.Text := BindText(LBx, LB.Kind);
+        LB.FileIdx := LFi;
+        LB.Line := LBi.Line;
+        LN := LNodes[LObjNode[LBi.Obj]];
+        LNode := -1;
+        for var LI := 0 to High(LN.Binds) do
+          if SameText(LN.Binds[LI].Prop, LB.Prop) then
+            LNode := LI;
+        // A descendant's value replaces the ancestor's.
+        if LNode >= 0 then
+          LN.Binds[LNode] := LB
+        else
+          LN.Binds := LN.Binds + [LB];
+        LNodes[LObjNode[LBi.Obj]] := LN;
+      end;
+    end;
+    // Counted over the merged form: a replaced value is not two.
+    LEvents := 0;
+    LRefs := 0;
+    LUnbound := 0;
+    for var LNd in LNodes do
+      for var LBd in LNd.Binds do
+        case LBd.Kind of
+          0: Inc(LEvents);
+          1: Inc(LRefs);
+        else
+          Inc(LUnbound);
+        end;
+
+    LInfo := LInfos[LInfos.Count - 1];
+    LLine := Format('form %s: %s - %s', [LNodes[0].Name, LNodes[0].ClassName,
+      AWs.RelPath(LInfo.FilePath)]);
+    if LInfo.IsBinary then
+      LLine := LLine + ' (binary - lines of its text conversion)';
+    if LInfos.Count > 1 then
+    begin
+      LText := '';
+      for var LFi := LInfos.Count - 2 downto 0 do
+        LText := LText + IfThen(LText <> '', ', ', '') +
+          AWs.RelPath(LInfos[LFi].FilePath);
+      LLine := LLine + '; inherits ' + LText + ' - a row from one of those '
+        + 'names its file';
+    end;
+    LSb.AppendLine(LLine);
+    LSb.AppendLine(Format('%s, %s bound, %s to components%s', [Plural(
+      LComponents, 'component'), Plural(LEvents, 'event'), Plural(LRefs,
+      'reference'), IfThen(LUnbound > 0, Format(', %d naming nothing',
+      [LUnbound]), '')]));
+    for var LE in LErrors do
+      LSb.AppendLine('(' + LE + ')');
+    LShown := 0;
+    LTotal := 0;
+    Emit(0, 0);
+    LSb.Append(LRows.ToString);
+    if LTotal > LShown then
+      LSb.AppendLine(Format('... %d more rows (raise `limit`)',
+        [LTotal - LShown]));
+    Result := LSb.ToString.TrimRight;
+  finally
+    LErrors.Free;
+    LRows.Free;
+    LSb.Free;
+    LByKey.Free;
+    LNodes.Free;
+    LInfos.Free;
+  end;
 end;
 
 function ToolOutline(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
@@ -9299,6 +9625,22 @@ const
     + 'and method declarations inside types (default true)"}},'
     + '"required":["file"]}},' +
 
+    '{"name":"form","description":"The component tree of one form without '
+    + 'reading its .dfm: each component with its class, the events it binds '
+    + 'and to which method (OnClick -> TfrmMain.btnSaveClick), the components '
+    + 'it names (FocusControl, a data module''s component), each with its '
+    + 'line in the form file. An inherited form is shown merged with its '
+    + 'ancestors'' form files, as the form designer shows it; a row from an '
+    + 'ancestor names its file. A handler whose method is gone - the form '
+    + 'fails to load - and a component a value names that does not exist are '
+    + 'said. Plain properties (Left, Caption) are left out.",'
+    + '"inputSchema":{"type":"object","properties":{'
+    + '"file":{"type":"string","description":"The form''s unit or its '
+    + '.dfm/.fmx, absolute or relative to the project group directory"},'
+    + '"symbol":{"type":"string","description":"Or the form''s class, e.g. '
+    + 'TfrmMain"},'
+    + '"limit":{"type":"integer","description":"Max rows (default 400)"}}}},' +
+
     '{"name":"diagnostics","description":"Semantic errors PasTree finds - '
     + 'undeclared identifiers, unknown members, wrong argument counts, '
     + 'missing units - for one file or every unit of the group, each row '
@@ -9348,7 +9690,9 @@ begin
     + 'change added - run it before saying a change is done, `related` answers '
     + 'hierarchy/override/implementation/assignment/'
     + 'creation questions, `outline` shows a unit''s structure with line '
-    + 'numbers, `unit_deps` its uses graph, `diagnostics` checks name '
+    + 'numbers, `form` a form''s components and which method each event '
+    + 'runs (instead of reading the .dfm and its ancestors''), `unit_deps` '
+    + 'its uses graph, `diagnostics` checks name '
     + 'resolution after edits. Their rows name the routine or type they sit '
     + 'in, which usually answers the question without opening the file. '
     + 'Symbols are addressed by name (TFoo, '
@@ -9423,6 +9767,8 @@ begin
       Result := ToolRelated(AWs, AArgs)
     else if AName = 'outline' then
       Result := ToolOutline(AWs, AArgs)
+    else if AName = 'form' then
+      Result := ToolForm(AWs, AArgs)
     else if AName = 'diagnostics' then
       Result := ToolDiagnostics(AWs, AArgs)
     else if AName = 'unit_deps' then
