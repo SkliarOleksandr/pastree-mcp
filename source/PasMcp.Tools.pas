@@ -9775,9 +9775,6 @@ begin
       Result := ToolUnitDeps(AWs, AArgs)
     else
       raise EToolError.Create('unknown tool: ' + AName);
-    if LFresh <> '' then
-      Result := '(index: ' + LFresh.TrimRight([' ', ';']) + ')' + sLineBreak +
-        Result;
   except
     on E: EToolError do
     begin
@@ -9791,6 +9788,11 @@ begin
       Log('tool %s raised %s: %s', [AName, E.ClassName, E.Message]);
     end;
   end;
+  // On an error answer too: the re-analysis happened, the next call will not
+  // report it again, and an edit someone else made may be what the error is.
+  if LFresh <> '' then
+    Result := '(index: ' + LFresh.TrimRight([' ', ';']) + ')' + sLineBreak +
+      Result;
   Log('tool %s: %d ms (freshness check %d ms), %s%s', [AName,
     LSW.ElapsedMilliseconds, LFreshMs, IfThen(ADeferred <> nil,
     'answered when its work is done', IntToStr(Length(Result)) + ' chars'),

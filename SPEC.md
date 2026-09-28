@@ -79,9 +79,11 @@ Common rules:
 - **Freshness note**: when the call had to re-analyze changed files first,
   the answer starts with `(index: re-analyzed N changed file(s) in X ms: a.pas,
   b.pas)` - the files named, 8 of them and the rest counted, a unit shared by
-  several analyses once; `; deleted: c.pas` for a file gone, `(index: project
+  several analyses once; `; deleted: c.pas` for a file gone, `; added: d.pas`
+  for a unit or include the re-analysis took in, `(index: project
   file(s) changed: A.dproj; the workspace was reloaded)` for a `.dproj` or the
-  group. A file the agent did not edit is someone else's edit, and the note is
+  group. An error answer carries it too - the re-analysis happened, and the
+  next call does not report it again. A file the agent did not edit is someone else's edit, and the note is
   the only sign of it: a session on PasTree saw `re-analyzed 2 changed file(s)`
   when it had edited nothing, and learned an hour later, from a build failing
   on another session's half-written unit, whose they were.

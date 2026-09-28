@@ -430,6 +430,12 @@ try {
     [IO.File]::WriteAllText((Join-Path $copy 'AppA\uNewUnit.inc'), "const`r`n  INC_ONE = 1;`r`n  INC_TWO = 2;`r`n", $utf8)
     $r = Rpc 32 'tools/call' '{"name":"find","arguments":{"query":"INC_TWO"}}'
     Check 'newcomer include edited' (ToolText $r) @('(full rebuild)', 'AppA\uNewUnit.inc)', 'AppA\uNewUnit.inc:3  INC_TWO (const)')
+    # An error answer carries the note too: the re-analysis it follows is not
+    # reported again, and someone else's edit may be what the error is about.
+    [IO.File]::WriteAllText($newUnit, "unit uNewUnit;`r`n`r`ninterface`r`n`r`n{`$I uNewUnit.inc}`r`n`r`nprocedure NewOne;`r`n`r`nimplementation`r`n`r`nprocedure NewOne;`r`nbegin`r`nend;`r`n`r`nend.`r`n", $utf8)
+    $r = Rpc 34 'tools/call' '{"name":"references","arguments":{"symbol":"NewTwo"}}'
+    Check 'error answer with note' (ToolText $r) @('(index: re-analyzed 1 changed file(s) in ', ' ms: AppA\uNewUnit.pas)', 'no declaration named `NewTwo`')
+    if (-not $r.result.isError) { Write-Host 'FAIL [error answer with note] not isError'; $script:failures++ }
     Remove-Item $newUnit
     [IO.File]::WriteAllText($dpr, $text, $utf8)
     $r = Rpc 33 'tools/call' '{"name":"find","arguments":{"query":"NewOne"}}'
