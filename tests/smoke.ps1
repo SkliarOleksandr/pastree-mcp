@@ -74,6 +74,10 @@ Check 'find wildcard' (Block $b 'find {"query":"*Circ*"') @('AppB\uAppB.pas:11  
 Check 'find joined' (Block $b 'find {"query":"TWideBox.Configure"}') @("AppB\uBoxes.pas:71  TWideBox.Configure (function)  function Configure(const AFirstName: string; ASecondValue: Integer; const AThirdName: string = 'third'; AFourthFlag: Boolean = False): Boolean;")
 # The outer type with the nested one left out: its member still found.
 Check 'find nested' (Block $b 'find {"query":"TOuterBox.Depth"}') @('AppB\uBoxes.pas:103  TOuterBox.TInnerBox.Depth (field)') @('no declaration matches')
+# By name: the identifier, not the same word in a string before it; and the
+# interface side of a method resolution clause.
+Check 'definition past a string' (Block $b 'definition {"file":"AppB/uBoxes.pas","line":118') @('TCountBox.BoxCount (function) declared at AppB\uBoxes.pas:112')
+Check 'definition in a resolution clause' (Block $b 'definition {"file":"AppB/uBoxes.pas","line":111') @('IBoxCount.Count (function) declared at AppB\uBoxes.pas:108')
 Check 'find joined cut' (Block $b 'find {"query":"TWideBox.Many"}') @('AppB\uBoxes.pas:74  TWideBox.Many (procedure)  procedure Many(const AAlphaName, ABetaName, AGammaName: string; ADeltaCount, AEpsilonCount, AZetaCount: Integer; const AEtaText, AThetaText, ...); virtual;')
 # A name no declaration matches: what the index is, and where the name is
 # written outside it - in a unit no project uses - or that it is nowhere.

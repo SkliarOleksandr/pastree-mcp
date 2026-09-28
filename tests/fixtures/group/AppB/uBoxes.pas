@@ -103,5 +103,19 @@ type
       Depth: Integer;
     end;
   end;
+  // A method resolution clause: `definition` at either name of it answers.
+  IBoxCount = interface
+    function Count: Integer;
+  end;
+  TCountBox = class(TInterfacedObject, IBoxCount)
+    function IBoxCount.Count = BoxCount;
+    function BoxCount: Integer;
+  end;
+
+function TCountBox.BoxCount: Integer;
+begin
+  // The name in a string before the call: `definition` by name finds the call.
+  if 'BoxCount' = '' then Result := BoxCount else Result := 0;
+end;
 
 end.

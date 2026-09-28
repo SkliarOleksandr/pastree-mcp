@@ -69,6 +69,7 @@ uses
   System.Diagnostics,
   System.Generics.Collections,
   System.Generics.Defaults,
+  System.RegularExpressions,
   PasTree.Types,
   PasTree.Ast,
   PasTree.Outline,
@@ -252,24 +253,65 @@ end;
 // AWord in ALine; 0 when absent.
 function FindWord(const ALine, AWord: string): Integer;
 var
-  LFrom, LAt: Integer;
+  LFrom, LAt, LFirst, LI, LState: Integer;
   LLine, LWord: string;
+  LCode: TArray<Boolean>;
 begin
   Result := 0;
   if AWord = '' then
     Exit;
   LLine := LowerCase(ALine);
   LWord := LowerCase(AWord);
+  // Where the line is code - not in a string literal or a comment: the
+  // identifier is wanted, not `'ENTRY_RESERV'` written before it.
+  SetLength(LCode, Length(LLine) + 1);
+  LState := 0;   // 0 code, 1 string, 2 { }, 3 (* *), 4 // to the end
+  LI := 1;
+  while LI <= Length(LLine) do
+  begin
+    LCode[LI] := LState = 0;
+    case LState of
+      0:
+        if LLine[LI] = '''' then
+          LState := 1
+        else if LLine[LI] = '{' then
+          LState := 2
+        else if (LLine[LI] = '(') and (LI < Length(LLine)) and
+           (LLine[LI + 1] = '*') then
+          LState := 3
+        else if (LLine[LI] = '/') and (LI < Length(LLine)) and
+           (LLine[LI + 1] = '/') then
+          LState := 4;
+      1:
+        if LLine[LI] = '''' then
+          LState := 0;
+      2:
+        if LLine[LI] = '}' then
+          LState := 0;
+      3:
+        if (LLine[LI] = ')') and (LI > 1) and (LLine[LI - 1] = '*') then
+          LState := 0;
+    end;
+    if LState <> 0 then
+      LCode[LI] := False;
+    Inc(LI);
+  end;
+  LFirst := 0;
   LFrom := 1;
   while True do
   begin
     LAt := PosEx(LWord, LLine, LFrom);
     if LAt = 0 then
-      Exit;
+      Exit(LFirst);   // only in text: the first, as before
     if ((LAt = 1) or not IsIdentChar(LLine[LAt - 1])) and
        ((LAt + Length(LWord) > Length(LLine)) or
         not IsIdentChar(LLine[LAt + Length(LWord)])) then
-      Exit(LAt);
+    begin
+      if LCode[LAt] then
+        Exit(LAt);
+      if LFirst = 0 then
+        LFirst := LAt;
+    end;
     LFrom := LAt + 1;
   end;
 end;
@@ -697,13 +739,19 @@ begin
   Result := -1;
 end;
 
+function ResolveName(AWs: TMcpWorkspace; const AQuery, AKind: string;
+  AOwnOnly: Boolean; ALimit: Integer; out AMore: Integer): TArray<TTarget>;
+  forward;
+
 // file + line + (name | column) -> what is there.
 function ResolvePosition(AWs: TMcpWorkspace; AArgs: TJSONObject): TTarget;
 var
   LFile, LName, LText: string;
-  LLine, LCol, LMid, LTMid, LTSym, LRaw: Integer;
+  LLine, LCol, LMid, LTMid, LTSym, LRaw, LMore: Integer;
   LLines: TArray<string>;
   LInClosure, LFound: Boolean;
+  LClause: TMatch;
+  LCands: TArray<TTarget>;
 begin
   Result := Default(TTarget);
   Result.Ids := NewIds(AWs);
@@ -780,9 +828,26 @@ begin
       + '(not reachable from the main sources through `uses`)',
       [AWs.RelPath(LFile)]);
   if not LFound then
+  begin
+    // A method resolution clause, `function IFoo.Bar = Baz;`: its left side
+    // names the interface's method, which the analysis may leave unbound.
+    LLines := ReadLines(LFile);
+    if LLine <= Length(LLines) then
+    begin
+      LClause := TRegEx.Match(LLines[LLine - 1], '^\s*(function|procedure)'
+        + '\s+([\w.]+)\.(\w+)\s*=\s*\w+\s*;', [roIgnoreCase]);
+      if LClause.Success and SameText(LClause.Groups[3].Value, LName) then
+      begin
+        LCands := ResolveName(AWs, LClause.Groups[2].Value + '.' + LName, '',
+          False, 2, LMore);
+        if Length(LCands) = 1 then
+          Exit(LCands[0]);
+      end;
+    end;
     raise EToolError.CreateFmt('nothing resolvable at %s:%d:%d (%s) - a '
       + 'local without declaration, a keyword, or a name the analysis could '
       + 'not resolve', [AWs.RelPath(LFile), LLine, LCol, LName]);
+  end;
   MapToOthers(AWs, Result);
 end;
 
