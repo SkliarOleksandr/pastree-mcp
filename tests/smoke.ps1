@@ -421,12 +421,12 @@ try {
     Check 'compile progress' $script:notes @('"method":"notifications/progress"', '"progressToken":"smoke-1"', 'compile: building AppA (Win32 Debug)')
     # The error fixed, a local left unused: the hint is new - uAppA never
     # compiled here before, and this session changed it - while uMembers,
-    # compiled now for the first time too, keeps its warning as old.
+    # compiled now for the first time too, has its warning said uncompared.
     $text = [IO.File]::ReadAllText($unit)
     $text = $text.Replace("    NoSuchName := 1;`r`n", '').Replace("  LShape: TShape;`r`n", "  LShape: TShape;`r`n  LUnused: Integer;`r`n")
     [IO.File]::WriteAllText($unit, $text, $utf8)
     $r = Rpc 8 'tools/call' '{"name":"compile","arguments":{}}'
-    Check 'compile new hint' (ToolText $r) @('compile AppA (Win32 Debug): built in', 'warnings - none new (1 old, not listed)', "hints - 1 new:`nAppA\uAppA.pas`n  18  H2164 Variable 'LUnused' is declared but never used in 'RunA' (in RunA)`n        LUnused: Integer;") @('first build here')
+    Check 'compile new hint' (ToolText $r) @('compile AppA (Win32 Debug): built in', 'warnings - none new (1 from units first compiled here, not compared, not listed)', "hints - 1 new:`nAppA\uAppA.pas`n  18  H2164 Variable 'LUnused' is declared but never used in 'RunA' (in RunA)`n        LUnused: Integer;") @('first build here')
     # A call sent while a build runs is answered before the build is: the
     # build has a thread of its own.
     Send 9 'tools/call' '{"name":"compile","arguments":{"member":"AppA","rebuild":true}}'

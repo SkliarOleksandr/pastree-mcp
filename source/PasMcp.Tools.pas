@@ -9605,6 +9605,7 @@ var
   var
     LRest: TArray<string>;
     LListedRows: TArray<TCompileRow>;
+    LUncompared: Integer;
   begin
     if AList.Count = 0 then
       Exit;
@@ -9623,11 +9624,22 @@ var
       Exit;
     end;
     LListedRows := Filter(AList, True, True);
-    // Old: reported by the previous compile of its unit, or - a unit not
-    // compiled here before - in a file this session did not change.
-    if AOwn - Length(LListedRows) > 0 then
-      LRest := LRest + [Format('%d %s', [AOwn - Length(LListedRows),
-        IfThen(LFirstOnly, 'elsewhere', 'old')])];
+    // Old: reported by the previous compile of its unit. A unit not
+    // compiled here before has nothing to compare with, and its warnings in
+    // files this session did not change are said to be uncompared rather
+    // than counted old - a change that recompiles dependents on a seeded
+    // first compile would pass its new warnings off as old.
+    LUncompared := 0;
+    if not LFirstOnly then
+      for var LRow in AList do
+        if LRow.Own and not LRow.Msg.IsNew and LRow.Msg.Uncompared then
+          Inc(LUncompared);
+    if AOwn - Length(LListedRows) - LUncompared > 0 then
+      LRest := LRest + [Format('%d %s', [AOwn - Length(LListedRows) -
+        LUncompared, IfThen(LFirstOnly, 'elsewhere', 'old')])];
+    if LUncompared > 0 then
+      LRest := LRest + [Format('%d from units first compiled here, not '
+        + 'compared', [LUncompared])];
     if ALib > 0 then
       LRest := LRest + [Format('%d in library units', [ALib])];
     if LFirstOnly then

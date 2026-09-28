@@ -102,6 +102,10 @@ type
     // previous compile of its unit - or, for a unit never compiled here
     // before, in a file changed this session.
     IsNew: Boolean;
+    // A unit never compiled here before: nothing to compare with, so its
+    // warnings count as new only in a file this session changed - and the
+    // answer must say that the rest were not compared.
+    Uncompared: Boolean;
   end;
 
   TBuildResult = record
@@ -1349,8 +1353,11 @@ begin
                 AResult.Messages[LI].IsNew := True;
             end
             else
+            begin
               // Nothing to compare with: new only where this session edited.
               AResult.Messages[LI].IsNew := LChanged.ContainsKey(LF);
+              AResult.Messages[LI].Uncompared := True;
+            end;
           end;
         bmError:
           begin
