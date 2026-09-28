@@ -80,10 +80,13 @@ Common rules:
   the answer starts with `(index: re-analyzed N changed file(s) in X ms: a.pas,
   b.pas)` - the files named, 8 of them and the rest counted, a unit shared by
   several analyses once; `; deleted: c.pas` for a file gone, `; added: d.pas`
-  for a unit or include the re-analysis took in, `(index: project
+  for a unit or include the re-analysis took in, `form file(s) changed:` /
+  `added:` / `deleted:` for an own unit's `.dfm`/`.fmx` (re-read without any
+  re-analysis - a designer's save changes no Pascal file), `(index: project
   file(s) changed: A.dproj; the workspace was reloaded)` for a `.dproj` or the
   group. An error answer carries it too - the re-analysis happened, and the
-  next call does not report it again. A file the agent did not edit is someone else's edit, and the note is
+  next call does not report it again. A file the agent did not edit is
+  someone else's edit, and the note is
   the only sign of it: a session on PasTree saw `re-analyzed 2 changed file(s)`
   when it had edited nothing, and learned an hour later, from a build failing
   on another session's half-written unit, whose they were.
@@ -189,6 +192,13 @@ Before every call except `status`:
 4. Refused there, a changed include, or a deleted file: that analysis is
    rebuilt with the previous one as its parse donor (`AdoptParseDonor`), so
    only changed files are parsed again.
+
+Form files are PasTree's to re-read: every query revalidates each by size and
+time, and a unit directory whose write time moved is listed again, so a form
+file written after its unit - an agent's order - or brought back by a
+checkout is a form file of the project at the next call. The workspace keeps
+the same stamps (each own form file, each own unit directory) only to name the
+change in the note.
 
 What this does not see: a new unit file that nothing `uses` yet (not in any
 closure until a unit names it - then the naming unit changed, and the rebuild

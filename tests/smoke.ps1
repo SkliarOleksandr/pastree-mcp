@@ -441,6 +441,34 @@ try {
     $r = Rpc 33 'tools/call' '{"name":"find","arguments":{"query":"NewOne"}}'
     Check 'newcomer deleted' (ToolText $r) @('deleted: AppA\uNewUnit.pas', 'no declaration matches `NewOne`')
 
+    # A form file saved alone - a designer's save, another session's edit:
+    # no Pascal file changed, the answer is fresh, and the note names it.
+    $mainDfm = Join-Path $copy 'AppF\uMainForm.dfm'
+    $dfmText = [IO.File]::ReadAllText($mainDfm)
+    [IO.File]::WriteAllText($mainDfm, $dfmText.Replace("    OnChange = NameChange`r`n", "    Hint = 'name'`r`n    OnChange = NameChange`r`n"), $utf8)
+    $r = Rpc 40 'tools/call' '{"name":"references","arguments":{"symbol":"TfrmMain.NameChange"}}'
+    Check 'form file changed' (ToolText $r) @('(index: form file(s) changed: AppF\uMainForm.dfm)', "  edtName`n    30  OnChange = NameChange")
+    # A form unit written first, its form file next - an agent's order: the
+    # form file, appearing after the index listed its directory, is read, its
+    # handler bound, and the note names it; then deleted.
+    $appF = Join-Path $copy 'AppF\AppF.dpr'
+    $appFText = [IO.File]::ReadAllText($appF)
+    [IO.File]::WriteAllText((Join-Path $copy 'AppF\uLateForm.pas'), "unit uLateForm;`r`n`r`ninterface`r`n`r`nuses`r`n  System.Classes, Vcl.Controls, Vcl.Forms, Vcl.StdCtrls;`r`n`r`ntype`r`n  TfrmLate = class(TForm)`r`n    btnLate: TButton;`r`n    procedure btnLateClick(Sender: TObject);`r`n  end;`r`n`r`nimplementation`r`n`r`n{`$R *.dfm}`r`n`r`nprocedure TfrmLate.btnLateClick(Sender: TObject);`r`nbegin`r`nend;`r`n`r`nend.`r`n", $utf8)
+    [IO.File]::WriteAllText($appF, $appFText.Replace("  uBinaryForm in 'uBinaryForm.pas' {frmBinary};", "  uBinaryForm in 'uBinaryForm.pas' {frmBinary},`r`n  uLateForm in 'uLateForm.pas' {frmLate};"), $utf8)
+    $r = Rpc 41 'tools/call' '{"name":"references","arguments":{"symbol":"TfrmLate.btnLateClick"}}'
+    Check 'form unit before its form' (ToolText $r) @('added: AppF\uLateForm.pas)', '0 references', 'no form file names it')
+    [IO.File]::WriteAllText((Join-Path $copy 'AppF\uLateForm.dfm'), "object frmLate: TfrmLate`r`n  Caption = 'Late'`r`n  object btnLate: TButton`r`n    Caption = 'Late'`r`n    OnClick = btnLateClick`r`n  end`r`nend`r`n", $utf8)
+    $r = Rpc 42 'tools/call' '{"name":"references","arguments":{"symbol":"TfrmLate.btnLateClick"}}'
+    Check 'form file after its unit' (ToolText $r) @('(index: form file(s) added: AppF\uLateForm.dfm)', '1 of them in form files', "  btnLate`n    5  OnClick = btnLateClick")
+    $r = Rpc 43 'tools/call' '{"name":"form","arguments":{"file":"AppF/uLateForm.pas"}}'
+    Check 'form of a late form file' (ToolText $r) @('form frmLate: TfrmLate - AppF\uLateForm.dfm', "3    btnLate: TButton`n5      OnClick -> TfrmLate.btnLateClick") @('naming nothing')
+    Remove-Item (Join-Path $copy 'AppF\uLateForm.dfm')
+    $r = Rpc 44 'tools/call' '{"name":"callers","arguments":{"symbol":"TfrmLate.btnLateClick"}}'
+    Check 'form file deleted' (ToolText $r) @('(index: form file(s) deleted: AppF\uLateForm.dfm)')
+    Remove-Item (Join-Path $copy 'AppF\uLateForm.pas')
+    [IO.File]::WriteAllText($appF, $appFText, $utf8)
+    [IO.File]::WriteAllText($mainDfm, $dfmText, $utf8)
+
     # A handler removed from the code while the forms still bind it: no
     # compiler error, a form that fails to load - impact names the lines, in
     # its form and in the inherited form binding it on a component of its own.

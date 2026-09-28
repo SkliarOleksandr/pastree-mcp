@@ -129,6 +129,13 @@ type
     FOwner: TDictionary<string, Integer>;    // own file, lower -> analysis
     FChanged: TList<string>;                 // see ChangedFiles
     FChangedSeen: TDictionary<string, Boolean>;
+    // Own form files and the own unit directories, for the note: a form saved
+    // in a designer or by another session changes no Pascal file, and PasTree
+    // re-reads it silently. See FormChanges.
+    FFormStamps: TDictionary<string, TMcpFileStamp>;   // form file (lower)
+    FFormPaths: TDictionary<string, string>;
+    FDirStamps: TDictionary<string, TMcpFileStamp>;    // unit dir (lower)
+    FDirUnits: TDictionary<string, TArray<string>>;    // unit dir -> own units
     FReady: TEvent;
     FLock: TCriticalSection;
     FState: string;
@@ -144,6 +151,8 @@ type
     // pulls in - and returns them. Unstamped, their edits and their deletion
     // would never be seen (RecordStamps runs only after a full build).
     function StampNewcomers(AAnalysis: TMcpAnalysis): TArray<string>;
+    procedure RecordFormStamps;
+    function FormChanges: string;
     procedure RebuildAnalysis(AAnalysis: TMcpAnalysis; const AWhy: string);
     function ChangedConfigFiles: TArray<string>;
     procedure ClearAnalyses;
@@ -322,6 +331,10 @@ begin
   FOwner := TDictionary<string, Integer>.Create;
   FChanged := TList<string>.Create;
   FChangedSeen := TDictionary<string, Boolean>.Create;
+  FFormStamps := TDictionary<string, TMcpFileStamp>.Create;
+  FFormPaths := TDictionary<string, string>.Create;
+  FDirStamps := TDictionary<string, TMcpFileStamp>.Create;
+  FDirUnits := TDictionary<string, TArray<string>>.Create;
   FReady := TEvent.Create(nil, True, False, '');
   FLock := TCriticalSection.Create;
   FState := 'not started';
@@ -335,6 +348,10 @@ begin
   FOwner.Free;
   FChanged.Free;
   FChangedSeen.Free;
+  FFormStamps.Free;
+  FFormPaths.Free;
+  FDirStamps.Free;
+  FDirUnits.Free;
   FReady.Free;
   FLock.Free;
   inherited;
@@ -800,6 +817,130 @@ begin
   end;
 end;
 
+// A report's list of files: relative, sorted, the first MAX_NAMED of them
+// named and the rest counted.
+function NamedFiles(AWs: TMcpWorkspace; const AFiles: TArray<string>): string;
+const
+  MAX_NAMED = 8;
+var
+  LNames: TArray<string>;
+begin
+  LNames := nil;
+  for var LFile in AFiles do
+    LNames := LNames + [AWs.RelPath(LFile)];
+  TArray.Sort<string>(LNames, TComparer<string>.Construct(
+    function(const L, R: string): Integer
+    begin
+      Result := CompareText(L, R);
+    end));
+  Result := string.Join(', ', Copy(LNames, 0, MAX_NAMED));
+  if Length(LNames) > MAX_NAMED then
+    Result := Result + Format(' and %d more', [Length(LNames) - MAX_NAMED]);
+end;
+
+// The form file beside AUnit - .dfm, else .fmx - with its stamp; False when
+// there is none.
+function FormFileOf(const AUnit: string; out AFile: string;
+  out AStamp: TMcpFileStamp): Boolean;
+begin
+  AFile := ChangeFileExt(AUnit, '.dfm');
+  Result := StampOf(AFile, AStamp);
+  if not Result then
+  begin
+    AFile := ChangeFileExt(AUnit, '.fmx');
+    Result := StampOf(AFile, AStamp);
+  end;
+end;
+
+procedure TMcpWorkspace.RecordFormStamps;
+var
+  LSeen: TDictionary<string, Boolean>;
+  LFile, LDir, LForm: string;
+  LUnits: TArray<string>;
+  LStamp: TMcpFileStamp;
+begin
+  FFormStamps.Clear;
+  FFormPaths.Clear;
+  FDirStamps.Clear;
+  FDirUnits.Clear;
+  LSeen := TDictionary<string, Boolean>.Create;
+  try
+    for var LA in FAnalyses do
+      if LA.Proj <> nil then
+        for var LMid := 0 to LA.Proj.ModelCount - 1 do
+        begin
+          LFile := LA.Proj.ModelFile(LMid);
+          if (LFile = '') or not IsOwnFile(LFile) or
+             not LSeen.TryAdd(LowerCase(LFile), True) then
+            Continue;
+          LDir := LowerCase(ExtractFileDir(LFile));
+          if not FDirUnits.TryGetValue(LDir, LUnits) then
+          begin
+            LUnits := nil;
+            if StampOf(ExtractFileDir(LFile), LStamp) then
+              FDirStamps.AddOrSetValue(LDir, LStamp);
+          end;
+          FDirUnits.AddOrSetValue(LDir, LUnits + [LFile]);
+          if FormFileOf(LFile, LForm, LStamp) then
+          begin
+            FFormStamps.AddOrSetValue(LowerCase(LForm), LStamp);
+            FFormPaths.AddOrSetValue(LowerCase(LForm), LForm);
+          end;
+        end;
+  finally
+    LSeen.Free;
+  end;
+end;
+
+// The own form files changed, created or deleted since the last look, as
+// clauses of the note ('' = none), the stamps moved on. A new one is found
+// through its directory, whose write time moves when a file appears in it -
+// one call per directory rather than two probes per unit on every call.
+function TMcpWorkspace.FormChanges: string;
+var
+  LChanged, LAdded, LGone: TArray<string>;
+  LStamp: TMcpFileStamp;
+  LForm: string;
+  LDirs: TArray<string>;
+begin
+  LChanged := nil;
+  LAdded := nil;
+  LGone := nil;
+  for var LPair in FFormStamps do
+    if not StampOf(FFormPaths[LPair.Key], LStamp) then
+      LGone := LGone + [FFormPaths[LPair.Key]]
+    else if not SameStamp(LStamp, LPair.Value) then
+      LChanged := LChanged + [FFormPaths[LPair.Key]];
+  for var LFile in LGone do
+    FFormStamps.Remove(LowerCase(LFile));
+  for var LFile in LChanged do
+    if StampOf(LFile, LStamp) then
+      FFormStamps[LowerCase(LFile)] := LStamp;
+  LDirs := FDirStamps.Keys.ToArray;
+  for var LDir in LDirs do
+  begin
+    if not StampOf(ExtractFileDir(FDirUnits[LDir][0]), LStamp) or
+       SameStamp(LStamp, FDirStamps[LDir]) then
+      Continue;
+    FDirStamps[LDir] := LStamp;
+    for var LUnit in FDirUnits[LDir] do
+      if FormFileOf(LUnit, LForm, LStamp) and
+         FFormStamps.TryAdd(LowerCase(LForm), LStamp) then
+      begin
+        FFormPaths.AddOrSetValue(LowerCase(LForm), LForm);
+        LAdded := LAdded + [LForm];
+      end;
+  end;
+  Result := '';
+  if Length(LChanged) > 0 then
+    Result := Result + '; form file(s) changed: ' + NamedFiles(Self, LChanged);
+  if Length(LAdded) > 0 then
+    Result := Result + '; form file(s) added: ' + NamedFiles(Self, LAdded);
+  if Length(LGone) > 0 then
+    Result := Result + '; form file(s) deleted: ' + NamedFiles(Self, LGone);
+  Result := Result.TrimLeft([';', ' ']);
+end;
+
 procedure TMcpWorkspace.BuildAnalysis(AAnalysis: TMcpAnalysis;
   ADonor: TPasSemaProject);
 var
@@ -947,6 +1088,7 @@ begin
       for var LA in FAnalyses do
         BuildAnalysis(LA, nil);
       RebuildOwners;
+      RecordFormStamps;
       FLoadMs := LSW.ElapsedMilliseconds;
       SetState('ready');
       Log('ready in %.1f s', [FLoadMs / 1000]);
@@ -973,27 +1115,6 @@ begin
       Result := Result + [LPair.Key];
 end;
 
-// A report's list of files: relative, sorted, the first MAX_NAMED of them
-// named and the rest counted.
-function NamedFiles(AWs: TMcpWorkspace; const AFiles: TArray<string>): string;
-const
-  MAX_NAMED = 8;
-var
-  LNames: TArray<string>;
-begin
-  LNames := nil;
-  for var LFile in AFiles do
-    LNames := LNames + [AWs.RelPath(LFile)];
-  TArray.Sort<string>(LNames, TComparer<string>.Construct(
-    function(const L, R: string): Integer
-    begin
-      Result := CompareText(L, R);
-    end));
-  Result := string.Join(', ', Copy(LNames, 0, MAX_NAMED));
-  if Length(LNames) > MAX_NAMED then
-    Result := Result + Format(' and %d more', [Length(LNames) - MAX_NAMED]);
-end;
-
 procedure TMcpWorkspace.RebuildAnalysis(AAnalysis: TMcpAnalysis;
   const AWhy: string);
 var
@@ -1010,6 +1131,7 @@ begin
     LOld.Free;
   end;
   RebuildOwners;
+  RecordFormStamps;
 end;
 
 procedure TMcpWorkspace.EnsureFresh(out AReport: string);
@@ -1018,6 +1140,7 @@ var
   LAllChanged, LAllGone, LAllAdded: TArray<string>;   // over the analyses, each once
   LAllSeen: TDictionary<string, Boolean>;
   LBefore: TDictionary<string, TMcpFileStamp>;
+  LForms: string;
   LAdded: TArray<string>;
   LStamp: TMcpFileStamp;
   LNeedRebuild: string;
@@ -1042,6 +1165,8 @@ begin
       [NamedFiles(Self, LConfig)]);
     Exit;
   end;
+  // First: a rebuild below records the form stamps afresh.
+  LForms := FormChanges;
   LAllChanged := nil;
   LAllGone := nil;
   LAllAdded := nil;
@@ -1127,7 +1252,10 @@ begin
       begin
         LAdded := StampNewcomers(LA);
         if Length(LAdded) > 0 then
+        begin
           RebuildOwners;
+          RecordFormStamps;
+        end;
         // The models changed under the navigator's per-model caches.
         FreeAndNil(LA.Nav);
         LA.Nav := TPasNavigator.Create(LA.Proj);
@@ -1165,6 +1293,11 @@ begin
   // A unit another session added shows otherwise only as its user's change.
   if (AReport <> '') and (Length(LAllAdded) > 0) then
     AReport := AReport + '; added: ' + NamedFiles(Self, LAllAdded);
+  if LForms <> '' then
+    if AReport = '' then
+      AReport := LForms
+    else
+      AReport := AReport + '; ' + LForms;
 end;
 
 function TMcpWorkspace.StatusText: string;
