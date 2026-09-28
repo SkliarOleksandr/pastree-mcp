@@ -2560,6 +2560,7 @@ type
   // above, the routines they sit in, rows that hand a routine on.
   TCallLevel = record
     Calls, Routines, Others: Integer;
+    Bindings: Integer;     // form file lines binding a node to an event
   end;
 
   // What a walk found, for the answer to word.
@@ -2575,6 +2576,9 @@ type
     Hit: THit;
     Caller: string;        // declaration site of the routine it sits in
     Call: Boolean;         // a call - not the routine handed on as a value
+    // A form file's line binding it to an event (`OnClick = Foo`): run by
+    // the component, not called from code - no caller to follow.
+    Binding: Boolean;
     // The row's label, in parts: the routine of the walk it reaches (below
     // the first level), the symbol it is bound to when that is another one,
     // and what it is - 'not a call', 'exported', 'main block'.
@@ -2997,6 +3001,7 @@ type
       AReturns, AVirtual: Boolean);
     procedure SearchBareInherited(AA: TMcpAnalysis; const ANode: TCallNode;
       ADMid, ADSym: Integer);
+    procedure SearchFormBindings(AA: TMcpAnalysis; const ANode: TCallNode);
     procedure Search(AA: TMcpAnalysis; const ANode: TCallNode);
     procedure SearchUses(AA: TMcpAnalysis; const ANode: TCallNode);
   public
@@ -3043,6 +3048,13 @@ begin
         Result := IntToStr(LL.Calls);
       Result := Result + ' in ' + Plural(LL.Routines, 'routine');
     end
+    else if (LL.Calls = 0) and (LL.Bindings > 0) then
+    begin
+      // Form lines alone: `depth 2: 2 form bindings`, not `0 in 0`.
+      Result := Result + Format('; depth %d: %s', [LIdx + 1,
+        Plural(LL.Bindings, 'form binding')]);
+      LL.Bindings := 0;
+    end
     else
       Result := Result + Format('; depth %d: %d in %d', [LIdx + 1, LL.Calls,
         LL.Routines]);
@@ -3052,7 +3064,26 @@ begin
     else if LL.Others > 1 then
       Result := Result + Format(', %d references that do not call %s',
         [LL.Others, IfThen(AThem, 'them', 'it')]);
+    if LL.Bindings > 0 then
+      Result := Result + ', ' + Plural(LL.Bindings, 'form binding');
   end;
+end;
+
+// A first level with no call - nothing is below it: none found, or only
+// references that hand the roots on, or the form lines that bind them to an
+// event. AThem: several roots.
+function NoCallsSummary(const AL: TCallLevel; AThem: Boolean): string;
+begin
+  if (AL.Others = 0) and (AL.Bindings = 0) then
+    Exit('none found');
+  Result := 'no calls';
+  if AL.Others > 0 then
+    Result := Result + Format(', %s that %s not call %s', [Plural(AL.Others,
+      'reference'), IfThen(AL.Others = 1, 'does', 'do'), IfThen(AThem, 'them',
+      'it')]);
+  if AL.Bindings > 0 then
+    Result := Result + Format(', %s - an event of the component runs %s',
+      [Plural(AL.Bindings, 'form binding'), IfThen(AThem, 'them', 'it')]);
 end;
 
 constructor TCallerWalk.Create(AWs: TMcpWorkspace);
@@ -3293,6 +3324,7 @@ begin
   LRow.Hit.Own := FWs.IsOwnFile(AHit.FilePath);
   LRow.Caller := ACaller;
   LRow.Call := ACall;
+  LRow.Binding := False;
   LRow.Callee := '';
   if (ANode.Level > 0) or FTagRoots then
     LRow.Callee := ANode.Name;
@@ -3473,6 +3505,48 @@ begin
     end;
 end;
 
+{ The form file lines that bind the node's routine to an event - `OnClick =
+  btnSaveClick` - as rows under the component (FormObjectPath). An event
+  runs it, no code calls it: such a handler had "none found", and at a
+  deeper level the binding is where a chain of calls starts - the button
+  that runs it. Only a published method can be bound, and only its own
+  symbol is: the form's class finds the method by name (TReader, through
+  MethodAddress), and the binder resolves each line to the one it finds. }
+procedure TCallerWalk.SearchFormBindings(AA: TMcpAnalysis;
+  const ANode: TCallNode);
+var
+  LMid, LSym: Integer;
+  LKey: string;
+  LRow: TCallRow;
+begin
+  LMid := ANode.T.Ids[AA.Index].Mid;
+  LSym := ANode.T.Ids[AA.Index].Sym;
+  if (LMid < 0) or (LSym < 0) or not IsPublishedMethod(AA, LMid, LSym) then
+    Exit;
+  for var LS in AA.Nav.FindFormSites(LMid, LSym) do
+  begin
+    if (LS.Kind <> fskHandler) or (LS.FilePath = '') then
+      Continue;
+    Inc(FReached);
+    LKey := SiteKey(LS.FilePath, LS.Line, LS.Col);
+    if not FSeen.TryAdd(LKey, True) then
+      Continue;
+    LRow := Default(TCallRow);
+    LRow.Hit.FilePath := LS.FilePath;
+    LRow.Hit.Line := LS.Line;
+    LRow.Hit.Col := LS.Col;
+    LRow.Hit.Snippet := LS.Snippet;
+    LRow.Hit.Own := FWs.IsOwnFile(LS.FilePath);
+    LRow.Hit.Where := FormObjectPath(LS);
+    if LS.IsBinary then
+      LRow.Hit.FileNote := 'binary - lines of its text conversion';
+    LRow.Binding := True;
+    if (ANode.Level > 0) or FTagRoots then
+      LRow.Callee := ANode.Name;
+    FRows.Add(LRow);
+  end;
+end;
+
 // The rows of one routine of the walk, in one analysis.
 procedure TCallerWalk.Search(AA: TMcpAnalysis; const ANode: TCallNode);
 var
@@ -3631,6 +3705,7 @@ begin
       rhConstructor], LVirtual);
     for var LB in LBelow do
       SearchBareInherited(AA, ANode, LB.Mid, LB.Sym);
+    SearchFormBindings(AA, ANode);
   finally
     LReaches.Free;
     LByClass.Free;
@@ -3810,6 +3885,12 @@ begin
       LCount := Default(TCallLevel);
       for var LR in LRows do
       begin
+        // A binding is to the routine itself, through no other symbol.
+        if LR.Binding then
+        begin
+          Inc(LCount.Bindings);
+          Continue;
+        end;
         LVias.AddOrSetValue(LR.Via, True);
         if LR.Call then
         begin
@@ -3954,10 +4035,11 @@ begin
     if LUnused.Count > 0 then
       ASb.AppendLine('no uses found: ' + String.Join(', ',
         LUnused.ToStringArray));
+    // The forms were read (SearchFormBindings): a published method no form
+    // line binds either is what "unused" asks, not a gap in the answer.
     if LDfm.Count > 0 then
-      ASb.AppendLine(Format('(%s: published - a form''s .dfm may bind it to '
-        + 'an event, and forms are not read)', [String.Join(', ',
-        LDfm.ToStringArray)]));
+      ASb.AppendLine(Format('(%s: published, and no form file binds it '
+        + 'either)', [String.Join(', ', LDfm.ToStringArray)]));
     if LDfmData.Count > 0 then
       ASb.AppendLine(Format('(%s: published - a form''s .dfm may set it, and '
         + 'forms are not read)', [String.Join(', ', LDfmData.ToStringArray)]));
@@ -3999,13 +4081,8 @@ begin
     Walk(ADepth, ALimit, LLevels, LInfo);
     LSb.Append(Format('callers of %s (%s:%d)', [ATarget.Name,
       FWs.RelPath(ATarget.DeclFile), ATarget.DeclLine]));
-    // No call: none found - or only references that hand it on.
-    if (LInfo.Levels[0].Calls = 0) and (LInfo.Levels[0].Others = 0) then
-      LSb.AppendLine(' - none found')
-    else if LInfo.Levels[0].Calls = 0 then
-      LSb.AppendLine(Format(' - no calls, %s that %s not call it',
-        [Plural(LInfo.Levels[0].Others, 'reference'),
-        IfThen(LInfo.Levels[0].Others = 1, 'does', 'do')]))
+    if LInfo.Levels[0].Calls = 0 then
+      LSb.AppendLine(' - ' + NoCallsSummary(LInfo.Levels[0], False))
     else
       LSb.AppendLine(' - ' + LevelsSummary(LInfo, 'call', False));
     LThrough := Through(0);
@@ -8011,13 +8088,9 @@ begin
         LText := 'uses'
       else
         LText := 'callers and uses';
-      if (LInfo.Levels[0].Calls = 0) and (LInfo.Levels[0].Others = 0) then
-        LSb.AppendLine(LText + ' - none found')
-      else if LInfo.Levels[0].Calls = 0 then
-        LSb.AppendLine(Format('%s - no calls, %s that %s not call %s', [LText,
-          Plural(LInfo.Levels[0].Others, 'reference'),
-          IfThen(LInfo.Levels[0].Others = 1, 'does', 'do'),
-          IfThen(LRoutines + LData > 1, 'them', 'it')]))
+      if LInfo.Levels[0].Calls = 0 then
+        LSb.AppendLine(LText + ' - ' + NoCallsSummary(LInfo.Levels[0],
+          LRoutines + LData > 1))
       else
         LSb.AppendLine(LText + ' - ' + LevelsSummary(LInfo, IfThen(LData = 0,
           'call', ''), LRoutines + LData > 1));
@@ -8961,8 +9034,10 @@ const
     + '`inherited;`. A row that hands it on instead of calling it (OnClick := '
     + 'Foo, @Foo) says [not a call]. depth 2-4 adds the callers of those, '
     + 'level by level ([-> the routine called]), and names the routines no '
-    + 'caller was found for. An event handler bound in a form''s .dfm is not '
-    + 'seen.",'
+    + 'caller was found for. An event handler''s bindings in the form files '
+    + '(.dfm, .fmx) are rows too - `OnClick = btnSaveClick` under the '
+    + 'component whose event runs it, at any depth: where a chain of calls '
+    + 'starts from the UI.",'
     + '"inputSchema":{"type":"object","properties":{' + TARGET_PROPS + ','
     + '"depth":{"type":"integer","description":"Levels of callers (default 1, '
     + 'max 4)"},'

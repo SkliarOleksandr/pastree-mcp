@@ -154,6 +154,15 @@ Check 'callers override' (Block $b 'callers {"symbol":"TBigBox.Changed"}') @('al
 Check 'callers none' (Block $b 'callers {"symbol":"NeverCalled"}') @('callers of NeverCalled (AppB\uBoxes.pas:31) - none found')
 Check 'callers not a routine' (Block $b 'callers {"symbol":"TCircle"}') @('TCircle is a class - `callers` takes a routine')
 Check 'callers outside the index' (Block $b 'callers {"symbol":"OrphanRoutine"}') @('no declaration named `OrphanRoutine` among the ', 'a local or a parameter is addressed by', 'AppB\uOrphan.pas:8  procedure OrphanRoutine;')
+# A handler's form bindings are rows under the component whose event runs it:
+# one no code calls, one called and bound, one bound nowhere (the empty case,
+# which says the forms were read), and a binding at depth 2 - the button a
+# chain of calls starts from. No row of another answer is taken for one.
+Check 'callers form only' (Block $b 'callers {"symbol":"TfrmMain.btnSaveClick"}') @('- no calls, 2 form bindings - an event of the component runs it', "AppF\uChildForm.dfm`n  chkConfirm`n    14  OnClick = btnSaveClick", "AppF\uMainForm.dfm`n  btnSave`n    39  OnClick = btnSaveClick")
+Check 'callers form and code' (Block $b 'callers {"symbol":"TfrmMain.NameChange"}') @('- 2 calls in 2 routines, 1 form binding', "  edtName`n    29  OnChange = NameChange", "  TfrmMain.fraName1btnClearClick`n    60  NameChange(Sender);")
+Check 'callers form none' (Block $b 'callers {"symbol":"TfrmMain.NeverBound"}') @('- none found', '(TfrmMain.NeverBound: published, and no form file binds it either)')
+Check 'callers form depth' (Block $b 'callers {"symbol":"TfrmMain.Save", "depth":2}') @('- 1 call in 1 routine; depth 2: 2 form bindings', "  TfrmMain.btnSaveClick`n    47  Save;", "  btnSave`n    39  [-> TfrmMain.btnSaveClick]")
+Check 'callers no binding' (Block $b 'callers {"symbol":"TShapeBox.Changed"}') @() @('form binding')
 # callees: each routine a body reaches, at its declaration. A virtual call on
 # a TShape may run every override below it (project B's too); a property
 # write to a field calls nothing.
@@ -178,6 +187,8 @@ Check 'callees not a routine' (Block $b 'callees {"symbol":"TCircle"}') @('TCirc
 Check 'impact' (Block $b 'impact {"symbol":"TCircle.Area"}') @('impact of TCircle.Area', 'members to build and test: AppA, AppB (not reached: AppF)', "Shared\uShapes.pas`n  26  TCircle.Area (function) - overrides TShape.Area; also through IShape.Area (interface); overridden in TBigCircle (AppB\uAppB.pas:13)", 'callers - 3 calls in 3 routines', "  RunA`n    22  [via TShape.Area]", "  TotalArea`n    75  [via IShape.Area]")
 # A unit of one project reaches that project alone.
 Check 'impact one member' (Block $b 'impact {"symbol":"NeverCalled"}') @('members to build and test: AppB (not reached: AppA, AppF)', "AppB\uBoxes.pas`n  31  NeverCalled (procedure)", 'callers - none found') @('no callers found')
+# A handler no code calls: its form bindings are what the change reaches.
+Check 'impact form handler' (Block $b 'impact {"symbol":"TfrmMain.btnSaveClick"}') @('members to build and test: AppF (not reached: AppA, AppB)', 'callers - no calls, 2 form bindings - an event of the component runs it', "AppF\uMainForm.dfm`n  btnSave`n    39  OnClick = btnSaveClick")
 Check 'impact unit' (Block $b 'impact {"symbol":"uMembers"}') @('members to build and test: AppA (not reached: AppB, AppF)', 'AppA\uMembers.pas - used by 1 unit: AppA') @('callers')
 # A field: its uses, through the property that reads and writes it too.
 Check 'impact field' (Block $b 'impact {"symbol":"TCircle.FRadius"}') @('23  TCircle.FRadius (field) - also through TCircle.Radius (property)', 'uses - 4 in 3 routines', "  RunA`n    21  [via TCircle.Radius]", "  TCircle.Create`n    50  FRadius := ARadius;")

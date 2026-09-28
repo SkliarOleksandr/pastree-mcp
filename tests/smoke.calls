@@ -55,6 +55,10 @@ callers {"symbol":"TBigBox.Changed"}
 callers {"symbol":"NeverCalled"}
 callers {"symbol":"TCircle"}
 callers {"symbol":"OrphanRoutine"}
+callers {"symbol":"TfrmMain.btnSaveClick"}
+callers {"symbol":"TfrmMain.NameChange"}
+callers {"symbol":"TfrmMain.NeverBound"}
+callers {"symbol":"TfrmMain.Save", "depth":2}
 callees {"symbol":"RunA"}
 callees {"symbol":"TotalArea"}
 callees {"symbol":"TShapeBox.BoxClick", "depth":2}
@@ -67,6 +71,7 @@ callees {"symbol":"TShape.Area"}
 callees {"symbol":"TCircle"}
 impact {"symbol":"TCircle.Area"}
 impact {"symbol":"NeverCalled"}
+impact {"symbol":"TfrmMain.btnSaveClick"}
 impact {"symbol":"uMembers"}
 impact {"symbol":"TCircle.FRadius"}
 impact {"symbols":["TShapeBox.BoxClick", "TPanelModel.Source", "IShape.Area"]}
