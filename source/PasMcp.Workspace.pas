@@ -33,8 +33,11 @@ unit PasMcp.Workspace;
   and each project file has its write time and size recorded at build; a
   change re-analyzes just that module (AnalyzeModuleOnly), and a refusal there,
   a deleted file or a changed include falls back to a full rebuild that adopts
-  the previous analysis as its parse donor. A changed .dproj/.groupproj reloads
-  the whole workspace. Library files are not watched.
+  the previous analysis as its parse donor. What a module run takes in - a unit
+  a changed uses clause adds, an include a changed unit now pulls in - is
+  stamped after it (StampNewcomers), or its later edits would go unseen. A
+  changed .dproj/.groupproj reloads the whole workspace. Library files are not
+  watched.
 
   MEMORY. After every build, DemoteText frees the text layer of every library
   unit (positions and snippets come back through EnsureHydrated on demand) and
@@ -136,6 +139,11 @@ type
     procedure AssignAnalyses;
     procedure BuildAnalysis(AAnalysis: TMcpAnalysis; ADonor: TPasSemaProject);
     procedure RecordStamps(AAnalysis: TMcpAnalysis);
+    // After a module run: stamps the own files it took in that have none yet
+    // - a unit a changed uses clause added, an include a changed unit now
+    // pulls in - and returns them. Unstamped, their edits and their deletion
+    // would never be seen (RecordStamps runs only after a full build).
+    function StampNewcomers(AAnalysis: TMcpAnalysis): TArray<string>;
     procedure RebuildAnalysis(AAnalysis: TMcpAnalysis; const AWhy: string);
     function ChangedConfigFiles: TArray<string>;
     procedure ClearAnalyses;
@@ -765,6 +773,33 @@ begin
   end;
 end;
 
+function TMcpWorkspace.StampNewcomers(AAnalysis: TMcpAnalysis): TArray<string>;
+var
+  LM: TPasSemaModel;
+  LStamp: TMcpFileStamp;
+  LFile: string;
+begin
+  Result := nil;
+  for var LMid := 0 to AAnalysis.Proj.ModelCount - 1 do
+  begin
+    if not IsOwnFile(AAnalysis.Proj.ModelFile(LMid)) then
+      Continue;
+    LM := AAnalysis.Proj.Model(LMid);
+    for var LFi := 0 to High(LM.Tree.Source.FileNames) do
+    begin
+      LFile := LM.Tree.Source.FileNames[LFi];
+      if (LFile = '') or AAnalysis.Stamps.ContainsKey(LowerCase(LFile)) or
+         not StampOf(LFile, LStamp) then
+        Continue;
+      AAnalysis.Stamps.Add(LowerCase(LFile), LStamp);
+      AAnalysis.Paths.AddOrSetValue(LowerCase(LFile), LFile);
+      if LFi = 0 then
+        Inc(AAnalysis.OwnModels);
+      Result := Result + [LFile];
+    end;
+  end;
+end;
+
 procedure TMcpWorkspace.BuildAnalysis(AAnalysis: TMcpAnalysis;
   ADonor: TPasSemaProject);
 var
@@ -980,8 +1015,10 @@ end;
 procedure TMcpWorkspace.EnsureFresh(out AReport: string);
 var
   LChanged, LGone: TList<string>;
-  LAllChanged, LAllGone: TArray<string>;   // over the analyses, each once
+  LAllChanged, LAllGone, LAllAdded: TArray<string>;   // over the analyses, each once
   LAllSeen: TDictionary<string, Boolean>;
+  LBefore: TDictionary<string, TMcpFileStamp>;
+  LAdded: TArray<string>;
   LStamp: TMcpFileStamp;
   LNeedRebuild: string;
   LConfig: TArray<string>;
@@ -1007,6 +1044,7 @@ begin
   end;
   LAllChanged := nil;
   LAllGone := nil;
+  LAllAdded := nil;
   LRebuilt := False;
   LTotalMs := 0;
   LChanged := TList<string>.Create;
@@ -1072,14 +1110,35 @@ begin
           if StampOf(LFile, LStamp) then
             LA.Stamps.AddOrSetValue(LowerCase(LFile), LStamp);
         end;
+      LAdded := nil;
       if LNeedRebuild <> '' then
-        RebuildAnalysis(LA, LNeedRebuild)
+      begin
+        LBefore := TDictionary<string, TMcpFileStamp>.Create(LA.Stamps);
+        try
+          RebuildAnalysis(LA, LNeedRebuild);
+          for var LKey in LA.Stamps.Keys do
+            if not LBefore.ContainsKey(LKey) then
+              LAdded := LAdded + [LA.Paths[LKey]];
+        finally
+          LBefore.Free;
+        end;
+      end
       else
       begin
+        LAdded := StampNewcomers(LA);
+        if Length(LAdded) > 0 then
+          RebuildOwners;
         // The models changed under the navigator's per-model caches.
         FreeAndNil(LA.Nav);
         LA.Nav := TPasNavigator.Create(LA.Proj);
         LA.Nav.LibraryPaths := FLibDirs;
+      end;
+      for var LFile in LAdded do
+      begin
+        if FChangedSeen.TryAdd(LowerCase(LFile), True) then
+          FChanged.Add(LFile);
+        if LAllSeen.TryAdd(LowerCase(LFile), True) then
+          LAllAdded := LAllAdded + [LFile];
       end;
       Log('analysis %d: %d changed file(s) re-analyzed in %d ms%s: %s',
         [LA.Index, LChanged.Count, LSW.ElapsedMilliseconds,
@@ -1103,6 +1162,9 @@ begin
       AReport := Format('rebuilt in %d ms', [LTotalMs]);
     AReport := AReport + '; deleted: ' + NamedFiles(Self, LAllGone);
   end;
+  // A unit another session added shows otherwise only as its user's change.
+  if (AReport <> '') and (Length(LAllAdded) > 0) then
+    AReport := AReport + '; added: ' + NamedFiles(Self, LAllAdded);
 end;
 
 function TMcpWorkspace.StatusText: string;

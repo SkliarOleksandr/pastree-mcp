@@ -175,11 +175,15 @@ Before every call except `status`:
 1. A changed `.groupproj`/`.dproj` reloads the workspace.
 2. Every own file of every analysis (each model's main file and its `$I`
    includes) is compared by write time and size with what was recorded at
-   the last build - about 60 ms per call on the client group (2,500 own
-   units plus includes, across three analyses).
+   the last build or module run - about 60 ms per call on the client group
+   (2,500 own units plus includes, across three analyses).
 3. A changed unit is re-analyzed alone (`AnalyzeModuleOnly`) - PasTree
    re-parses it and re-runs its passes if its interface did not change in a
-   way that reaches other units.
+   way that reaches other units. What that run takes in - a unit a changed
+   uses clause adds, an include the unit now pulls in - is stamped after it
+   and named in the note (`added:`); unstamped, its later edits and its
+   deletion went unseen until some full rebuild - a new unit that no longer
+   compiled read clean.
 4. Refused there, a changed include, or a deleted file: that analysis is
    rebuilt with the previous one as its parse donor (`AdoptParseDonor`), so
    only changed files are parsed again.

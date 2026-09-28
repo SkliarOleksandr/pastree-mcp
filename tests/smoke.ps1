@@ -412,6 +412,29 @@ try {
     $r = Rpc 14 'tools/call' '{"name":"find","arguments":{"query":"TShapeBox"}}'
     Check 'call after a delete' (ToolText $r) @('(index: rebuilt in ', ' ms; deleted: AppB\uBoxes.pas)', 'no declaration matches `TShapeBox`')
 
+    # A unit taken in by the module path (a uses clause changed), then edited:
+    # the module run stamps what it took in, so the edit is seen and the note
+    # names the newcomer; an include it starts to pull in, then edited; the
+    # unit deleted and dropped.
+    $dpr = Join-Path $copy 'AppA\AppA.dpr'
+    $newUnit = Join-Path $copy 'AppA\uNewUnit.pas'
+    [IO.File]::WriteAllText($newUnit, "unit uNewUnit;`r`n`r`ninterface`r`n`r`nprocedure NewOne;`r`n`r`nimplementation`r`n`r`nprocedure NewOne;`r`nbegin`r`nend;`r`n`r`nend.`r`n", $utf8)
+    $text = [IO.File]::ReadAllText($dpr)
+    [IO.File]::WriteAllText($dpr, $text.Replace("  uMembers in 'uMembers.pas';", "  uMembers in 'uMembers.pas',`r`n  uNewUnit in 'uNewUnit.pas';"), $utf8)
+    $r = Rpc 30 'tools/call' '{"name":"find","arguments":{"query":"NewOne"}}'
+    Check 'unit taken in' (ToolText $r) @('(index: re-analyzed 1 changed file(s) in ', ' ms: AppA\AppA.dpr; added: AppA\uNewUnit.pas)', 'AppA\uNewUnit.pas:5  NewOne (procedure)') @('full rebuild')
+    [IO.File]::WriteAllText($newUnit, "unit uNewUnit;`r`n`r`ninterface`r`n`r`n{`$I uNewUnit.inc}`r`n`r`nprocedure NewOne;`r`nprocedure NewTwo;`r`n`r`nimplementation`r`n`r`nprocedure NewOne;`r`nbegin`r`nend;`r`n`r`nprocedure NewTwo;`r`nbegin`r`nend;`r`n`r`nend.`r`n", $utf8)
+    [IO.File]::WriteAllText((Join-Path $copy 'AppA\uNewUnit.inc'), "const`r`n  INC_ONE = 1;`r`n", $utf8)
+    $r = Rpc 31 'tools/call' '{"name":"find","arguments":{"query":"NewTwo"}}'
+    Check 'newcomer edited' (ToolText $r) @(' ms: AppA\uNewUnit.pas; added: AppA\uNewUnit.inc)', 'AppA\uNewUnit.pas:8  NewTwo (procedure)')
+    [IO.File]::WriteAllText((Join-Path $copy 'AppA\uNewUnit.inc'), "const`r`n  INC_ONE = 1;`r`n  INC_TWO = 2;`r`n", $utf8)
+    $r = Rpc 32 'tools/call' '{"name":"find","arguments":{"query":"INC_TWO"}}'
+    Check 'newcomer include edited' (ToolText $r) @('(full rebuild)', 'AppA\uNewUnit.inc)', 'AppA\uNewUnit.inc:3  INC_TWO (const)')
+    Remove-Item $newUnit
+    [IO.File]::WriteAllText($dpr, $text, $utf8)
+    $r = Rpc 33 'tools/call' '{"name":"find","arguments":{"query":"NewOne"}}'
+    Check 'newcomer deleted' (ToolText $r) @('deleted: AppA\uNewUnit.pas', 'no declaration matches `NewOne`')
+
     # A handler removed from the code while the forms still bind it: no
     # compiler error, a form that fails to load - impact names the lines, in
     # its form and in the inherited form binding it on a component of its own.
