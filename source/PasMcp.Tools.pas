@@ -672,6 +672,25 @@ begin
   end;
 end;
 
+// The own model of AA whose source pulls AFile in as an include ($I), -1
+// for none - an include has no model of its own.
+function IncluderOf(AWs: TMcpWorkspace; AA: TMcpAnalysis;
+  const AFile: string): Integer;
+var
+  LFiles: TArray<string>;
+begin
+  for var LMid := 0 to AA.Proj.ModelCount - 1 do
+  begin
+    if not AWs.IsOwnFile(AA.Proj.ModelFile(LMid)) then
+      Continue;
+    LFiles := AA.Proj.Model(LMid).Tree.Source.FileNames;
+    for var LFi := 1 to High(LFiles) do
+      if SameText(LFiles[LFi], AFile) then
+        Exit(LMid);
+  end;
+  Result := -1;
+end;
+
 // file + line + (name | column) -> what is there.
 function ResolvePosition(AWs: TMcpWorkspace; AArgs: TJSONObject): TTarget;
 var
@@ -712,7 +731,21 @@ begin
   begin
     LMid := LA.Nav.ModelIdOf(LFile);
     if LMid < 0 then
+    begin
+      // An include file: the unit that pulls it in resolves the position,
+      // as it does for the rows `references` lists there.
+      LMid := IncluderOf(AWs, LA, LFile);
+      if LMid < 0 then
+        Continue;
+      LInClosure := True;
+      if LA.Nav.SymbolAtFile(LMid, LFile, LLine, LCol, LTMid, LTSym, LText) then
+      begin
+        LFound := FillSymbolTarget(AWs, LA, LTMid, LTSym, Result);
+        if LFound then
+          Break;
+      end;
       Continue;
+    end;
     LInClosure := True;
     LA.Proj.EnsureHydrated(LMid);
     if LA.Nav.SymbolAt(LMid, LLine, LCol, LTMid, LTSym, LText) then

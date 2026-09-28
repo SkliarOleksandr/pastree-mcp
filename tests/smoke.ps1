@@ -448,6 +448,10 @@ try {
     [IO.File]::WriteAllText((Join-Path $copy 'AppA\uNewUnit.inc'), "const`r`n  INC_ONE = 1;`r`n  INC_TWO = 2;`r`n", $utf8)
     $r = Rpc 32 'tools/call' '{"name":"find","arguments":{"query":"INC_TWO"}}'
     Check 'newcomer include edited' (ToolText $r) @('(full rebuild)', 'AppA\uNewUnit.inc)', 'AppA\uNewUnit.inc:3  INC_TWO (const)')
+    # A position in the include resolves through the unit that pulls it in.
+    $r = Rpc 35 'tools/call' '{"name":"definition","arguments":{"file":"AppA/uNewUnit.inc","line":3,"name":"INC_TWO"}}'
+    Check 'definition in an include' (ToolText $r) @('INC_TWO (const)', 'AppA\uNewUnit.inc:3') @('not part of any analyzed project')
+    if ($r.result.isError) { Write-Host 'FAIL [definition in an include] isError'; $script:failures++ }
     # An error answer carries the note too: the re-analysis it follows is not
     # reported again, and someone else's edit may be what the error is about.
     [IO.File]::WriteAllText($newUnit, "unit uNewUnit;`r`n`r`ninterface`r`n`r`n{`$I uNewUnit.inc}`r`n`r`nprocedure NewOne;`r`n`r`nimplementation`r`n`r`nprocedure NewOne;`r`nbegin`r`nend;`r`n`r`nend.`r`n", $utf8)
