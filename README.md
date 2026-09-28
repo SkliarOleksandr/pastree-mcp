@@ -151,6 +151,23 @@ per pattern, no file opened to tell hits apart. A `grep` line searches the
 Pascal sources; `grep-dfm` the text form files (`.dfm`, `.fmx`) with them, and
 skips a binary form file, as ripgrep does.
 
+### Auditing answers over a sample
+
+```
+powershell -File tests\audit.ps1 -Project X.groupproj -Sample 400 -Seed 1 -Out run.jsonl
+```
+
+draws a reproducible, stratified sample of the group's declarations (from
+`outline` of every unit, and the library ones its code calls) and runs a
+battery of calls per symbol - find, definition, references, impact, and
+source, callers, callees, members, related where they apply - through one
+analysis. `-Forms` adds `form` on every form file, `-Symbols` re-runs a
+written sample, `-Calls` any list. A call the server dies or hangs on is
+recorded as such and the server restarted after it. The output is one JSON
+line per call: status, time, tokens, rows, the count the header states,
+notes and the answer - the raw material for checking that answers are right,
+not only what they cost. Options in the script's header.
+
 ## Status
 
 A prototype. It works end to end - including on the client group - but has not
