@@ -6811,7 +6811,7 @@ begin
   LOwner := ArgStr(AArgs, 'owner');
   LSection := LowerCase(ArgStr(AArgs, 'section'));
   LMembers := ArgBool(AArgs, 'members', True);
-  LLimit := EnsureRange(ArgInt(AArgs, 'limit', 400), 1, 100000);
+  LLimit := EnsureRange(ArgInt(AArgs, 'limit', 300), 1, 100000);
   LM := LA.Proj.Model(LMid);
   LEntries := PasModuleOutline(LM.Tree);
   LRows := TList<string>.Create;
@@ -10095,7 +10095,7 @@ const
     + '"members":{"type":"boolean","description":"Include fields, properties '
     + 'and method declarations inside types (default true; left out, and '
     + 'said, when the whole outline is over `limit`)"},'
-    + '"limit":{"type":"integer","description":"Max rows (default 400)"}},'
+    + '"limit":{"type":"integer","description":"Max rows (default 300)"}},'
     + '"required":["file"]}},' +
 
     '{"name":"form","description":"The component tree of one form without '
