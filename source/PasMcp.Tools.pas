@@ -2275,6 +2275,29 @@ end;
 // overrides, implements or is the accessor of, as a note line ('' = none).
 function ThroughNote(AWs: TMcpWorkspace; const AT: TTarget): string; forward;
 
+// For a member no form file binds: its unit's form file spelling its name
+// after the root's `end`, which dcc's conversion drops - a reader who greps
+// the file finds the line the answer says is not there. '' = no such text.
+function TrailingFormNote(AWs: TMcpWorkspace; const AT: TTarget): string;
+var
+  LForm, LName: string;
+  LDoc: IPasDfmDoc;
+begin
+  Result := '';
+  LForm := PasDfmFileOfUnit(AT.DeclFile);
+  if LForm = '' then
+    Exit;
+  LDoc := PasDfmLoad(LForm);
+  if (LDoc = nil) or (LDoc.Doc.TrailingLine = 0) then
+    Exit;
+  LName := LowerCase(AT.Name);
+  LName := Copy(LName, LastDelimiter('.', LName) + 1, MaxInt);
+  if LDoc.Doc.MentionsTrailing(LName) then
+    Result := Format('%s names it only after the root''s `end` (from line '
+      + '%d), which the compiler drops - no form binds it; a stray `end`?',
+      [AWs.RelPath(LForm), LDoc.Doc.TrailingLine]);
+end;
+
 function ToolReferences(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
 var
   LT: TTarget;
@@ -2344,6 +2367,12 @@ begin
     if LSet.Compiled > 0 then
       LSb.AppendLine(Format('(+%d in compiled units without source, not '
         + 'shown)', [LSet.Compiled]));
+    if (LSet.FormCount = 0) and LBindable then
+    begin
+      LForms := TrailingFormNote(AWs, LT);
+      if LForms <> '' then
+        LSb.AppendLine('(' + LForms + ')');
+    end;
     // No use by name is not "unused" for a routine called through what it
     // overrides, implements or is the accessor of: identity is the contract,
     // and a bare 0 reads as dead code.
@@ -4026,6 +4055,7 @@ procedure TCallerWalk.AppendNotes(ASb: TStringBuilder;
 var
   LRoots, LUnused, LDfm, LDfmData: TStringList;
   LDestructor: Boolean;
+  LTrail: string;
 begin
   LRoots := TStringList.Create;
   LUnused := TStringList.Create;
@@ -4061,7 +4091,12 @@ begin
             if FNodes[LI].Data then
               LDfmData.Add(FNodes[LI].Name)
             else
+            begin
               LDfm.Add(FNodes[LI].Name);
+              LTrail := TrailingFormNote(FWs, FNodes[LI].T);
+              if LTrail <> '' then
+                FNotes.Add(LTrail);
+            end;
           end;
           Break;
         end;
@@ -6010,7 +6045,8 @@ type
   TFormBind = record
     Prop, Text: string;
     FileIdx, Line: Integer;
-    Kind: Integer;               // 0 an event, 1 a component, 2 names nothing
+    Kind: Integer;               // 0 an event, 1 a component, 2 names nothing, 3 cleared
+    Method: string;              // an event's: the method it runs
   end;
 
   // A component of the merged form: the ancestors' objects, reopened by
@@ -6038,7 +6074,7 @@ var
   LFile, LForm, LUnit, LExt, LKey, LText, LLine: string;
   LA: TMcpAnalysis;
   LMid, LLimit, LShown, LTotal, LNode, LComponents, LEvents, LRefs,
-    LUnbound: Integer;
+    LUnbound, LCleared: Integer;
   LT: TTarget;
   LInfo: TPasFormInfo;
   LInfos: TList<TPasFormInfo>;
@@ -6061,6 +6097,12 @@ var
   begin
     if AB.TSym = NIL_SYM then
     begin
+      if AB.Cleared then
+      begin
+        AKind := 3;
+        Exit(Format('%s -> nil (cleared: the event runs nothing)',
+          [AB.PropName]));
+      end;
       AKind := 2;
       if AB.IsMethod then
         Exit(Format('%s -> %s - no such published method: the form fails to '
@@ -6122,7 +6164,7 @@ var
   end;
 
 begin
-  LLimit := EnsureRange(ArgInt(AArgs, 'limit', 400), 1, 20000);
+  LLimit := EnsureRange(ArgInt(AArgs, 'limit', 300), 1, 20000);
   LA := nil;
   if ArgStr(AArgs, 'file') <> '' then
   begin
@@ -6142,8 +6184,13 @@ begin
           + 'beside it', [AWs.RelPath(LFile)]);
     end;
     if not ModelOfFile(AWs, LUnit, LA, LMid) then
+    begin
+      if not TFile.Exists(LUnit) then
+        raise EToolError.CreateFmt('no unit beside %s - an orphan form file, '
+          + 'which no project compiles', [AWs.RelPath(LForm)]);
       raise EToolError.CreateFmt('%s is not part of any analyzed project',
         [AWs.RelPath(LUnit)]);
+    end;
   end
   else if ArgStr(AArgs, 'symbol') <> '' then
   begin
@@ -6194,6 +6241,11 @@ begin
     for var LFi := 0 to LInfos.Count - 1 do
     begin
       LInfo := LInfos[LFi];
+      if LInfo.TrailingLine > 0 then
+        LErrors.Add(Format('%s: from line %d the text follows the root''s '
+          + '`end` - the compiler reads one object and drops the rest, so '
+          + 'nothing written there is bound (a stray `end`?)',
+          [AWs.RelPath(LInfo.FilePath), LInfo.TrailingLine]));
       if LInfo.Error <> '' then
         LErrors.Add(Format('%s could not be read whole (%s) - what was read '
           + 'before is shown', [AWs.RelPath(LInfo.FilePath), LInfo.Error]));
@@ -6258,14 +6310,30 @@ begin
         end;
         LB.Prop := LBx.PropName;
         LB.Text := BindText(LBx, LB.Kind);
+        LB.Method := '';
+        if LB.Kind = 0 then
+          LB.Method := QualifiedName(LA.Proj.Model(LBx.TMid), LBx.TSym);
         LB.FileIdx := LFi;
         LB.Line := LBi.Line;
         LN := LNodes[LObjNode[LBi.Obj]];
+        // A collection a descendant writes replaces the ancestor's whole:
+        // TReader clears it before reading the items.
+        LText := Copy(LB.Prop, 1, Pos('[', LB.Prop));
+        if LText <> '' then
+          for var LI := High(LN.Binds) downto 0 do
+            if (LN.Binds[LI].FileIdx < LFi) and
+               StartsText(LText, LN.Binds[LI].Prop) then
+              Delete(LN.Binds, LI, 1);
         LNode := -1;
         for var LI := 0 to High(LN.Binds) do
           if SameText(LN.Binds[LI].Prop, LB.Prop) then
             LNode := LI;
-        // A descendant's value replaces the ancestor's.
+        // A descendant's value replaces the ancestor's; `nil` says which
+        // handler no longer runs.
+        if (LNode >= 0) and (LB.Kind = 3) and (LN.Binds[LNode].Kind = 0) then
+          LB.Text := Format('%s -> nil (cleared: %s, which %s binds, does not '
+            + 'run)', [LB.Prop, LN.Binds[LNode].Method,
+            ExtractFileName(LInfos[LN.Binds[LNode].FileIdx].FilePath)]);
         if LNode >= 0 then
           LN.Binds[LNode] := LB
         else
@@ -6277,11 +6345,13 @@ begin
     LEvents := 0;
     LRefs := 0;
     LUnbound := 0;
+    LCleared := 0;
     for var LNd in LNodes do
       for var LBd in LNd.Binds do
         case LBd.Kind of
           0: Inc(LEvents);
           1: Inc(LRefs);
+          3: Inc(LCleared);
         else
           Inc(LUnbound);
         end;
@@ -6304,7 +6374,7 @@ begin
     LSb.AppendLine(Format('%s, %s bound, %s to components%s', [Plural(
       LComponents, 'component'), Plural(LEvents, 'event'), Plural(LRefs,
       'reference'), IfThen(LUnbound > 0, Format(', %d naming nothing',
-      [LUnbound]), '')]));
+      [LUnbound]), '') + IfThen(LCleared > 0, Format(', %d cleared', [LCleared]), '')]));
     for var LE in LErrors do
       LSb.AppendLine('(' + LE + ')');
     LShown := 0;

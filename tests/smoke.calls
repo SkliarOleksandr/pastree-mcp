@@ -100,6 +100,7 @@ form {"file":"AppF/uData.dfm"}
 form {"file":"AppF/uBinaryForm.pas"}
 form {"file":"AppA/uAppA.pas"}
 form {"symbol":"TCircle"}
+form {"file":"AppF/uOrphanForm.dfm"}
 outline {"file":"Shared\\uShapes.pas"}
 outline {"file":"AppB\\uBoxes.pas", "section":"implementation"}
 outline {"file":"Shared/uShapes.pas", "limit":12}

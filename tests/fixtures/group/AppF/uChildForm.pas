@@ -4,6 +4,8 @@ unit uChildForm;
 // `inherited` and binds its click to a handler of its own, and binds the
 // ancestor's handler on a component it adds. It redeclares FormCreate, which
 // only its ancestor's form binds: MethodAddress on a TfrmChild finds its own.
+// It clears the ancestor's edtName.OnChange with nil, and the two items of a
+// button group (no field declared for it) bind a handler each.
 
 interface
 

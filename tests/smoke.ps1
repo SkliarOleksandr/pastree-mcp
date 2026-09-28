@@ -124,12 +124,12 @@ Check 'references grouped' (Block $b 'references {"symbol":"TCircle.FRadius"}') 
 # a handler the host sets on an inline frame's button; a module's component
 # named through the module; a binary form file, said so; and a published
 # method no form binds, which is the answer and says it.
-Check 'references form handler' (Block $b 'references {"symbol":"TfrmMain.btnSaveClick"}') @('2 references in 2 files, 2 of them in form files', "AppF\uChildForm.dfm`n  chkConfirm`n    14  OnClick = btnSaveClick", "AppF\uMainForm.dfm`n  btnSave`n    39  OnClick = btnSaveClick")
-Check 'references form component' (Block $b 'references {"symbol":"TfrmMain.edtName"}') @('3 references in 2 files, 2 of them in form files', "  lblName`n    21  FocusControl = edtName`n  23  object edtName: TEdit", "  TfrmMain.NameChange`n    53  ")
+Check 'references form handler' (Block $b 'references {"symbol":"TfrmMain.btnSaveClick"}') @('3 references in 2 files, 3 of them in form files', "AppF\uChildForm.dfm`n  chkConfirm`n    14  OnClick = btnSaveClick`n  grpTools`n    25  OnClick = btnSaveClick", "AppF\uMainForm.dfm`n  btnSave`n    39  OnClick = btnSaveClick")
+Check 'references form component' (Block $b 'references {"symbol":"TfrmMain.edtName"}') @('4 references in 3 files, 3 of them in form files', "AppF\uChildForm.dfm`n  16  inherited edtName: TEdit", "  lblName`n    21  FocusControl = edtName`n  23  object edtName: TEdit", "  TfrmMain.NameChange`n    53  ")
 Check 'references form inline' (Block $b 'references {"symbol":"TfrmMain.fraName1btnClearClick"}') @("  fraName1.btnClear`n    48  OnClick = fraName1btnClearClick")
 Check 'references form module' (Block $b 'references {"symbol":"TdmData.pmActions"}') @("AppF\uData.dfm`n  4  object pmActions: TPopupMenu", "  btnSave`n    37  PopupMenu = dmData.pmActions")
 Check 'references form binary' (Block $b 'references {"symbol":"TfrmBinary.btnBinaryClick"}') @("AppF\uBinaryForm.dfm  (binary - lines of its text conversion)`n  btnBinary`n    21  OnClick = btnBinaryClick")
-Check 'references form none' (Block $b 'references {"symbol":"TfrmMain.NeverBound"}') @('0 references in 0 files; no form file names it')
+Check 'references form none' (Block $b 'references {"symbol":"TfrmMain.NeverBound"}') @('0 references in 0 files; no form file names it', '(AppF\uMainForm.dfm names it only after the root''s `end` (from line 52), which the compiler drops - no form binds it; a stray `end`?)')
 Check 'references no form note' (Block $b 'references {"symbol":"TShape.Area"}') @() @('form file')
 # No use by name, called through what it overrides and implements: said, with
 # the count `callers` finds - a bare 0 reads as dead code. A routine nothing
@@ -163,10 +163,10 @@ Check 'callers outside the index' (Block $b 'callers {"symbol":"OrphanRoutine"}'
 # one no code calls, one called and bound, one bound nowhere (the empty case,
 # which says the forms were read), and a binding at depth 2 - the button a
 # chain of calls starts from. No row of another answer is taken for one.
-Check 'callers form only' (Block $b 'callers {"symbol":"TfrmMain.btnSaveClick"}') @('- no calls, 2 form bindings - an event of the component runs it', "AppF\uChildForm.dfm`n  chkConfirm`n    14  OnClick = btnSaveClick", "AppF\uMainForm.dfm`n  btnSave`n    39  OnClick = btnSaveClick")
+Check 'callers form only' (Block $b 'callers {"symbol":"TfrmMain.btnSaveClick"}') @('- no calls, 3 form bindings - an event of the component runs it', "AppF\uChildForm.dfm`n  chkConfirm`n    14  OnClick = btnSaveClick`n  grpTools`n    25  OnClick = btnSaveClick", "AppF\uMainForm.dfm`n  btnSave`n    39  OnClick = btnSaveClick")
 Check 'callers form and code' (Block $b 'callers {"symbol":"TfrmMain.NameChange"}') @('- 2 calls in 2 routines, 1 form binding', "  edtName`n    29  OnChange = NameChange", "  TfrmMain.fraName1btnClearClick`n    60  NameChange(Sender);")
-Check 'callers form none' (Block $b 'callers {"symbol":"TfrmMain.NeverBound"}') @('- none found', '(TfrmMain.NeverBound: published, and no form file binds it either)')
-Check 'callers form depth' (Block $b 'callers {"symbol":"TfrmMain.Save", "depth":2}') @('- 1 call in 1 routine; depth 2: 2 form bindings', "  TfrmMain.btnSaveClick`n    47  Save;", "  btnSave`n    39  [-> TfrmMain.btnSaveClick]")
+Check 'callers form none' (Block $b 'callers {"symbol":"TfrmMain.NeverBound"}') @('- none found', '(TfrmMain.NeverBound: published, and no form file binds it either)', '(AppF\uMainForm.dfm names it only after the root''s `end` (from line 52)')
+Check 'callers form depth' (Block $b 'callers {"symbol":"TfrmMain.Save", "depth":2}') @('- 1 call in 1 routine; depth 2: 3 form bindings', "  TfrmMain.btnSaveClick`n    47  Save;", "  btnSave`n    39  [-> TfrmMain.btnSaveClick]")
 Check 'callers no binding' (Block $b 'callers {"symbol":"TShapeBox.Changed"}') @() @('form binding')
 # A handler the descendant redeclares, bound only in its ancestor's form: a
 # TfrmChild reads uMainForm.dfm too, and its MethodAddress finds its own.
@@ -196,10 +196,10 @@ Check 'impact' (Block $b 'impact {"symbol":"TCircle.Area"}') @('impact of TCircl
 # A unit of one project reaches that project alone.
 Check 'impact one member' (Block $b 'impact {"symbol":"NeverCalled"}') @('members to build and test: AppB (not reached: AppA, AppF)', "AppB\uBoxes.pas`n  31  NeverCalled (procedure)", 'callers - none found') @('no callers found')
 # A handler no code calls: its form bindings are what the change reaches.
-Check 'impact form handler' (Block $b 'impact {"symbol":"TfrmMain.btnSaveClick"}') @('members to build and test: AppF (not reached: AppA, AppB)', 'callers - no calls, 2 form bindings - an event of the component runs it', "AppF\uMainForm.dfm`n  btnSave`n    39  OnClick = btnSaveClick")
+Check 'impact form handler' (Block $b 'impact {"symbol":"TfrmMain.btnSaveClick"}') @('members to build and test: AppF (not reached: AppA, AppB)', 'callers - no calls, 3 form bindings - an event of the component runs it', "AppF\uMainForm.dfm`n  btnSave`n    39  OnClick = btnSaveClick")
 # A component's uses: the code's and its form lines - its object line and a
 # FocusControl naming it.
-Check 'impact form component' (Block $b 'impact {"symbols":["TfrmMain.edtName"]}') @('uses - 1 in 1 routine, 2 form lines', "AppF\uMainForm.dfm`n  lblName`n    21  FocusControl = edtName`n  23  object edtName: TEdit")
+Check 'impact form component' (Block $b 'impact {"symbols":["TfrmMain.edtName"]}') @('uses - 1 in 1 routine, 3 form lines', "AppF\uMainForm.dfm`n  lblName`n    21  FocusControl = edtName`n  23  object edtName: TEdit")
 Check 'impact unit' (Block $b 'impact {"symbol":"uMembers"}') @('members to build and test: AppA (not reached: AppB, AppF)', 'AppA\uMembers.pas - used by 1 unit: AppA') @('callers')
 # A field: its uses, through the property that reads and writes it too.
 Check 'impact field' (Block $b 'impact {"symbol":"TCircle.FRadius"}') @('23  TCircle.FRadius (field) - also through TCircle.Radius (property)', 'uses - 4 in 3 routines', "  RunA`n    21  [via TCircle.Radius]", "  TCircle.Create`n    50  FRadius := ARadius;")
@@ -242,11 +242,13 @@ Check 'compile nothing changed' (Block $b 'compile {}') @('no file has changed s
 # the descendant's row, its rebound event the descendant's method, a row
 # from the ancestor names its file. No form: said, for a unit and a class.
 Check 'form' (Block $b 'form {"file":"AppF/uMainForm.pas"}') @('form frmMain: TfrmMain - AppF\uMainForm.dfm', '5 components, 4 events bound, 2 references to components', "1  frmMain: TfrmMain`n13    OnCreate -> TfrmMain.FormCreate`n15    lblName: TLabel`n21      FocusControl -> edtName", '37      PopupMenu -> dmData.pmActions (TdmData.pmActions)', "41    fraName1: TfraName (inline frame)`n47      btnClear: TButton`n48        OnClick -> TfrmMain.fraName1btnClearClick") @('Caption', 'Left')
-Check 'form inherited' (Block $b 'form {"symbol":"TfrmChild"}') @('form frmChild: TfrmChild - AppF\uChildForm.dfm; inherits AppF\uMainForm.dfm', '6 components, 5 events bound', '13    OnCreate -> TfrmChild.FormCreate  (uMainForm.dfm)', "4    btnSave: TButton`n37      PopupMenu -> dmData.pmActions (TdmData.pmActions)  (uMainForm.dfm)`n5      OnClick -> TfrmChild.ChildSaveClick`n", "7    chkConfirm: TCheckBox`n14      OnClick -> TfrmMain.btnSaveClick") @('TfrmMain.btnSaveClick  (uMainForm.dfm)')
+Check 'form inherited' (Block $b 'form {"symbol":"TfrmChild"}') @('form frmChild: TfrmChild - AppF\uChildForm.dfm; inherits AppF\uMainForm.dfm', '7 components, 6 events bound, 2 references to components, 1 cleared', "16    edtName: TEdit`n17      OnChange -> nil (cleared: TfrmMain.NameChange, which uMainForm.dfm binds, does not run)", "19    grpTools: TButtonGroup (no field)`n22      Items[0].OnClick -> TfrmChild.ChildSaveClick`n25      Items[1].OnClick -> TfrmMain.btnSaveClick", '13    OnCreate -> TfrmChild.FormCreate  (uMainForm.dfm)', "4    btnSave: TButton`n37      PopupMenu -> dmData.pmActions (TdmData.pmActions)  (uMainForm.dfm)`n5      OnClick -> TfrmChild.ChildSaveClick`n", "7    chkConfirm: TCheckBox`n14      OnClick -> TfrmMain.btnSaveClick") @('TfrmMain.btnSaveClick  (uMainForm.dfm)')
 Check 'form module' (Block $b 'form {"file":"AppF/uData.dfm"}') @("4    pmActions: TPopupMenu`n7      miSave: TMenuItem`n9        OnClick -> TdmData.miSaveClick")
 Check 'form binary' (Block $b 'form {"file":"AppF/uBinaryForm.pas"}') @('AppF\uBinaryForm.dfm (binary - lines of its text conversion)', '21      OnClick -> TfrmBinary.btnBinaryClick')
 Check 'form none' (Block $b 'form {"file":"AppA/uAppA.pas"}') @('AppA\uAppA.pas has no form file - no .dfm or .fmx beside it')
 Check 'form not a form class' (Block $b 'form {"symbol":"TCircle"}') @('TCircle has no form file of its own')
+# A form file with no unit beside it: said so, not "not part of any project".
+Check 'form orphan' (Block $b 'form {"file":"AppF/uOrphanForm.dfm"}') @('no unit beside AppF\uOrphanForm.dfm - an orphan form file, which no project compiles')
 Check 'outline' (Block $b 'outline {"file":"Shared') @('21  type TCircle = class', '27    property Radius: Double', '53  function TCircle.Area: Double', '40 implementation')
 # A parameter list whole: PasTree's outline cuts one at 80 characters.
 # Over `limit`: the types' members go first, said; still over, cut and said.
@@ -492,7 +494,7 @@ try {
     # The same removal seen from the form: the inherited form's own component
     # still binds the handler that is gone.
     $r = Rpc 21 'tools/call' '{"name":"form","arguments":{"symbol":"TfrmChild"}}'
-    Check 'form after a removed handler' (ToolText $r) @('1 naming nothing', '14      OnClick -> btnSaveClick - no such published method: the form fails to load')
+    Check 'form after a removed handler' (ToolText $r) @('2 naming nothing', '14      OnClick -> btnSaveClick - no such published method: the form fails to load', '25      Items[1].OnClick -> btnSaveClick - no such published method')
 
     $r = Rpc 15 'tools/call' '{"name":"no_such_tool","arguments":{}}'
     if (-not $r.result.isError) { Write-Host 'FAIL unknown tool not reported as isError'; $script:failures++ }

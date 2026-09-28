@@ -49,3 +49,7 @@ object frmMain: TfrmMain
     end
   end
 end
+  object btnGhost: TButton
+    OnClick = NeverBound
+  end
+end

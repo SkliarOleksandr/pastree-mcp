@@ -13,4 +13,16 @@ inherited frmChild: TfrmChild
     TabOrder = 3
     OnClick = btnSaveClick
   end
+  inherited edtName: TEdit
+    OnChange = nil
+  end
+  object grpTools: TButtonGroup
+    Items = <
+      item
+        OnClick = ChildSaveClick
+      end
+      item
+        OnClick = btnSaveClick
+      end>
+  end
 end

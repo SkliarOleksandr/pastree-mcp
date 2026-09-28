@@ -535,6 +535,16 @@ gap between the answers and the truth.
 - **`form`** - the component tree of one form: names, classes, the events
   each binds and to which method, the published field each component fills.
   What a developer sees in the Object Inspector, without reading the text.
+  Measured against a text oracle of TReader's rule over the client group's
+  1,043 text forms, four readings were fixed (0.15.0, PasTree 0.66.0): an
+  event is `On` and an upper-case letter, never a True/False value (a
+  Boolean `OneOnRow` read as a handler that is gone, on 49 lines); `OnX =
+  nil` is shown cleared, naming the ancestor's handler that no longer runs,
+  not "fails to load"; each item of a collection is its own row
+  (`Items[1].OnClick`), and a descendant's collection replaces the
+  ancestor's whole; text after the root's `end`, which dcc drops, is said -
+  and so is a handler named only there, in `references` and `callers`. The
+  row limit is 300 (400 put 7 forms over 5k tokens).
 - **Needs a form reader in PasTree**, which it does not have. Text DFM is a
   small grammar (`object`/`inherited`/`inline`, properties, collections,
   binary data blocks). Binary DFM must be recognized (the `TPF0` signature)
