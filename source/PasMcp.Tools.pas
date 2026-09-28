@@ -2381,6 +2381,36 @@ begin
     (AT.Head = 'routine'));
 end;
 
+// For a bare property redeclaration (`property PopupMenu;` in a descendant):
+// the property it republishes, whose uses through every class the rows are -
+// the agent asked about one class. '' for any other property.
+function RepublishNote(AWs: TMcpWorkspace; AA: TMcpAnalysis;
+  AMid, ASym: Integer): string;
+var
+  LMid, LSym, LPMid, LPSym: Integer;
+  LHit: TPasRefHit;
+begin
+  Result := '';
+  if not AA.Proj.IsBarePropertyRedecl(AMid, ASym) then
+    Exit;
+  LMid := AMid;
+  LSym := ASym;
+  for var LDepth := 1 to 32 do
+  begin
+    if not AA.Proj.IsBarePropertyRedecl(LMid, LSym) or
+       not AA.Proj.PropertyRedeclPrev(LMid, LSym, LPMid, LPSym) then
+      Break;
+    LMid := LPMid;
+    LSym := LPSym;
+  end;
+  if ((LMid = AMid) and (LSym = ASym)) or not AA.Nav.DeclHit(LMid, LSym, LHit) then
+    Exit;
+  Result := Format('(a bare redeclaration: it republishes %s (%s:%d) - the '
+    + 'rows are that property''s uses, through every class)',
+    [QualifiedName(AA.Proj.Model(LMid), LSym), AWs.RelPath(LHit.FilePath),
+    LHit.Line]);
+end;
+
 // For a routine no code names: the calls `callers` finds through what it
 // overrides, implements or is the accessor of, as a note line ('' = none).
 function ThroughNote(AWs: TMcpWorkspace; const AT: TTarget): string; forward;
@@ -2535,6 +2565,10 @@ begin
         LId := LT.Ids[LA.Index];
         if (LId.Mid < 0) or not LA.Proj.EnsureHydrated(LId.Mid) then
           Continue;
+        LForms := RepublishNote(AWs, LA, LId.Mid, LId.Sym);
+        if LForms <> '' then
+          LSb.Insert(Pos(sLineBreak, LSb.ToString) + Length(sLineBreak) - 1,
+            LForms + sLineBreak);
         if IsDefaultArrayProperty(LA.Proj.Model(LId.Mid),
            LA.Proj.Model(LId.Mid).Symbols[LId.Sym].DeclNode) then
           LSb.AppendLine('(the default array property: `X[I]` uses it '

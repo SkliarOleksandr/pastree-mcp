@@ -127,6 +127,8 @@ Check 'references grouped' (Block $b 'references {"symbol":"TCircle.FRadius"}') 
 # A class's own implementation headers are not uses, but a rename changes
 # them: counted and pointed at, not listed.
 Check 'references class headers' (Block $b 'references {"symbol":"TCircle"}') @('3 references in 2 files', '(+2 implementation headers of its own methods name it, not listed: Shared\uShapes.pas:47, Shared\uShapes.pas:53 - a rename changes them too)') @('47  constructor TCircle.Create')
+# A bare redeclaration's rows are the property it republishes: said.
+Check 'references republished' (Block $b 'references {"file":"AppA/uMembers.pas","line":38,"name":"Count"}') @("TDerived.Count (property) declared at AppA\uMembers.pas:38 - 1 references in 1 files; no form file sets it`n(a bare redeclaration: it republishes TBase.Count (AppA\uMembers.pas:28) - the rows are that property's uses, through every class)")
 # What the form files bind by name, under the component each line belongs to:
 # a handler no code calls, bound by a form and by the inherited form's own
 # component; a component named by its object line and by another's property;

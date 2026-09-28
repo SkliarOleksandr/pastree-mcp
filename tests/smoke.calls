@@ -34,6 +34,7 @@ members {"symbol":"TBufRec.Code"}
 outline {"file":"AppA\tuAppA.pas"}
 references {"symbol":"TShape.Area"}
 references {"symbol":"TCircle"}
+references {"file":"AppA/uMembers.pas","line":38,"name":"Count"}
 references {"file":"AppA\\uAppA.pas", "line":21, "name":"Radius"}
 references {"symbol":"uShapes"}
 references {"symbol":"TCircle.FRadius"}
