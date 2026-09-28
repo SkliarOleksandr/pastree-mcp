@@ -101,6 +101,9 @@ form {"file":"AppA/uAppA.pas"}
 form {"symbol":"TCircle"}
 outline {"file":"Shared\\uShapes.pas"}
 outline {"file":"AppB\\uBoxes.pas", "section":"implementation"}
+outline {"file":"Shared/uShapes.pas", "limit":12}
+outline {"file":"Shared/uShapes.pas", "members":true, "limit":5}
+outline {"file":"AppA/AppA.dpr"}
 unit_deps {"unit":"uShapes"}
 diagnostics {}
 references {"symbol":"Area"}

@@ -244,7 +244,13 @@ Check 'form none' (Block $b 'form {"file":"AppA/uAppA.pas"}') @('AppA\uAppA.pas 
 Check 'form not a form class' (Block $b 'form {"symbol":"TCircle"}') @('TCircle has no form file of its own')
 Check 'outline' (Block $b 'outline {"file":"Shared') @('21  type TCircle = class', '27    property Radius: Double', '53  function TCircle.Area: Double', '40 implementation')
 # A parameter list whole: PasTree's outline cuts one at 80 characters.
-Check 'outline signature' (Block $b 'outline {"file":"AppB') @("71    function Configure(const AFirstName: string; ASecondValue: Integer; const AThirdName: string = 'third'; AFourthFlag: Boolean = False): Boolean`n", '85  procedure TWideBox.Many(const AAlphaName, ABetaName, AGammaName: string; ADeltaCount, AEpsilonCount, AZetaCount: Integer; const AEtaText, AThetaText, AIotaText: string)') @('...')
+# Over `limit`: the types' members go first, said; still over, cut and said.
+# Asked for members, they stay and the rows are cut. A unit with no
+# declarations: its heads alone.
+Check 'outline limit' (Block $b 'outline {"file":"Shared/uShapes.pas", "limit"') @('(24 rows in all - the 10 member declarations of its types are left out: `owner` lists one type''s', "30  type TSquare = class`n38  function TotalArea", '... 2 more rows (raise `limit`') @('property Radius')
+Check 'outline limit members' (Block $b 'outline {"file":"Shared/uShapes.pas", "members"') @("10  type IShape = interface`n12    function Area: Double`n15  type TShape = class`n... 19 more rows") @('left out')
+Check 'outline no declarations' (Block $b 'outline {"file":"AppA/AppA.dpr"}') @("AppA\AppA.dpr (12 lines)`n1 program AppA`n5   uses`n9 begin") @('more rows', 'left out')
+Check 'outline signature' (Block $b 'outline {"file":"AppB')@("71    function Configure(const AFirstName: string; ASecondValue: Integer; const AThirdName: string = 'third'; AFourthFlag: Boolean = False): Boolean`n", '85  procedure TWideBox.Many(const AAlphaName, ABetaName, AGammaName: string; ADeltaCount, AEpsilonCount, AZetaCount: Integer; const AEtaText, AThetaText, AIotaText: string)') @('...')
 Check 'unit_deps' (Block $b 'unit_deps') @('uShapes is used by 3 units', 'AppB\uAppB.pas:8')
 Check 'diagnostics' (Block $b 'diagnostics') @('no diagnostics')
 Check 'ambiguous' (Block $b 'references {"symbol":"Area"}') @('is ambiguous - 5 declarations', 'IShape.Area', 'TBigCircle.Area')

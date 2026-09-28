@@ -6288,30 +6288,24 @@ const
   SECTIONS: array[TPasOutlineSection] of string = ('', 'interface',
     'implementation', 'initialization', 'finalization');
 var
-  LFile, LOwner, LSection, LLabel, LDetail: string;
+  LFile, LOwner, LSection: string;
   LA: TMcpAnalysis;
-  LMid, LDepth: Integer;
+  LMid, LLimit, LMemberRows: Integer;
   LM: TPasSemaModel;
-  LRows: TArray<TPasOutlineEntry>;
+  LEntries: TArray<TPasOutlineEntry>;
+  LRows: TList<string>;
   LSb: TStringBuilder;
   LMembers: Boolean;
-begin
-  if ArgStr(AArgs, 'file') = '' then
-    raise EToolError.Create('`file` is required');
-  LFile := ArgFile(AWs, AArgs);
-  if not ModelOfFile(AWs, LFile, LA, LMid) then
-    raise EToolError.CreateFmt('%s is not part of any analyzed project',
-      [AWs.RelPath(LFile)]);
-  LOwner := ArgStr(AArgs, 'owner');
-  LSection := LowerCase(ArgStr(AArgs, 'section'));
-  LMembers := ArgBool(AArgs, 'members', True);
-  LM := LA.Proj.Model(LMid);
-  LRows := PasModuleOutline(LM.Tree);
-  LSb := TStringBuilder.Create;
-  try
-    LSb.AppendLine(Format('%s (%d lines)', [AWs.RelPath(LFile),
-      Length(LM.Tree.Source.Files[0].LineStarts)]));
-    for var LE in LRows do
+
+  // The rows of the outline, members of types among them or not.
+  procedure Collect(AMembers: Boolean);
+  var
+    LLine, LLabel, LDetail: string;
+    LDepth: Integer;
+  begin
+    LRows.Clear;
+    LMemberRows := 0;
+    for var LE in LEntries do
     begin
       if (LSection <> '') and (LE.Section <> osNone) and
          (SECTIONS[LE.Section] <> LSection) then
@@ -6324,18 +6318,21 @@ begin
       end;
       case LE.Kind of
         okModule:
-          LSb.AppendLine(Format('%d %s %s', [LE.Line, LE.Head, LE.Name]));
+          LRows.Add(Format('%d %s %s', [LE.Line, LE.Head, LE.Name]));
         okSection:
-          LSb.AppendLine(Format('%d %s', [LE.Line, LE.Head]));
+          LRows.Add(Format('%d %s', [LE.Line, LE.Head]));
         okUses:
-          LSb.AppendLine(Format('%d   %s', [LE.Line, LE.Head]));
+          LRows.Add(Format('%d   %s', [LE.Line, LE.Head]));
         okInclude:
-          LSb.AppendLine(Format('%d   {$I %s} %s', [LE.Line, LE.Name,
-            LE.Detail]));
+          LRows.Add(Format('%d   {$I %s} %s', [LE.Line, LE.Name, LE.Detail]));
       else
         begin
-          if (LE.Owner <> '') and not LE.IsImpl and not LMembers then
-            Continue;
+          if (LE.Owner <> '') and not LE.IsImpl then
+          begin
+            Inc(LMemberRows);
+            if not AMembers then
+              Continue;
+          end;
           if LE.IsImpl and (LE.Owner <> '') then
           begin
             LDepth := 1;
@@ -6348,8 +6345,8 @@ begin
               LDepth := 2 + Length(LE.Owner.Split(['.'])) - 1;
             LLabel := LE.Name;
           end;
-          LSb.Append(Format('%d%s%s %s', [LE.Line, StringOfChar(' ', 2 * LDepth),
-            LE.Head, LLabel]));
+          LLine := Format('%d%s%s %s', [LE.Line, StringOfChar(' ', 2 * LDepth),
+            LE.Head, LLabel]);
           LDetail := LE.Detail;
           if (LE.Kind in [okRoutine, okProperty]) and (LE.Node <> NIL_NODE) then
             LDetail := SignatureDetail(LM, LE.Node);
@@ -6357,19 +6354,58 @@ begin
           begin
             if LDetail.StartsWith('(') or LDetail.StartsWith(':') or
                LDetail.StartsWith('[') then
-              LSb.Append(LDetail)
+              LLine := LLine + LDetail
             else
-              LSb.Append(' ' + LDetail);
+              LLine := LLine + ' ' + LDetail;
           end;
           if (LE.FilePath <> '') and not SameText(LE.FilePath, LFile) then
-            LSb.Append('  [in ' + AWs.RelPath(LE.FilePath) + ']');
-          LSb.AppendLine;
+            LLine := LLine + '  [in ' + AWs.RelPath(LE.FilePath) + ']';
+          LRows.Add(LLine);
         end;
       end;
     end;
+  end;
+
+begin
+  if ArgStr(AArgs, 'file') = '' then
+    raise EToolError.Create('`file` is required');
+  LFile := ArgFile(AWs, AArgs);
+  if not ModelOfFile(AWs, LFile, LA, LMid) then
+    raise EToolError.CreateFmt('%s is not part of any analyzed project',
+      [AWs.RelPath(LFile)]);
+  LOwner := ArgStr(AArgs, 'owner');
+  LSection := LowerCase(ArgStr(AArgs, 'section'));
+  LMembers := ArgBool(AArgs, 'members', True);
+  LLimit := EnsureRange(ArgInt(AArgs, 'limit', 400), 1, 100000);
+  LM := LA.Proj.Model(LMid);
+  LEntries := PasModuleOutline(LM.Tree);
+  LRows := TList<string>.Create;
+  LSb := TStringBuilder.Create;
+  try
+    LSb.AppendLine(Format('%s (%d lines)', [AWs.RelPath(LFile),
+      Length(LM.Tree.Source.Files[0].LineStarts)]));
+    Collect(LMembers);
+    // Too long whole: the types' members go first - the unit's types and
+    // routines are what an outline is read for, and `owner` gives one
+    // type's members back. Not when members were asked for by name.
+    if (LRows.Count > LLimit) and LMembers and (AArgs.GetValue('members') = nil)
+       and (LMemberRows > 0) then
+    begin
+      Collect(False);
+      LSb.AppendLine(Format('(%d rows in all - the %d member declarations of '
+        + 'its types are left out: `owner` lists one type''s, `members: true` '
+        + 'with a higher `limit` all of them)', [LRows.Count + LMemberRows,
+        LMemberRows]));
+    end;
+    for var LI := 0 to Min(LRows.Count, LLimit) - 1 do
+      LSb.AppendLine(LRows[LI]);
+    if LRows.Count > LLimit then
+      LSb.AppendLine(Format('... %d more rows (raise `limit`, or narrow with '
+        + '`section` or `owner`)', [LRows.Count - LLimit]));
     Result := LSb.ToString.TrimRight;
   finally
     LSb.Free;
+    LRows.Free;
   end;
 end;
 
@@ -9622,7 +9658,9 @@ const
     + 'members, e.g. TfrmMain"},'
     + '"section":{"type":"string","enum":["interface","implementation"]},'
     + '"members":{"type":"boolean","description":"Include fields, properties '
-    + 'and method declarations inside types (default true)"}},'
+    + 'and method declarations inside types (default true; left out, and '
+    + 'said, when the whole outline is over `limit`)"},'
+    + '"limit":{"type":"integer","description":"Max rows (default 400)"}},'
     + '"required":["file"]}},' +
 
     '{"name":"form","description":"The component tree of one form without '
