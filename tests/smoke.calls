@@ -46,6 +46,7 @@ references {"symbol":"TfraName.Note"}
 impact {"symbols":["TfraName.Title"]}
 references {"symbol":"TBigCircle.Area"}
 related {"relation":"descendants", "symbol":"uShapes.TShape"}
+related {"relation":"descendants", "symbol":"TShapeBoxClass"}
 related {"relation":"overrides", "symbol":"TShape.Area"}
 related {"relation":"implementations", "symbol":"IShape"}
 related {"relation":"implementations", "symbol":"IShape.Area"}

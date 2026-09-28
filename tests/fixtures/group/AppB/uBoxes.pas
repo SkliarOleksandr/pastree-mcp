@@ -94,5 +94,7 @@ type
     Buf: array[0..3] of Byte;
     Code: string[6];
   end;
+  // A class-reference type: `related descendants` of it is of TShapeBox.
+  TShapeBoxClass = class of TShapeBox;
 
 end.

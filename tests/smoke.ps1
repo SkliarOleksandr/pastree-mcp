@@ -146,6 +146,8 @@ Check 'references form property' (Block $b 'references {"symbol":"TfraName.Title
 Check 'references form property none' (Block $b 'references {"symbol":"TfraName.Note"}') @('0 references in 0 files; no form file sets it')
 Check 'impact form property' (Block $b 'impact {"symbols":["TfraName.Title"]}') @('uses - none in code, 1 form line', "  fraName1`n    32  Title = 'Child'")
 Check 'descendants' (Block $b 'related {"relation":"descendants"') @('  11  TBigCircle <- TCircle', "  21  TCircle`n", "  30  TSquare`n") @('<- TShape')
+# A class-reference type means the class it refers to, and says so.
+Check 'descendants metaclass' (Block $b 'related {"relation":"descendants", "symbol":"TShapeBoxClass"}') @('descendants of TShapeBox (AppB\uBoxes.pas:13): 1', '(TShapeBoxClass is `class of TShapeBox` - the answer is for TShapeBox)', '26  TBigBox')
 # A declaration row whose [tag] names its type gets no heading.
 Check 'overrides' (Block $b 'related {"relation":"overrides"') @('[TShape introduces]', '26  [TCircle override]  function Area', "  35  [TSquare override]`n", '[TBigCircle override]', "Shared\uShapes.pas`n  17  [TShape introduces]")
 Check 'implementors' (Block $b 'related {"relation":"implementations", "symbol":"IShape"}') @('[TShape]')

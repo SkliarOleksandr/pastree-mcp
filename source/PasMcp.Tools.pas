@@ -2500,8 +2500,9 @@ const
   IMK: array[TPasImplKind] of string = ('declares', 'implements',
     'implements (inherited)');
 var
-  LT: TTarget;
-  LRel, LName, LWhat: string;
+  LT, LOrig: TTarget;
+  LRel, LName, LWhat, LMeta: string;
+  LClassX: TSemaXType;
   LSet: THitSet;
   LHits: TArray<THit>;
   LSb: TStringBuilder;
@@ -2548,6 +2549,36 @@ begin
   if LT.Kind <> tkSymbol then
     raise EToolError.CreateFmt('%s is a %s; relations are about types, '
       + 'methods and variables', [LT.Name, LT.Head]);
+  // A class-reference type (`TFooClass = class of TFoo`) asked for its
+  // descendants, creations or destructions means the class it refers to.
+  LMeta := '';
+  if MatchText(LRel, ['descendants', 'creations', 'destructions']) then
+    for var LA in AWs.Analyses do
+    begin
+      if LT.Ids[LA.Index].Mid < 0 then
+        Continue;
+      LClassX := LA.Proj.ClassRefTargetX(XPlain(LT.Ids[LA.Index].Mid,
+        LT.Ids[LA.Index].Sym));
+      if XValid(LClassX) then
+      begin
+        LMeta := LT.Name;
+        LOrig := LT;
+        LT := Default(TTarget);
+        LT.Ids := NewIds(AWs);
+        if FillSymbolTarget(AWs, LA, LClassX.UnitId, LClassX.Sym, LT) then
+        begin
+          MapToOthers(AWs, LT);
+          LMeta := Format('(%s is `class of %s` - the answer is for %s)',
+            [LOrig.Name, LT.Name, LT.Name]);
+        end
+        else
+        begin
+          LT := LOrig;
+          LMeta := '';
+        end;
+      end;
+      Break;
+    end;
   LLimit := EnsureRange(ArgInt(AArgs, 'limit', 150), 1, 5000);
   LAccepted := False;
   LEnclosing := nil;
@@ -2636,6 +2667,8 @@ begin
     LHits := LSet.Sorted;
     LSb.AppendLine(Format('%s of %s (%s:%d): %d', [LRel, LT.Name,
       AWs.RelPath(LT.DeclFile), LT.DeclLine, Length(LHits)]));
+    if LMeta <> '' then
+      LSb.AppendLine(LMeta);
     // Descendants by file like every other answer, not as an indented tree:
     // a tree repeats a path on every row (250 rows, 27 tokens each, on the
     // client group), and `<- parent` keeps the shape.
