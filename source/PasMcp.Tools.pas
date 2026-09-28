@@ -4538,13 +4538,44 @@ end;
   the visibility section they are written in. A library ancestor of a group
   type is counted, not listed: the agent knows TForm, and a form's run of
   ancestors to TObject is some six hundred members. }
+// The type written after a variable's or field's name on its declaration line
+// - `array[1..44] of Byte` - for one whose type is written in place; '' when
+// the line does not read that way.
+function InPlaceTypeText(const AT: TTarget): string;
+var
+  LLines: TArray<string>;
+  LLine, LName: string;
+  LAt, LEnd: Integer;
+begin
+  Result := '';
+  LLines := ReadLines(AT.DeclFile);
+  if (AT.DeclLine < 1) or (AT.DeclLine > Length(LLines)) then
+    Exit;
+  LLine := LLines[AT.DeclLine - 1];
+  LName := Copy(AT.Name, LastDelimiter('.', AT.Name) + 1, MaxInt);
+  LAt := FindWord(LLine, LName);
+  if LAt = 0 then
+    Exit;
+  LLine := Copy(LLine, LAt + Length(LName), MaxInt);
+  LAt := Pos(':', LLine);
+  if LAt = 0 then
+    Exit;
+  LLine := Copy(LLine, LAt + 1, MaxInt);
+  LEnd := Pos(';', LLine);
+  if LEnd > 0 then
+    LLine := Copy(LLine, 1, LEnd - 1);
+  Result := Trim(LLine);
+  if Result <> '' then
+    Result := '`' + Result + '`';
+end;
+
 function ToolMembers(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
 var
   LT: TTarget;
   LA: TMcpAnalysis;
   LM, LDM: TPasSemaModel;
   LVisArg, LKind, LMatch, LMatchLower, LUnitFile, LHead, LHeading,
-    LLastHeading, LIndent, LList: string;
+    LLastHeading, LIndent, LList, LText: string;
   LMid, LSym, LLimit, LScope, LGroupIdx, LNotVisible, LShown, LLastGroup,
     LPrevLine: Integer;
   LView: TMemberView;
@@ -4612,8 +4643,16 @@ begin
     if not XValid(LStart) then
       LStart := LA.Proj.SymDeclTypeX(LMid, LSym);
     if not XValid(LStart) then
+    begin
+      // A type written in place - `array[1..44] of Byte`, `string[6]` - has
+      // no symbol, and no members: that is the answer, not a failure.
+      LText := InPlaceTypeText(LT);
+      if LText <> '' then
+        Exit(Format('%s (%s) is %s - a type written in place, with no '
+          + 'members', [LT.Name, LT.Head, LText]));
       raise EToolError.CreateFmt('%s (%s) has no type the analysis knows',
         [LT.Name, LT.Head]);
+    end;
   end
   else
     raise EToolError.CreateFmt('%s is a %s - `members` takes a type, or a '

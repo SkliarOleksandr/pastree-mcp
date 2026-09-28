@@ -109,6 +109,9 @@ Check 'members none match' (Block $b 'members {"symbol":"TCircle", "match"') @('
 Check 'members empty' (Block $b 'members {"symbol":"TEmpty"}') @('TEmpty (AppA\uMembers.pas:48): no members') @('(library')
 Check 'members not a type' (Block $b 'members {"symbol":"RunA"}') @('RunA is a procedure - `members` takes a type')
 Check 'members joined' (Block $b 'members {"symbol":"TWideBox"}') @("  public`n    71  function Configure(const AFirstName: string; ASecondValue: Integer; const AThirdName: string = 'third'; AFourthFlag: Boolean = False): Boolean;`n", '74  procedure Many(const AAlphaName, ABetaName, AGammaName: string; ADeltaCount, AEpsilonCount, AZetaCount: Integer; const AEtaText, AThetaText, ...); virtual;')
+# A field whose type is written in place has no members: said, not an error.
+Check 'members in-place array' (Block $b 'members {"symbol":"TBufRec.Buf"}') @('TBufRec.Buf (field) is `array[0..3] of Byte` - a type written in place, with no members')
+Check 'members in-place string' (Block $b 'members {"symbol":"TBufRec.Code"}') @('TBufRec.Code (field) is `string[6]` - a type written in place, with no members')
 # "AppA\tuAppA.pas" in JSON is a tab, not a backslash: say so, not "invalid characters in path".
 Check 'control character' (Block $b 'outline {"file":"AppA') @('`file` holds a control character (#9)')
 Check 'references' (Block $b 'references {"symbol":"TShape.Area"}') @('1 references in 1 files', "  RunA`n    22  Writeln(LShape.Describe")

@@ -88,4 +88,11 @@ procedure TWideBox.Many(const AAlphaName, ABetaName, AGammaName: string;
 begin
 end;
 
+// Fields whose types are written in place: `members` of one says so.
+type
+  TBufRec = record
+    Buf: array[0..3] of Byte;
+    Code: string[6];
+  end;
+
 end.
