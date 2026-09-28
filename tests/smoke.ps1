@@ -117,7 +117,7 @@ Check 'members in-place string' (Block $b 'members {"symbol":"TBufRec.Code"}') @
 # "AppA\tuAppA.pas" in JSON is a tab, not a backslash: say so, not "invalid characters in path".
 Check 'control character' (Block $b 'outline {"file":"AppA') @('`file` holds a control character (#9)')
 Check 'references' (Block $b 'references {"symbol":"TShape.Area"}') @('1 references in 1 files', "  RunA`n    22  Writeln(LShape.Describe")
-Check 'references by position' (Block $b 'references {"file"') @('TCircle.Radius (property)', '21  TCircle(LShape).Radius := 3;')
+Check 'references by position' (Block $b 'references {"file":"AppA\\uAppA.pas"') @('TCircle.Radius (property)', '21  TCircle(LShape).Radius := 3;')
 # A row in no routine or type (a uses clause) stays at the file level.
 Check 'references unit' (Block $b 'references {"symbol":"uShapes"}') @('3 references in 3 files', 'AppB\AppB.dpr', "AppA\uAppA.pas`n  13  uShapes;")
 # Rows under what they sit in: a member declaration under its class, a
