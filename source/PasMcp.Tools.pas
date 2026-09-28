@@ -2146,8 +2146,46 @@ begin
   Result := False;
 end;
 
+// The line of the unit's implementation that redeclares a routine declared
+// in its interface as external - `function SendMessage; external user32 name
+// 'SendMessageW';`, the Windows import units' shape: the interface header
+// says nothing of it. '' for none.
+function ExternalImplLine(LM: TPasSemaModel; ARoutine: Integer): string;
+var
+  LName, LLine: string;
+  LLines: TArray<string>;
+  LImpl: Boolean;
+  LAt: Integer;
+begin
+  Result := '';
+  if (LM.Tree.Nodes[ARoutine].FirstChild = NIL_NODE) or
+     (Length(LM.Tree.Source.FileNames) = 0) then
+    Exit;
+  LName := LM.Tree.NodeText(LM.Tree.Nodes[ARoutine].FirstChild);
+  LName := Copy(LName, LastDelimiter('.', LName) + 1, MaxInt);
+  if LName = '' then
+    Exit;
+  LLines := ReadLines(LM.Tree.Source.FileNames[0]);
+  LImpl := False;
+  for LLine in LLines do
+  begin
+    if not LImpl then
+    begin
+      LImpl := SameText(Trim(LLine), 'implementation');
+      Continue;
+    end;
+    LAt := FindWord(LLine, LName);
+    if (LAt > 0) and (Pos('external', LowerCase(LLine)) > LAt) and
+       (StartsText('function', TrimLeft(LLine)) or
+        StartsText('procedure', TrimLeft(LLine))) then
+      Exit(CleanLine(LLine));
+  end;
+end;
+
 // Why a routine declaration has no body to show.
 function NoBodyNote(LM: TPasSemaModel; ARoutine: Integer): string;
+var
+  LExt: string;
 begin
   if HasDirective(LM, ARoutine, 'abstract') then
     Result := 'abstract, no body: `related overrides` lists the overrides'
@@ -2157,7 +2195,13 @@ begin
   else if HasDirective(LM, ARoutine, 'external') then
     Result := 'external, no body in source'
   else
-    Result := 'no implementation found';
+  begin
+    LExt := ExternalImplLine(LM, ARoutine);
+    if LExt <> '' then
+      Result := Format('external - `%s`, no body in source', [LExt])
+    else
+      Result := 'no implementation found';
+  end;
 end;
 
 // One part - a declaration or an implementation - under its heading, the

@@ -462,6 +462,11 @@ try {
     $r = Rpc 34 'tools/call' '{"name":"references","arguments":{"symbol":"NewTwo"}}'
     Check 'error answer with note' (ToolText $r) @('(index: re-analyzed 1 changed file(s) in ', ' ms: AppA\uNewUnit.pas)', 'no declaration named `NewTwo`')
     if (-not $r.result.isError) { Write-Host 'FAIL [error answer with note] not isError'; $script:failures++ }
+    # A routine the interface declares and the implementation imports - the
+    # Windows import units' shape: external, said, with its import line.
+    [IO.File]::WriteAllText($newUnit, "unit uNewUnit;`r`n`r`ninterface`r`n`r`n{`$I uNewUnit.inc}`r`n`r`nprocedure NewOne;`r`nfunction Ticks: Cardinal; stdcall;`r`n`r`nimplementation`r`n`r`nprocedure NewOne;`r`nbegin`r`nend;`r`n`r`nfunction Ticks; external 'kernel32.dll' name 'GetTickCount';`r`n`r`nend.`r`n", $utf8)
+    $r = Rpc 36 'tools/call' '{"name":"callees","arguments":{"symbol":"uNewUnit.Ticks"}}'
+    Check 'callees external' (ToolText $r) @("Ticks: external - ``function Ticks; external 'kernel32.dll' name 'GetTickCount';``, no body in source - nothing to read calls from") @('no implementation found')
     Remove-Item $newUnit
     [IO.File]::WriteAllText($dpr, $text, $utf8)
     $r = Rpc 33 'tools/call' '{"name":"find","arguments":{"query":"NewOne"}}'
