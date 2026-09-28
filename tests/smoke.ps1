@@ -131,6 +131,11 @@ Check 'references form module' (Block $b 'references {"symbol":"TdmData.pmAction
 Check 'references form binary' (Block $b 'references {"symbol":"TfrmBinary.btnBinaryClick"}') @("AppF\uBinaryForm.dfm  (binary - lines of its text conversion)`n  btnBinary`n    21  OnClick = btnBinaryClick")
 Check 'references form none' (Block $b 'references {"symbol":"TfrmMain.NeverBound"}') @('0 references in 0 files; no form file names it')
 Check 'references no form note' (Block $b 'references {"symbol":"TShape.Area"}') @() @('form file')
+# No use by name, called through what it overrides and implements: said, with
+# the count `callers` finds - a bare 0 reads as dead code. A routine nothing
+# reaches either way gets no such line.
+Check 'references through' (Block $b 'references {"symbol":"TBigCircle.Area"}') @('TBigCircle.Area (function) declared at AppB\uAppB.pas:13 - 0 references in 0 files', '(none by name - `callers` finds 2 calls through TCircle.Area (virtual), TShape.Area (virtual), IShape.Area (interface): a call written against those runs this one)')
+Check 'references through none' (Block $b 'references {"symbol":"TfrmMain.NeverBound"}') @() @('none by name')
 Check 'descendants' (Block $b 'related {"relation":"descendants"') @('  11  TBigCircle <- TCircle', "  21  TCircle`n", "  30  TSquare`n") @('<- TShape')
 # A declaration row whose [tag] names its type gets no heading.
 Check 'overrides' (Block $b 'related {"relation":"overrides"') @('[TShape introduces]', '26  [TCircle override]  function Area', "  35  [TSquare override]`n", '[TBigCircle override]', "Shared\uShapes.pas`n  17  [TShape introduces]")

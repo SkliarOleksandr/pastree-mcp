@@ -2263,6 +2263,18 @@ begin
   end;
 end;
 
+function IsRoutineTarget(const AT: TTarget): Boolean;
+begin
+  Result := (AT.Kind = tkSymbol) and ((AT.Head = 'procedure') or
+    (AT.Head = 'function') or (AT.Head = 'constructor') or
+    (AT.Head = 'destructor') or (AT.Head = 'operator') or
+    (AT.Head = 'routine'));
+end;
+
+// For a routine no code names: the calls `callers` finds through what it
+// overrides, implements or is the accessor of, as a note line ('' = none).
+function ThroughNote(AWs: TMcpWorkspace; const AT: TTarget): string; forward;
+
 function ToolReferences(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
 var
   LT: TTarget;
@@ -2332,6 +2344,11 @@ begin
     if LSet.Compiled > 0 then
       LSb.AppendLine(Format('(+%d in compiled units without source, not '
         + 'shown)', [LSet.Compiled]));
+    // No use by name is not "unused" for a routine called through what it
+    // overrides, implements or is the accessor of: identity is the contract,
+    // and a bare 0 reads as dead code.
+    if (Length(LHits) = LSet.FormCount) and IsRoutineTarget(LT) then
+      LSb.Append(ThroughNote(AWs, LT));
     if (LT.Kind = tkSymbol) and (LT.Head = 'property') then
       for var LA in AWs.Analyses do
       begin
@@ -4123,6 +4140,34 @@ begin
   end;
 end;
 
+function ThroughNote(AWs: TMcpWorkspace; const AT: TTarget): string;
+var
+  LWalk: TCallerWalk;
+  LLevels: TStringBuilder;
+  LInfo: TCallWalkInfo;
+  LThrough: TArray<string>;
+begin
+  Result := '';
+  LWalk := TCallerWalk.Create(AWs);
+  LLevels := TStringBuilder.Create;
+  try
+    LWalk.AddRoot(AT, False);
+    // The count is over every row; `limit` only bounds what would be shown.
+    LWalk.Walk(1, 1, LLevels, LInfo);
+    LThrough := LWalk.Through(0);
+    if (Length(LInfo.Levels) = 0) or (LInfo.Levels[0].Calls = 0) or
+       (Length(LThrough) = 0) then
+      Exit;
+    Result := Format('(none by name - `callers` finds %s through %s: a call '
+      + 'written against %s runs this one)', [Plural(LInfo.Levels[0].Calls,
+      'call'), String.Join(', ', LThrough), IfThen(Length(LThrough) = 1, 'it',
+      'those')]) + sLineBreak;
+  finally
+    LLevels.Free;
+    LWalk.Free;
+  end;
+end;
+
 { Who calls a routine (SPEC 9.3.1): `references` folded to the routines the
   calls sit in, with what a reference search cannot see - calls that may
   dispatch to it through a virtual method it overrides or an interface
@@ -4134,10 +4179,7 @@ var
   LWalk: TCallerWalk;
 begin
   LT := ResolveOne(AWs, AArgs);
-  if (LT.Kind <> tkSymbol) or not ((LT.Head = 'procedure') or
-     (LT.Head = 'function') or (LT.Head = 'constructor') or
-     (LT.Head = 'destructor') or (LT.Head = 'operator') or
-     (LT.Head = 'routine')) then
+  if not IsRoutineTarget(LT) then
     raise EToolError.CreateFmt('%s is a %s - `callers` takes a routine; '
       + '`references` lists the uses of anything', [LT.Name, LT.Head]);
   LWalk := TCallerWalk.Create(AWs);
