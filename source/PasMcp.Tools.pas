@@ -264,7 +264,7 @@ begin
   LLine := LowerCase(ALine);
   LWord := LowerCase(AWord);
   // Where the line is code - not in a string literal or a comment: the
-  // identifier is wanted, not `'ENTRY_RESERV'` written before it.
+  // identifier is wanted, not `'FIELD_X'` written before it.
   SetLength(LCode, Length(LLine) + 1);
   LState := 0;   // 0 code, 1 string, 2 { }, 3 (* *), 4 // to the end
   LI := 1;
