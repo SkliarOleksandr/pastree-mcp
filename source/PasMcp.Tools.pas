@@ -817,51 +817,67 @@ begin
   LMoreKeys := TDictionary<string, Boolean>.Create;
   LList := TList<TTarget>.Create;
   try
-    for LA in AWs.Analyses do
-      for var LMid := 0 to LA.Proj.ModelCount - 1 do
-      begin
-        LFile := LA.Proj.ModelFile(LMid);
-        if AOwnOnly and not AWs.IsOwnFile(LFile) then
-          Continue;
-        LM := LA.Proj.Model(LMid);
-        for var LSym := 0 to LM.SymCount - 1 do
+    for var LRelaxed := False to True do
+    begin
+      // Nothing with the qualifiers as the chain's end: as a subsequence of
+      // it - `TOuter.Member` for TOuter.TInner.Member, as an agent writes it.
+      if LRelaxed and ((LRaw.Count > 0) or (Length(LQuals) = 0)) then
+        Break;
+      for LA in AWs.Analyses do
+        for var LMid := 0 to LA.Proj.ModelCount - 1 do
         begin
-          if LWild then
-          begin
-            if not WildMatch(LName, LM.Symbols[LSym].NameLower) then
-              Continue;
-          end
-          else if LM.Symbols[LSym].NameLower <> LName then
+          LFile := LA.Proj.ModelFile(LMid);
+          if AOwnOnly and not AWs.IsOwnFile(LFile) then
             Continue;
-          if not IsDeclSymbol(LM, LSym) or not KindMatches(LM, LSym, AKind) then
-            Continue;
-          if Length(LQuals) > 0 then
+          LM := LA.Proj.Model(LMid);
+          for var LSym := 0 to LM.SymCount - 1 do
           begin
-            // The qualifiers must be the END of unit-name + owner chain.
-            LChain := UnitNameOfFile(LFile).Split(['.']);
-            for var LSeg in OwnerOf(LM, LM.Symbols[LSym].Scope).Split(['.']) do
-              if LSeg <> '' then
-                LChain := LChain + [StripGenerics(LSeg)];
-            LOk := Length(LQuals) <= Length(LChain);
-            if LOk then
-              for LIdx := 0 to High(LQuals) do
-                if not SameText(LQuals[LIdx],
-                   LChain[Length(LChain) - Length(LQuals) + LIdx]) then
-                begin
-                  LOk := False;
-                  Break;
-                end;
-            if not LOk then
+            if LWild then
+            begin
+              if not WildMatch(LName, LM.Symbols[LSym].NameLower) then
+                Continue;
+            end
+            else if LM.Symbols[LSym].NameLower <> LName then
               Continue;
+            if not IsDeclSymbol(LM, LSym) or not KindMatches(LM, LSym, AKind) then
+              Continue;
+            if Length(LQuals) > 0 then
+            begin
+              // The qualifiers must be the END of unit-name + owner chain.
+              LChain := UnitNameOfFile(LFile).Split(['.']);
+              for var LSeg in OwnerOf(LM, LM.Symbols[LSym].Scope).Split(['.']) do
+                if LSeg <> '' then
+                  LChain := LChain + [StripGenerics(LSeg)];
+              LOk := Length(LQuals) <= Length(LChain);
+              if LOk then
+                for LIdx := 0 to High(LQuals) do
+                  if not SameText(LQuals[LIdx],
+                     LChain[Length(LChain) - Length(LQuals) + LIdx]) then
+                  begin
+                    LOk := False;
+                    Break;
+                  end;
+              if LRelaxed then
+              begin
+                LSeenIdx := 0;
+                for var LSeg in LChain do
+                  if (LSeenIdx <= High(LQuals)) and
+                     SameText(LQuals[LSeenIdx], LSeg) then
+                    Inc(LSeenIdx);
+                LOk := LSeenIdx > High(LQuals);
+              end;
+              if not LOk then
+                Continue;
+            end;
+            LMatch.Analysis := LA.Index;
+            LMatch.Mid := LMid;
+            LMatch.Sym := LSym;
+            LMatch.ModelFile := LFile;
+            LMatch.Own := AWs.IsOwnFile(LFile);
+            LRaw.Add(LMatch);
           end;
-          LMatch.Analysis := LA.Index;
-          LMatch.Mid := LMid;
-          LMatch.Sym := LSym;
-          LMatch.ModelFile := LFile;
-          LMatch.Own := AWs.IsOwnFile(LFile);
-          LRaw.Add(LMatch);
         end;
-      end;
+    end;
 
     LRaw.Sort(TComparer<TRawMatch>.Construct(
       function(const L, R: TRawMatch): Integer

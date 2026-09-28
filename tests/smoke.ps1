@@ -72,6 +72,8 @@ Check 'find wildcard' (Block $b 'find {"query":"*Circ*"') @('AppB\uAppB.pas:11  
 # A declaration written over several lines is one row, whole - or, longer than
 # a row, cut at a parameter boundary with its end kept.
 Check 'find joined' (Block $b 'find {"query":"TWideBox.Configure"}') @("AppB\uBoxes.pas:71  TWideBox.Configure (function)  function Configure(const AFirstName: string; ASecondValue: Integer; const AThirdName: string = 'third'; AFourthFlag: Boolean = False): Boolean;")
+# The outer type with the nested one left out: its member still found.
+Check 'find nested' (Block $b 'find {"query":"TOuterBox.Depth"}') @('AppB\uBoxes.pas:103  TOuterBox.TInnerBox.Depth (field)') @('no declaration matches')
 Check 'find joined cut' (Block $b 'find {"query":"TWideBox.Many"}') @('AppB\uBoxes.pas:74  TWideBox.Many (procedure)  procedure Many(const AAlphaName, ABetaName, AGammaName: string; ADeltaCount, AEpsilonCount, AZetaCount: Integer; const AEtaText, AThetaText, ...); virtual;')
 # A name no declaration matches: what the index is, and where the name is
 # written outside it - in a unit no project uses - or that it is nowhere.

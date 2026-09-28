@@ -7,6 +7,7 @@ find {"query":"TWideBox.Configure"}
 find {"query":"TWideBox.Many"}
 find {"query":"OrphanRoutine"}
 find {"query":"NothingAnywhere"}
+find {"query":"TOuterBox.Depth"}
 definition {"symbol":"TCircle.Area", "context":3}
 source {"symbol":"TCircle.Area"}
 source {"symbol":"TCircle.Area", "part":"both"}

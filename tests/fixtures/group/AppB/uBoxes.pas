@@ -96,5 +96,12 @@ type
   end;
   // A class-reference type: `related descendants` of it is of TShapeBox.
   TShapeBoxClass = class of TShapeBox;
+  // A nested type: `find TOuterBox.Depth` finds TOuterBox.TInnerBox.Depth.
+  TOuterBox = class
+  public type
+    TInnerBox = class
+      Depth: Integer;
+    end;
+  end;
 
 end.
