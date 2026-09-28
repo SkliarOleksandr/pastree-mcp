@@ -373,6 +373,12 @@ begin
     (LM.Scopes[LScope].Kind in [sckUnit, sckImplementation]);
 end;
 
+// '1 call', '3 calls'.
+function Plural(ACount: Integer; const AWord: string): string;
+begin
+  Result := IntToStr(ACount) + ' ' + AWord + IfThen(ACount = 1, '', 's');
+end;
+
 function HeadOf(LM: TPasSemaModel; ASym: Integer): string;
 begin
   case LM.Symbols[ASym].Kind of
@@ -2413,11 +2419,15 @@ var
   LEnclosing: TEnclosing;
   LBindable, LSetsProp: Boolean;
   LForms: string;
+  LPlainKeys, LHeaderSeen: TDictionary<string, Boolean>;
+  LHeaders: TArray<TPasRefHit>;
 begin
   LT := ResolveOne(AWs, AArgs);
   LLimit := EnsureRange(ArgInt(AArgs, 'limit', 150), 1, 5000);
   LBindable := False;
   LSetsProp := False;
+  LHeaders := nil;
+  LHeaderSeen := TDictionary<string, Boolean>.Create;
   LSet := THitSet.Create(AWs);
   LSb := TStringBuilder.Create;
   LEnclosing := TEnclosing.Create(AWs);
@@ -2432,6 +2442,25 @@ begin
           begin
             for var LH in LA.Nav.FindReferences(LId.Mid, LId.Sym) do
               LSet.Add(LH);
+            // A class's name qualifying its own methods' implementation
+            // headers is no use, but a rename must change it: counted.
+            if (LT.Head = 'class') or (LT.Head = 'record') then
+            begin
+              LPlainKeys := TDictionary<string, Boolean>.Create;
+              try
+                for var LH in LA.Nav.FindReferences(LId.Mid, LId.Sym) do
+                  LPlainKeys.AddOrSetValue(Format('%s:%d:%d',
+                    [LowerCase(LH.FilePath), LH.Line, LH.Col]), True);
+                for var LH in LA.Nav.FindReferences(LId.Mid, LId.Sym, True) do
+                  if not LPlainKeys.ContainsKey(Format('%s:%d:%d',
+                     [LowerCase(LH.FilePath), LH.Line, LH.Col])) and
+                     LHeaderSeen.TryAdd(Format('%s:%d', [LowerCase(LH.FilePath),
+                     LH.Line]), True) then
+                    LHeaders := LHeaders + [LH];
+              finally
+                LPlainKeys.Free;
+              end;
+            end;
             // What the form files bind by name - a handler no code calls, a
             // component only its form file names - which a rename made from
             // the Pascal rows alone breaks at run time, when the form loads.
@@ -2478,6 +2507,17 @@ begin
     if LSet.Compiled > 0 then
       LSb.AppendLine(Format('(+%d in compiled units without source, not '
         + 'shown)', [LSet.Compiled]));
+    if Length(LHeaders) > 0 then
+    begin
+      LForms := '';
+      for var LI := 0 to Min(High(LHeaders), 2) do
+        LForms := LForms + IfThen(LI > 0, ', ', '') + Format('%s:%d',
+          [AWs.RelPath(LHeaders[LI].FilePath), LHeaders[LI].Line]);
+      LSb.AppendLine(Format('(+%s of its own methods name it, not listed: '
+        + '%s%s - a rename changes them too)', [Plural(Length(LHeaders),
+        'implementation header'), LForms, IfThen(Length(LHeaders) > 3,
+        ', ...', '')]));
+    end;
     if (LSet.FormCount = 0) and LBindable then
     begin
       LForms := TrailingFormNote(AWs, LT);
@@ -2505,6 +2545,7 @@ begin
   finally
     LEnclosing.Free;
     LSb.Free;
+    LHeaderSeen.Free;
     LSet.Free;
   end;
 end;
@@ -3103,12 +3144,6 @@ end;
 function SiteKey(const AFile: string; ALine, ACol: Integer): string;
 begin
   Result := LowerCase(AFile) + ':' + IntToStr(ALine) + ':' + IntToStr(ACol);
-end;
-
-// '1 call', '3 calls'.
-function Plural(ACount: Integer; const AWord: string): string;
-begin
-  Result := IntToStr(ACount) + ' ' + AWord + IfThen(ACount = 1, '', 's');
 end;
 
 // Does a class stream - a TPersistent descendant, compiled {$M+}? Its unnamed

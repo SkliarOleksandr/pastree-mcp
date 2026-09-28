@@ -124,6 +124,9 @@ Check 'references unit' (Block $b 'references {"symbol":"uShapes"}') @('3 refere
 # statement under its routine, two uses on one line under one heading.
 # A line naming it twice is one row; the header counts occurrences.
 Check 'references grouped' (Block $b 'references {"symbol":"TCircle.FRadius"}') @('5 references in 1 files', "  TCircle`n    27  property Radius: Double read FRadius write FRadius;`n  TCircle.Create", "  TCircle.Create`n    50  FRadius := ARadius;", "  TCircle.Area`n    55  Result := Pi * FRadius * FRadius;") @("FRadius;`n    55  ", "FRadius;`n    27  ")
+# A class's own implementation headers are not uses, but a rename changes
+# them: counted and pointed at, not listed.
+Check 'references class headers' (Block $b 'references {"symbol":"TCircle"}') @('3 references in 2 files', '(+2 implementation headers of its own methods name it, not listed: Shared\uShapes.pas:47, Shared\uShapes.pas:53 - a rename changes them too)') @('47  constructor TCircle.Create')
 # What the form files bind by name, under the component each line belongs to:
 # a handler no code calls, bound by a form and by the inherited form's own
 # component; a component named by its object line and by another's property;
