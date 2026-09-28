@@ -28,4 +28,7 @@ inherited frmChild: TfrmChild
   object lblHint: TLabel
     FocusControl = fraName1.edtHint
   end
+  inherited fraName1: TfraName
+    Title = 'Child'
+  end
 end

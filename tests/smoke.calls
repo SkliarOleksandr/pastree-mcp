@@ -39,6 +39,9 @@ references {"symbol":"TfrmMain.fraName1btnClearClick"}
 references {"symbol":"TdmData.pmActions"}
 references {"symbol":"TfrmBinary.btnBinaryClick"}
 references {"symbol":"TfrmMain.NeverBound"}
+references {"symbol":"TfraName.Title"}
+references {"symbol":"TfraName.Note"}
+impact {"symbols":["TfraName.Title"]}
 references {"symbol":"TBigCircle.Area"}
 related {"relation":"descendants", "symbol":"uShapes.TShape"}
 related {"relation":"overrides", "symbol":"TShape.Area"}

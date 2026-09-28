@@ -2307,12 +2307,13 @@ var
   LLimit: Integer;
   LId: TSymId;
   LEnclosing: TEnclosing;
-  LBindable: Boolean;
+  LBindable, LSetsProp: Boolean;
   LForms: string;
 begin
   LT := ResolveOne(AWs, AArgs);
   LLimit := EnsureRange(ArgInt(AArgs, 'limit', 150), 1, 5000);
   LBindable := False;
+  LSetsProp := False;
   LSet := THitSet.Create(AWs);
   LSb := TStringBuilder.Create;
   LEnclosing := TEnclosing.Create(AWs);
@@ -2335,6 +2336,10 @@ begin
             if not LBindable then
               LBindable := LA.Nav.FormRoleOf(LId.Mid, LId.Sym).Kind in
                 [fskComponent, fskHandler];
+            if not LSetsProp and LA.Proj.EnsureHydrated(LId.Mid) then
+              LSetsProp := (LA.Proj.Model(LId.Mid).Symbols[LId.Sym].Kind =
+                skProperty) and (LA.Proj.Model(LId.Mid).Symbols[LId.Sym].
+                Visibility = svPublished);
           end;
         tkUnit:
           for var LH in LA.Nav.FindUnitReferences(LId.Mid) do
@@ -2354,6 +2359,8 @@ begin
       LForms := Format(', %d of them in form files', [LSet.FormCount])
     else if LBindable then
       LForms := '; no form file names it'
+    else if LSetsProp then
+      LForms := '; no form file sets it'
     else
       LForms := '';
     if LT.Kind in [tkSymbol, tkUnit] then

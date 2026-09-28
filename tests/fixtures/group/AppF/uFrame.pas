@@ -14,6 +14,13 @@ type
     edtValue: TEdit;
     btnClear: TButton;
     procedure btnClearClick(Sender: TObject);
+  private
+    FTitle: string;
+  published
+    // Set by uChildForm.dfm on its frame: a form line that references of
+    // the property lists, and no code uses.
+    property Title: string read FTitle write FTitle;
+    property Note: string read FTitle;   // published, and no form sets it
   end;
 
 implementation
