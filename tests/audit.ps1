@@ -279,6 +279,10 @@ function Parse-Outline($File, $Answer, $Candidates) {
     foreach ($l in $Answer.Lines) {
         if ($l -notmatch '^(\d+)( +)(.*)$') { continue }
         $ln = [int]$Matches[1]; $ind = $Matches[2].Length; $t = $Matches[3].Trim()
+        # A declaration an include file holds is addressed at the include, by
+        # its own line (a position there resolves through the unit).
+        $at = $File
+        if ($t -match '\s+\[in ([^\]]+)\]$') { $at = $Matches[1].Replace('\', '/'); $t = $t -replace '\s+\[in [^\]]+\]$', '' }
         if ($ind -eq 1) {
             if ($t -eq 'interface' -or $t -eq 'implementation') { $section = $t }
             elseif ($t -match '^(initialization|finalization)') { $section = 'init' }
@@ -290,7 +294,7 @@ function Parse-Outline($File, $Answer, $Candidates) {
                 $n = $Matches[1] -replace '<.*$', ''; $kw = $Matches[2].ToLower()
                 $cat = if ($kw -match '^class') { 'class' } elseif ($kw -match '^(interface|dispinterface)') { 'interface' } else { 'type' }
                 # A forward declaration and the full one: the last row wins.
-                $types[$n] = New-Sym $cat 'own' $size $form $File $ln $n $n
+                $types[$n] = New-Sym $cat 'own' $size $form $at $ln $n $n
                 if ($cat -eq 'class' -or $cat -eq 'interface' -or $kw -match '^record') { $owner = $n; $ownerKind = $cat; $ownerHadMethod = $false }
                 continue
             }
@@ -301,10 +305,10 @@ function Parse-Outline($File, $Answer, $Candidates) {
                 $n = $Matches[3]
                 if ($section -eq 'implementation' -and $declared.Contains($n)) { continue }
                 if ($section -eq 'interface') { [void]$declared.Add($n) }
-                [void]$Candidates.Add((New-Sym 'routine' 'own' $size $form $File $ln $n $n)); continue
+                [void]$Candidates.Add((New-Sym 'routine' 'own' $size $form $at $ln $n $n)); continue
             }
-            if ($t -match '^(var|threadvar)\s+(\w+)') { [void]$Candidates.Add((New-Sym 'var' 'own' $size $form $File $ln $Matches[2] $Matches[2])); continue }
-            if ($t -match '^(const|resourcestring)\s+(\w+)') { [void]$Candidates.Add((New-Sym 'const' 'own' $size $form $File $ln $Matches[2] $Matches[2])); continue }
+            if ($t -match '^(var|threadvar)\s+(\w+)') { [void]$Candidates.Add((New-Sym 'var' 'own' $size $form $at $ln $Matches[2] $Matches[2])); continue }
+            if ($t -match '^(const|resourcestring)\s+(\w+)') { [void]$Candidates.Add((New-Sym 'const' 'own' $size $form $at $ln $Matches[2] $Matches[2])); continue }
             continue
         }
         if ($ind -ge 4 -and $owner) {
@@ -314,15 +318,15 @@ function Parse-Outline($File, $Answer, $Candidates) {
                 $n = $Matches[3]
                 $cat = 'method'
                 if ($formClass -and $owner -eq $formClass -and $t -match '\(\s*Sender\s*:') { $cat = 'handler' }
-                [void]$Candidates.Add((New-Sym $cat 'own' $size $form $File $ln $n ($q + $n)))
+                [void]$Candidates.Add((New-Sym $cat 'own' $size $form $at $ln $n ($q + $n)))
             }
             elseif ($t -match '^(class\s+)?property\s+(\w+)') {
                 $ownerHadMethod = $true
-                [void]$Candidates.Add((New-Sym 'property' 'own' $size $form $File $ln $Matches[2] ($q + $Matches[2])))
+                [void]$Candidates.Add((New-Sym 'property' 'own' $size $form $at $ln $Matches[2] ($q + $Matches[2])))
             }
             elseif ($t -match '^(field|class var)\s+(\w+)') {
                 $cat = if ($formClass -and $owner -eq $formClass -and -not $ownerHadMethod) { 'component' } else { 'field' }
-                [void]$Candidates.Add((New-Sym $cat 'own' $size $form $File $ln $Matches[2] ($q + $Matches[2])))
+                [void]$Candidates.Add((New-Sym $cat 'own' $size $form $at $ln $Matches[2] ($q + $Matches[2])))
             }
         }
     }
@@ -410,7 +414,9 @@ if ($Sample -gt 0 -or $Outlines -gt 0) {
     $files = Get-GroupFiles '\.(pas|dpr|dpk)$'
     if ($Exclude) { $files = @($files | Where-Object { $_ -notmatch $Exclude }) }
     Write-Host "outline of $($files.Count) files of $root"
-    $ans = Invoke-Calls ($files | ForEach-Object { 'outline {"file":' + (J (PathArg $_)) + '}' }) 'outline'
+    # Every declaration: the members too, and no row limit (a default
+    # outline of a large unit leaves the members out and cuts the rows).
+    $ans = Invoke-Calls ($files | ForEach-Object { 'outline {"file":' + (J (PathArg $_)) + ',"members":true,"limit":100000}' }) 'outline'
     $cands = New-Object System.Collections.ArrayList
     for ($i = 0; $i -lt $files.Count; $i++) {
         if (Parse-Outline $files[$i] $ans[$i] $cands) { [void]$ownUnits.Add($files[$i]) }
@@ -503,7 +509,8 @@ for ($i = 0; $i -lt $syms.Count; $i++) {
     foreach ($call in (Battery $syms[$i])) { [void]$plan.Add([pscustomobject]@{ Sym = $i; Call = $call }) }
 }
 if ($Forms) {
-    foreach ($f in (Get-GroupFiles '\.(dfm|fmx)$')) { [void]$plan.Add([pscustomobject]@{ Sym = -1; Call = 'form {"file":' + (J $f) + '}' }) }
+    # -Exclude reaches the form files too: vendored forms are not the group's.
+    foreach ($f in @(Get-GroupFiles '\.(dfm|fmx)$' | Where-Object { -not $Exclude -or $_ -notmatch $Exclude })) { [void]$plan.Add([pscustomobject]@{ Sym = -1; Call = 'form {"file":' + (J $f) + '}' }) }
 }
 if ($Outlines -gt 0) {
     $rngO = New-Object System.Random ($Seed + 7919)
