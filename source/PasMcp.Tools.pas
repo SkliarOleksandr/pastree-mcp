@@ -3030,13 +3030,16 @@ type
 // '3 calls in 3 routines; depth 2: 2 in 2' - the levels of a walk, each with
 // the references it found that call nothing. ANoun names the first level's
 // rows; '' leaves them a bare count. AThem: those references do not call
-// "them", the roots, rather than "it".
+// "them", the roots, rather than "it". The form lines of a level bind a
+// handler to an event - or, for uses (ANoun ''), name a component or a class.
 function LevelsSummary(const AInfo: TCallWalkInfo; const ANoun: string;
   AThem: Boolean): string;
 var
   LL: TCallLevel;
+  LFormWord: string;
 begin
   Result := '';
+  LFormWord := IfThen(ANoun = '', 'form line', 'form binding');
   for var LIdx := 0 to High(AInfo.Levels) do
   begin
     LL := AInfo.Levels[LIdx];
@@ -3052,7 +3055,7 @@ begin
     begin
       // Form lines alone: `depth 2: 2 form bindings`, not `0 in 0`.
       Result := Result + Format('; depth %d: %s', [LIdx + 1,
-        Plural(LL.Bindings, 'form binding')]);
+        Plural(LL.Bindings, LFormWord)]);
       LL.Bindings := 0;
     end
     else
@@ -3065,23 +3068,27 @@ begin
       Result := Result + Format(', %d references that do not call %s',
         [LL.Others, IfThen(AThem, 'them', 'it')]);
     if LL.Bindings > 0 then
-      Result := Result + ', ' + Plural(LL.Bindings, 'form binding');
+      Result := Result + ', ' + Plural(LL.Bindings, LFormWord);
   end;
 end;
 
 // A first level with no call - nothing is below it: none found, or only
 // references that hand the roots on, or the form lines that bind them to an
-// event. AThem: several roots.
-function NoCallsSummary(const AL: TCallLevel; AThem: Boolean): string;
+// event. AThem: several roots. AData: some of them are no routine (impact),
+// and their form lines name them - a component's object line - rather than
+// bind an event.
+function NoCallsSummary(const AL: TCallLevel; AThem, AData: Boolean): string;
 begin
   if (AL.Others = 0) and (AL.Bindings = 0) then
     Exit('none found');
-  Result := 'no calls';
+  Result := IfThen(AData, 'none in code', 'no calls');
   if AL.Others > 0 then
     Result := Result + Format(', %s that %s not call %s', [Plural(AL.Others,
       'reference'), IfThen(AL.Others = 1, 'does', 'do'), IfThen(AThem, 'them',
       'it')]);
-  if AL.Bindings > 0 then
+  if (AL.Bindings > 0) and AData then
+    Result := Result + ', ' + Plural(AL.Bindings, 'form line')
+  else if AL.Bindings > 0 then
     Result := Result + Format(', %s - an event of the component runs %s',
       [Plural(AL.Bindings, 'form binding'), IfThen(AThem, 'them', 'it')]);
 end;
@@ -3511,7 +3518,11 @@ end;
   deeper level the binding is where a chain of calls starts - the button
   that runs it. Only a published method can be bound, and only its own
   symbol is: the form's class finds the method by name (TReader, through
-  MethodAddress), and the binder resolves each line to the one it finds. }
+  MethodAddress), and the binder resolves each line to the one it finds.
+  A root that is no routine (impact's data roots) has every line naming it:
+  a component's `object` line, a `FocusControl = edtName`, a class in an
+  object header - a form that no longer loads when the field or the class
+  is renamed or removed. }
 procedure TCallerWalk.SearchFormBindings(AA: TMcpAnalysis;
   const ANode: TCallNode);
 var
@@ -3521,11 +3532,13 @@ var
 begin
   LMid := ANode.T.Ids[AA.Index].Mid;
   LSym := ANode.T.Ids[AA.Index].Sym;
-  if (LMid < 0) or (LSym < 0) or not IsPublishedMethod(AA, LMid, LSym) then
+  if (LMid < 0) or (LSym < 0) or
+     (not ANode.Data and not IsPublishedMethod(AA, LMid, LSym)) then
     Exit;
   for var LS in AA.Nav.FindFormSites(LMid, LSym) do
   begin
-    if (LS.Kind <> fskHandler) or (LS.FilePath = '') then
+    if (LS.FilePath = '') or (LS.Kind = fskCaption) or
+       (not ANode.Data and (LS.Kind <> fskHandler)) then
       Continue;
     Inc(FReached);
     LKey := SiteKey(LS.FilePath, LS.Line, LS.Col);
@@ -3793,6 +3806,7 @@ begin
           LCaller, True);
       end;
     end;
+    SearchFormBindings(AA, ANode);
   finally
     LSources.Free;
   end;
@@ -4041,8 +4055,8 @@ begin
       ASb.AppendLine(Format('(%s: published, and no form file binds it '
         + 'either)', [String.Join(', ', LDfm.ToStringArray)]));
     if LDfmData.Count > 0 then
-      ASb.AppendLine(Format('(%s: published - a form''s .dfm may set it, and '
-        + 'forms are not read)', [String.Join(', ', LDfmData.ToStringArray)]));
+      ASb.AppendLine(Format('(%s: published, and no form file names it '
+        + 'either)', [String.Join(', ', LDfmData.ToStringArray)]));
     for var LNote in FNotes do
       ASb.AppendLine('(' + LNote + ')');
     if LDestructor then
@@ -4082,7 +4096,7 @@ begin
     LSb.Append(Format('callers of %s (%s:%d)', [ATarget.Name,
       FWs.RelPath(ATarget.DeclFile), ATarget.DeclLine]));
     if LInfo.Levels[0].Calls = 0 then
-      LSb.AppendLine(' - ' + NoCallsSummary(LInfo.Levels[0], False))
+      LSb.AppendLine(' - ' + NoCallsSummary(LInfo.Levels[0], False, False))
     else
       LSb.AppendLine(' - ' + LevelsSummary(LInfo, 'call', False));
     LThrough := Through(0);
@@ -6361,6 +6375,7 @@ type
     function Names(const AMembers: TArray<Integer>): string;
     function UsedByText(AFile: TImpactFile; AMax: Integer): string;
     function Leftovers: TObjectDictionary<string, TList<THit>>;
+    function FormLeftovers(AFile: TImpactFile; AIdx: Integer): TArray<THit>;
     function ImplementedIn(const AT: TTarget): TArray<string>;
   public
     constructor Create(AWs: TMcpWorkspace);
@@ -7591,13 +7606,15 @@ begin
   if (LExt = '.dfm') or (LExt = '.fmx') then
   begin
     LUnit := ChangeFileExt(LFull, '.pas');
-    LF.Note := 'a form of no analyzed unit - forms are not read';
+    // Built with its unit. Which handlers or components its changed lines
+    // bind is not read from the diff: `references` of a name asks the form
+    // as it is now.
+    LF.Note := 'a form of no analyzed unit';
     for var LCand in FWs.Analyses do
       if LCand.Nav.ModelIdOf(LUnit) >= 0 then
       begin
         LF.Units := [LUnit];
-        LF.Note := 'the form of ' + FWs.RelPath(LUnit) + ' - forms are not '
-          + 'read';
+        LF.Note := 'the form of ' + FWs.RelPath(LUnit);
         Break;
       end;
     Exit;
@@ -7763,6 +7780,131 @@ begin
   end;
 end;
 
+{ The form lines still binding a removed method to an event - `OnClick =
+  btnSaveClick` after btnSaveClick is gone. The compiler says nothing: the
+  form fails when it loads (EReadError, "Invalid property value"), and no
+  diagnostic of the index names it either. The symbol is gone, so the binder
+  cannot be asked; the lines are read the way TReader binds them: in the
+  form file of the method's class and of each class descending from it, an
+  event property whose value is the name - unless that class still finds a
+  member by the name (an ancestor's, a redeclaration), which the line then
+  binds. The class is the removed name's qualifier, else the unit's form's. }
+function TImpact.FormLeftovers(AFile: TImpactFile; AIdx: Integer): TArray<THit>;
+var
+  LA: TMcpAnalysis;
+  LM: TPasSemaModel;
+  LMid, LOwner, LClassSym, LFMid, LFSym, LCtx, LAt: Integer;
+  LName, LKey, LClass, LForm: string;
+  LCands: TList<TSymId>;
+  LDone: TDictionary<string, Boolean>;
+  LId: TSymId;
+  LHandle: IPasDfmDoc;
+  LDoc: TPasDfmDoc;
+  LIdent: TPasDfmIdent;
+  LSite: TPasFormSite;
+  LH: THit;
+  LList: TList<THit>;
+begin
+  Result := nil;
+  LName := AFile.Removed[AIdx];
+  if not (LName.EndsWith(' (procedure)') or LName.EndsWith(' (function)')) then
+    Exit;
+  LName := Copy(LName, 1, Pos(' (', LName) - 1);
+  LKey := AFile.RemovedKeys[AIdx];
+  LOwner := FWs.OwnerAnalysis(AFile.Path);
+  if LOwner < 0 then
+    Exit;
+  LA := FWs.Analyses[LOwner];
+  LMid := LA.Nav.ModelIdOf(AFile.Path);
+  if (LMid < 0) or not LA.Proj.EnsureHydrated(LMid) then
+    Exit;
+  LM := LA.Proj.Model(LMid);
+  // `TOuter.TFoo.Bar`: TFoo; a bare `Bar` (the declaration's line alone): the
+  // class of the unit's form.
+  LAt := LastDelimiter('.', LName);
+  if LAt > 0 then
+  begin
+    LClass := Copy(LName, 1, LAt - 1);
+    LClass := Copy(LClass, LastDelimiter('.', LClass) + 1, MaxInt);
+  end
+  else
+  begin
+    LHandle := PasDfmLoad(PasDfmFileOfUnit(AFile.Path));
+    if LHandle = nil then
+      Exit;
+    LClass := LHandle.Doc.RootClassName;
+  end;
+  LClassSym := NIL_SYM;
+  for var LSym := 0 to LM.SymCount - 1 do
+    if (LM.Symbols[LSym].Kind = skType) and
+       (LM.Symbols[LSym].TypeCat = tcClass) and
+       SameText(LM.Symbols[LSym].Name, LClass) then
+    begin
+      LClassSym := LSym;
+      Break;
+    end;
+  if LClassSym = NIL_SYM then
+    Exit;
+  LCands := TList<TSymId>.Create;
+  LDone := TDictionary<string, Boolean>.Create;
+  LList := TList<THit>.Create;
+  try
+    LId.Mid := LMid;
+    LId.Sym := LClassSym;
+    LCands.Add(LId);
+    for var LD in LA.Nav.FindDescendants(LMid, LClassSym) do
+      if LD.Kind = pdkDescendant then
+      begin
+        LId.Mid := LD.UnitId;
+        LId.Sym := LD.Sym;
+        LCands.Add(LId);
+      end;
+    for var LC in LCands do
+    begin
+      LForm := PasDfmFileOfUnit(LA.Proj.ModelFile(LC.Mid));
+      if (LForm = '') or not LDone.TryAdd(LowerCase(LForm), True) then
+        Continue;
+      LHandle := PasDfmLoad(LForm);
+      if LHandle = nil then
+        Continue;
+      LDoc := LHandle.Doc;
+      // The form of this class - a unit may hold others - and one that no
+      // longer finds a member by the name.
+      if not SameText(LDoc.RootClassName,
+         LA.Proj.Model(LC.Mid).Symbols[LC.Sym].Name) or
+         LA.Proj.FindMemberX(LC.Mid, XPlain(LC.Mid, LC.Sym), LKey, LFMid,
+         LFSym, LCtx) then
+        Continue;
+      for var LIdx in LDoc.FindIdents(LKey) do
+      begin
+        LIdent := LDoc.Idents[LIdx];
+        if (LIdent.Role <> dirValue) or (LIdent.SegCount <> 1) or
+           (LIdent.Prop < 0) or not StartsText('On', LDoc.PropPath(LIdent.Prop))
+        then
+          Continue;
+        LSite := Default(TPasFormSite);
+        LSite.FilePath := LForm;
+        LSite.ObjIndex := LIdent.Obj;
+        LSite.PropName := LDoc.PropPath(LIdent.Prop);
+        LH := Default(THit);
+        LH.FilePath := LForm;
+        LH.Line := LDoc.LineOf(LIdent.Offset);
+        LH.Col := LDoc.ColOf(LIdent.Offset);
+        LH.Where := FormObjectPath(LSite);
+        if LH.Where = '' then
+          LH.Where := LDoc.RootName;
+        LH.Where := LH.Where.Replace(' (root)', '') + '.' + LSite.PropName;
+        LList.Add(LH);
+      end;
+    end;
+    Result := LList.ToArray;
+  finally
+    LList.Free;
+    LDone.Free;
+    LCands.Free;
+  end;
+end;
+
 // Own-unit diagnostics naming a removed routine or type in quotes - calls
 // and uses of it that no longer resolve - by its lower-case last segment.
 // Each unit reports from its owner analysis, as `diagnostics` does.
@@ -7867,6 +8009,7 @@ var
   LHave: TArray<Boolean>;
   LLeft: TObjectDictionary<string, TList<THit>>;
   LList: TList<THit>;
+  LBound: TArray<THit>;
   LRoutines, LData, LShown, LHidden, LCount: Integer;
   LLine, LText, LTag: string;
   LParts, LSkipped: TStringList;
@@ -8055,6 +8198,18 @@ begin
       for var LR := 0 to High(LF.Removed) do
       begin
         LLine := '  removed: ' + LF.Removed[LR];
+        LBound := FormLeftovers(LF, LR);
+        LText := '';
+        for var LI := 0 to Min(Length(LBound), MAX_LEFTOVERS) - 1 do
+          LText := LText + IfThen(LText <> '', ', ', '') + Format('%s:%d (%s)',
+            [FWs.RelPath(LBound[LI].FilePath), LBound[LI].Line,
+            LBound[LI].Where]);
+        if Length(LBound) > MAX_LEFTOVERS then
+          LText := LText + Format(' and %d more', [Length(LBound) -
+            MAX_LEFTOVERS]);
+        if LText <> '' then
+          LLine := LLine + ' - still bound in a form, which then fails to '
+            + 'load: ' + LText;
         if LLeft.TryGetValue(LF.RemovedKeys[LR], LList) then
         begin
           LText := '';
@@ -8071,7 +8226,7 @@ begin
               [LList.Count - MAX_LEFTOVERS]);
           LLine := LLine + ' - still named at ' + LText;
         end
-        else
+        else if Length(LBound) = 0 then
           LLine := LLine + ' - nothing unresolved names it';
         LSb.AppendLine(LLine);
       end;
@@ -8090,7 +8245,7 @@ begin
         LText := 'callers and uses';
       if LInfo.Levels[0].Calls = 0 then
         LSb.AppendLine(LText + ' - ' + NoCallsSummary(LInfo.Levels[0],
-          LRoutines + LData > 1))
+          LRoutines + LData > 1, LData > 0))
       else
         LSb.AppendLine(LText + ' - ' + LevelsSummary(LInfo, IfThen(LData = 0,
           'call', ''), LRoutines + LData > 1));
@@ -9071,7 +9226,10 @@ const
     + 'grouped by the routine they sit in, to a `depth`; the units that use a '
     + 'unit whose interface changed; and a removed routine with the places '
     + 'that still name it. The diff must be of the files as they are on disk '
-    + 'now. Forms (.dfm) are not read.",'
+    + 'now. The form files (.dfm, .fmx) are read: a handler''s bindings and '
+    + 'the lines naming a component or a class are among the uses, and a '
+    + 'removed handler still bound in a form - which then fails to load, '
+    + 'with no compiler error - is named with its line.",'
     + '"inputSchema":{"type":"object","properties":{'
     + '"diff":{"type":"string","description":"Unified diff of your edits: '
     + 'the output of `git diff`, as it is"},'

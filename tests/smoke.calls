@@ -72,6 +72,7 @@ callees {"symbol":"TCircle"}
 impact {"symbol":"TCircle.Area"}
 impact {"symbol":"NeverCalled"}
 impact {"symbol":"TfrmMain.btnSaveClick"}
+impact {"symbols":["TfrmMain.edtName"]}
 impact {"symbol":"uMembers"}
 impact {"symbol":"TCircle.FRadius"}
 impact {"symbols":["TShapeBox.BoxClick", "TPanelModel.Source", "IShape.Area"]}

@@ -189,12 +189,15 @@ Check 'impact' (Block $b 'impact {"symbol":"TCircle.Area"}') @('impact of TCircl
 Check 'impact one member' (Block $b 'impact {"symbol":"NeverCalled"}') @('members to build and test: AppB (not reached: AppA, AppF)', "AppB\uBoxes.pas`n  31  NeverCalled (procedure)", 'callers - none found') @('no callers found')
 # A handler no code calls: its form bindings are what the change reaches.
 Check 'impact form handler' (Block $b 'impact {"symbol":"TfrmMain.btnSaveClick"}') @('members to build and test: AppF (not reached: AppA, AppB)', 'callers - no calls, 2 form bindings - an event of the component runs it', "AppF\uMainForm.dfm`n  btnSave`n    39  OnClick = btnSaveClick")
+# A component's uses: the code's and its form lines - its object line and a
+# FocusControl naming it.
+Check 'impact form component' (Block $b 'impact {"symbols":["TfrmMain.edtName"]}') @('uses - 1 in 1 routine, 2 form lines', "AppF\uMainForm.dfm`n  lblName`n    21  FocusControl = edtName`n  23  object edtName: TEdit")
 Check 'impact unit' (Block $b 'impact {"symbol":"uMembers"}') @('members to build and test: AppA (not reached: AppB, AppF)', 'AppA\uMembers.pas - used by 1 unit: AppA') @('callers')
 # A field: its uses, through the property that reads and writes it too.
 Check 'impact field' (Block $b 'impact {"symbol":"TCircle.FRadius"}') @('23  TCircle.FRadius (field) - also through TCircle.Radius (property)', 'uses - 4 in 3 routines', "  RunA`n    21  [via TCircle.Radius]", "  TCircle.Create`n    50  FRadius := ARadius;")
 # Several roots: a row names the one it reaches, a file of fewer members
 # says which, a published member nothing calls gets the form note.
-Check 'impact symbols' (Block $b 'impact {"symbols":["TShapeBox.BoxClick"') @("AppA\uMembers.pas  [AppA]`n  44  TPanelModel.Source (field)", "Shared\uShapes.pas`n  12  IShape.Area (function) - implemented in TShape (Shared\uShapes.pas:17)", '43  [-> TShapeBox.BoxClick, not a call]', '75  [-> IShape.Area]', 'no callers found: TShapeBox.BoxClick', 'no uses found: TPanelModel.Source', '(TPanelModel.Source: published - a form')
+Check 'impact symbols' (Block $b 'impact {"symbols":["TShapeBox.BoxClick"') @("AppA\uMembers.pas  [AppA]`n  44  TPanelModel.Source (field)", "Shared\uShapes.pas`n  12  IShape.Area (function) - implemented in TShape (Shared\uShapes.pas:17)", '43  [-> TShapeBox.BoxClick, not a call]', '75  [-> IShape.Area]', 'no callers found: TShapeBox.BoxClick', 'no uses found: TPanelModel.Source', '(TPanelModel.Source: published, and no form file names it either)')
 Check 'impact depth' (Block $b 'impact {"symbols":["TCircle.Area", "NeverCalled"]') @('callers - 3 calls in 3 routines; depth 2: 2 in 2', '22  [-> TCircle.Area via TShape.Area]', 'depth 2 - callers of those:', '10  [-> RunA, main block]', 'no callers found: NeverCalled')
 # A diff: its lines to declarations, a uses clause, a removed routine, a
 # changed interface section and who uses it, a file no project compiles. A
@@ -393,6 +396,16 @@ try {
     Remove-Item (Join-Path $copy 'AppB\uBoxes.pas')
     $r = Rpc 14 'tools/call' '{"name":"find","arguments":{"query":"TShapeBox"}}'
     Check 'call after a delete' (ToolText $r) @('(index: rebuilt in ', ' ms; deleted: AppB\uBoxes.pas)', 'no declaration matches `TShapeBox`')
+
+    # A handler removed from the code while the forms still bind it: no
+    # compiler error, a form that fails to load - impact names the lines, in
+    # its form and in the inherited form binding it on a component of its own.
+    $unit = Join-Path $copy 'AppF\uMainForm.pas'
+    $text = [IO.File]::ReadAllText($unit)
+    $text = $text.Replace("    procedure btnSaveClick(Sender: TObject);`r`n", '').Replace("// Bound by uMainForm.dfm and uChildForm.dfm; no code calls it.`r`nprocedure TfrmMain.btnSaveClick(Sender: TObject);`r`nbegin`r`n  Save;`r`nend;`r`n`r`n", '')
+    [IO.File]::WriteAllText($unit, $text, $utf8)
+    $r = Rpc 20 'tools/call' '{"name":"impact","arguments":{"diff":"--- a/AppF/uMainForm.pas\n+++ b/AppF/uMainForm.pas\n@@ -20 +19,0 @@\n-    procedure btnSaveClick(Sender: TObject);\n@@ -44,6 +42,0 @@\n-// Bound by uMainForm.dfm and uChildForm.dfm; no code calls it.\n-procedure TfrmMain.btnSaveClick(Sender: TObject);\n-begin\n-  Save;\n-end;\n-\n"}}'
+    Check 'impact removed handler' (ToolText $r) @('removed: TfrmMain.btnSaveClick (procedure) - still bound in a form, which then fails to load: AppF\uMainForm.dfm:39 (btnSave.OnClick), AppF\uChildForm.dfm:14 (chkConfirm.OnClick)') @('nothing unresolved names it')
 
     $r = Rpc 15 'tools/call' '{"name":"no_such_tool","arguments":{}}'
     if (-not $r.result.isError) { Write-Host 'FAIL unknown tool not reported as isError'; $script:failures++ }
