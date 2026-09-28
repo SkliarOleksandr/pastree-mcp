@@ -121,3 +121,5 @@ references {"symbol":"Area"}
 definition {"symbol":"NoSuchThing"}
 definition {"file":"AppB/uBoxes.pas","line":118,"name":"BoxCount"}
 definition {"file":"AppB/uBoxes.pas","line":111,"name":"Count"}
+references {"symbol":"TCountBox.BoxCount"}
+definition {"file":"AppB/uBoxes.pas","line":122,"name":"BoxCount"}

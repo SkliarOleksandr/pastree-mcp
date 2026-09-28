@@ -116,6 +116,11 @@ function TCountBox.BoxCount: Integer;
 begin
   // The name in a string before the call: `definition` by name finds the call.
   if 'BoxCount' = '' then Result := BoxCount else Result := 0;
+  // A use no build of this fixture compiles: said by references, and by
+  // definition at it.
+  {$IFDEF PASTREE_NEVER}
+  Result := BoxCount + 1;
+  {$ENDIF}
 end;
 
 end.

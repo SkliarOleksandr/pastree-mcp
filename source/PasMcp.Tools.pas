@@ -71,6 +71,7 @@ uses
   System.Generics.Defaults,
   System.RegularExpressions,
   PasTree.Types,
+  PasTree.Preprocessor,
   PasTree.Ast,
   PasTree.Outline,
   PasTree.Sema.Model,
@@ -752,6 +753,7 @@ var
   LInClosure, LFound: Boolean;
   LClause: TMatch;
   LCands: TArray<TTarget>;
+  LSrc: TPasPreprocessed;
 begin
   Result := Default(TTarget);
   Result.Ids := NewIds(AWs);
@@ -843,6 +845,23 @@ begin
         if Length(LCands) = 1 then
           Exit(LCands[0]);
       end;
+    end;
+    // In a branch the configuration does not compile, nothing is resolved:
+    // that is the reason, not an unknown name.
+    for var LA in AWs.Analyses do
+    begin
+      LMid := LA.Nav.ModelIdOf(LFile);
+      if (LMid < 0) or not LA.Proj.EnsureHydrated(LMid) then
+        Continue;
+      LSrc := LA.Proj.Model(LMid).Tree.Source;
+      if (LLine - 1 <= High(LSrc.Files[0].LineStarts)) and LSrc.IsSkipped(0,
+         LSrc.Files[0].LineStarts[LLine - 1] + LCol - 1) then
+        raise EToolError.CreateFmt('%s:%d is in a conditional branch the '
+          + 'analyzed configuration%s does not compile - nothing there '
+          + 'is resolved; the build whose defines select it compiles it',
+          [AWs.RelPath(LFile), LLine, IfThen(AWs.Members[LA.Members[0]].Config <> '',
+          ' (' + AWs.Members[LA.Members[0]].Config + ')', '')]);
+      Break;
     end;
     raise EToolError.CreateFmt('nothing resolvable at %s:%d:%d (%s) - a '
       + 'local without declaration, a keyword, or a name the analysis could '
@@ -2446,6 +2465,76 @@ begin
     (AT.Head = 'routine'));
 end;
 
+// The lines of the group's own files where ANameLower is written as a word
+// inside a conditional branch the analyzed configuration does not compile
+// ({$IFDEF DEMO}, the {$ELSE} of a {$IFDEF DEBUG}) - not resolved, so maybe a
+// namesake, but an edit made from the answer never reaches them, and the
+// build that compiles them breaks. 'file:line', each line once.
+function InactiveMentions(AWs: TMcpWorkspace;
+  const ANameLower: string): TArray<string>;
+var
+  LSeen: TDictionary<string, Boolean>;
+  LM: TPasSemaModel;
+  LTS: TPasTokenStream;
+  LText: string;
+  LAt, LLine, LCol: Integer;
+  LKey: string;
+begin
+  Result := nil;
+  if Length(ANameLower) < 3 then
+    Exit;
+  LSeen := TDictionary<string, Boolean>.Create;
+  try
+    for var LA in AWs.Analyses do
+      for var LMid := 0 to LA.Proj.ModelCount - 1 do
+      begin
+        if not AWs.IsOwnFile(LA.Proj.ModelFile(LMid)) then
+          Continue;
+        LM := LA.Proj.Model(LMid);
+        if LM.Demoted then
+          Continue;
+        for var LFi := 0 to Min(High(LM.Tree.Source.Skipped),
+          High(LM.Tree.Source.Files)) do
+        begin
+          if Length(LM.Tree.Source.Skipped[LFi]) = 0 then
+            Continue;
+          LTS := LM.Tree.Source.Files[LFi];
+          for var LR in LM.Tree.Source.Skipped[LFi] do
+          begin
+            LText := LowerCase(Copy(LTS.Source, LR.Start + 1,
+              LR.EndPos - LR.Start));
+            LAt := Pos(ANameLower, LText);
+            while LAt > 0 do
+            begin
+              if ((LAt = 1) or not IsIdentChar(LText[LAt - 1])) and
+                 ((LAt + Length(ANameLower) > Length(LText)) or
+                 not IsIdentChar(LText[LAt + Length(ANameLower)])) then
+              begin
+                LTS.OffsetToLineCol(LR.Start + LAt - 1, LLine, LCol);
+                // A word in a comment or a string there is text, not a use.
+                if FindWord(LTS.LineText(LLine), ANameLower) = LCol then
+                begin
+                  LKey := Format('%s:%d', [AWs.RelPath(
+                    LM.Tree.Source.FileNames[LFi]), LLine]);
+                  if LSeen.TryAdd(LowerCase(LKey), True) then
+                    Result := Result + [LKey];
+                end;
+              end;
+              LAt := PosEx(ANameLower, LText, LAt + 1);
+            end;
+          end;
+        end;
+      end;
+  finally
+    LSeen.Free;
+  end;
+  TArray.Sort<string>(Result, TComparer<string>.Construct(
+    function(const L, R: string): Integer
+    begin
+      Result := CompareText(L, R);
+    end));
+end;
+
 // For a bare property redeclaration (`property PopupMenu;` in a descendant):
 // the property it republishes, whose uses through every class the rows are -
 // the agent asked about one class. '' for any other property.
@@ -2503,6 +2592,10 @@ begin
       [AWs.RelPath(LForm), LDoc.Doc.TrailingLine]);
 end;
 
+function OwnerClassX(AA: TMcpAnalysis; AMid, ASym: Integer): TSemaXType;
+  forward;
+function StreamsX(AA: TMcpAnalysis; AClass: TSemaXType): Boolean; forward;
+
 function ToolReferences(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
 var
   LT: TTarget;
@@ -2516,6 +2609,7 @@ var
   LForms: string;
   LPlainKeys, LHeaderSeen: TDictionary<string, Boolean>;
   LHeaders: TArray<TPasRefHit>;
+  LInactive: TArray<string>;
 begin
   LT := ResolveOne(AWs, AArgs);
   LLimit := EnsureRange(ArgInt(AArgs, 'limit', 150), 1, 5000);
@@ -2562,8 +2656,11 @@ begin
             for var LS in LA.Nav.FindFormSites(LId.Mid, LId.Sym) do
               LSet.AddForm(LS);
             if not LBindable then
-              LBindable := LA.Nav.FormRoleOf(LId.Mid, LId.Sym).Kind in
-                [fskComponent, fskHandler];
+              // Only a class that streams can be a form's: a published
+              // method of a plain class is no handler any form could bind.
+              LBindable := (LA.Nav.FormRoleOf(LId.Mid, LId.Sym).Kind in
+                [fskComponent, fskHandler]) and
+                StreamsX(LA, OwnerClassX(LA, LId.Mid, LId.Sym));
             if not LSetsProp and LA.Proj.EnsureHydrated(LId.Mid) then
               LSetsProp := (LA.Proj.Model(LId.Mid).Symbols[LId.Sym].Kind =
                 skProperty) and (LA.Proj.Model(LId.Mid).Symbols[LId.Sym].
@@ -2612,6 +2709,18 @@ begin
         + '%s%s - a rename changes them too)', [Plural(Length(LHeaders),
         'implementation header'), LForms, IfThen(Length(LHeaders) > 3,
         ', ...', '')]));
+    end;
+    if LT.Kind = tkSymbol then
+    begin
+      LInactive := InactiveMentions(AWs, LowerCase(Copy(LT.Name,
+        LastDelimiter('.', LT.Name) + 1, MaxInt)));
+      if Length(LInactive) > 0 then
+        LSb.AppendLine(Format('(in branches this configuration does not compile the name is '
+          + 'written on %s more, none resolved - a namesake, or a use an '
+          + 'edit made from these rows misses: %s%s)',
+          [Plural(Length(LInactive), 'line'), String.Join(', ',
+          Copy(LInactive, 0, 5)), IfThen(Length(LInactive) > 5, ', ...',
+          '')]));
     end;
     if (LSet.FormCount = 0) and LBindable then
     begin

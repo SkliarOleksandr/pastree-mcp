@@ -78,6 +78,11 @@ Check 'find nested' (Block $b 'find {"query":"TOuterBox.Depth"}') @('AppB\uBoxes
 # interface side of a method resolution clause.
 Check 'definition past a string' (Block $b 'definition {"file":"AppB/uBoxes.pas","line":118') @('TCountBox.BoxCount (function) declared at AppB\uBoxes.pas:112')
 Check 'definition in a resolution clause' (Block $b 'definition {"file":"AppB/uBoxes.pas","line":111') @('IBoxCount.Count (function) declared at AppB\uBoxes.pas:108')
+# A use in a branch this configuration does not compile: not a row, but
+# named; `definition` there says why nothing resolves. A class that does not
+# stream gets no form note.
+Check 'references inactive' (Block $b 'references {"symbol":"TCountBox.BoxCount"}') @('2 references in 1 files', '(in branches this configuration does not compile the name is written on 1 line more, none resolved - a namesake, or a use an edit made from these rows misses: AppB\uBoxes.pas:122)') @('form file', '122  Result')
+Check 'definition inactive' (Block $b 'definition {"file":"AppB/uBoxes.pas","line":122') @('AppB\uBoxes.pas:122 is in a conditional branch the analyzed configuration (Debug) does not compile - nothing there is resolved')
 Check 'find joined cut' (Block $b 'find {"query":"TWideBox.Many"}') @('AppB\uBoxes.pas:74  TWideBox.Many (procedure)  procedure Many(const AAlphaName, ABetaName, AGammaName: string; ADeltaCount, AEpsilonCount, AZetaCount: Integer; const AEtaText, AThetaText, ...); virtual;')
 # A name no declaration matches: what the index is, and where the name is
 # written outside it - in a unit no project uses - or that it is nowhere.
