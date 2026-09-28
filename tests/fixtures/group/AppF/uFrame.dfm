@@ -20,4 +20,9 @@ object fraName: TfraName
     TabOrder = 1
     OnClick = btnClearClick
   end
+  object edtHint: TEdit
+    Left = 8
+    Top = 40
+    TabOrder = 2
+  end
 end

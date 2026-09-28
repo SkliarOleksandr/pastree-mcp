@@ -6103,6 +6103,12 @@ var
         Exit(Format('%s -> nil (cleared: the event runs nothing)',
           [AB.PropName]));
       end;
+      if AB.NoField then
+      begin
+        AKind := 1;
+        Exit(Format('%s -> %s (a component the form files create, with no '
+          + 'field)', [AB.PropName, AB.Value]));
+      end;
       AKind := 2;
       if AB.IsMethod then
         Exit(Format('%s -> %s - no such published method: the form fails to '

@@ -25,4 +25,7 @@ inherited frmChild: TfrmChild
         OnClick = btnSaveClick
       end>
   end
+  object lblHint: TLabel
+    FocusControl = fraName1.edtHint
+  end
 end
