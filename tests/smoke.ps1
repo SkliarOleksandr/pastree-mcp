@@ -118,6 +118,19 @@ Check 'references unit' (Block $b 'references {"symbol":"uShapes"}') @('3 refere
 # Rows under what they sit in: a member declaration under its class, a
 # statement under its routine, two uses on one line under one heading.
 Check 'references grouped' (Block $b 'references {"symbol":"TCircle.FRadius"}') @('5 references in 1 files', "  TCircle`n    27  property Radius", "  TCircle.Create`n    50  FRadius := ARadius;", "  TCircle.Area`n    55  Result := Pi * FRadius * FRadius;`n    55  ")
+# What the form files bind by name, under the component each line belongs to:
+# a handler no code calls, bound by a form and by the inherited form's own
+# component; a component named by its object line and by another's property;
+# a handler the host sets on an inline frame's button; a module's component
+# named through the module; a binary form file, said so; and a published
+# method no form binds, which is the answer and says it.
+Check 'references form handler' (Block $b 'references {"symbol":"TfrmMain.btnSaveClick"}') @('2 references in 2 files, 2 of them in form files', "AppF\uChildForm.dfm`n  chkConfirm`n    14  OnClick = btnSaveClick", "AppF\uMainForm.dfm`n  btnSave`n    39  OnClick = btnSaveClick")
+Check 'references form component' (Block $b 'references {"symbol":"TfrmMain.edtName"}') @('3 references in 2 files, 2 of them in form files', "  lblName`n    21  FocusControl = edtName`n  23  object edtName: TEdit", "  TfrmMain.NameChange`n    53  ")
+Check 'references form inline' (Block $b 'references {"symbol":"TfrmMain.fraName1btnClearClick"}') @("  fraName1.btnClear`n    48  OnClick = fraName1btnClearClick")
+Check 'references form module' (Block $b 'references {"symbol":"TdmData.pmActions"}') @("AppF\uData.dfm`n  4  object pmActions: TPopupMenu", "  btnSave`n    37  PopupMenu = dmData.pmActions")
+Check 'references form binary' (Block $b 'references {"symbol":"TfrmBinary.btnBinaryClick"}') @("AppF\uBinaryForm.dfm  (binary - lines of its text conversion)`n  btnBinary`n    21  OnClick = btnBinaryClick")
+Check 'references form none' (Block $b 'references {"symbol":"TfrmMain.NeverBound"}') @('0 references in 0 files; no form file names it')
+Check 'references no form note' (Block $b 'references {"symbol":"TShape.Area"}') @() @('form file')
 Check 'descendants' (Block $b 'related {"relation":"descendants"') @('  11  TBigCircle <- TCircle', "  21  TCircle`n", "  30  TSquare`n") @('<- TShape')
 # A declaration row whose [tag] names its type gets no heading.
 Check 'overrides' (Block $b 'related {"relation":"overrides"') @('[TShape introduces]', '26  [TCircle override]  function Area', "  35  [TSquare override]`n", '[TBigCircle override]', "Shared\uShapes.pas`n  17  [TShape introduces]")

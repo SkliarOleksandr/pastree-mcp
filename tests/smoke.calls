@@ -33,6 +33,12 @@ references {"symbol":"TShape.Area"}
 references {"file":"AppA\\uAppA.pas", "line":21, "name":"Radius"}
 references {"symbol":"uShapes"}
 references {"symbol":"TCircle.FRadius"}
+references {"symbol":"TfrmMain.btnSaveClick"}
+references {"symbol":"TfrmMain.edtName"}
+references {"symbol":"TfrmMain.fraName1btnClearClick"}
+references {"symbol":"TdmData.pmActions"}
+references {"symbol":"TfrmBinary.btnBinaryClick"}
+references {"symbol":"TfrmMain.NeverBound"}
 related {"relation":"descendants", "symbol":"uShapes.TShape"}
 related {"relation":"overrides", "symbol":"TShape.Area"}
 related {"relation":"implementations", "symbol":"IShape"}

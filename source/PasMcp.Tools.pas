@@ -75,6 +75,8 @@ uses
   PasTree.Sema.Model,
   PasTree.Sema.Project,
   PasTree.Sema.Nav,
+  PasTree.Dfm,
+  PasTree.Sema.Dfm,
   PasTree.Platforms,
   PasMcp.Log,
   PasMcp.Build;
@@ -113,6 +115,10 @@ type
     Snippet: string;
     Tag: string;           // row label for related(): 'TFoo override'
     Own: Boolean;
+    // A form file's row: the heading it goes under instead of the routine or
+    // type around it - its component - and a note for the file's line.
+    Where: string;
+    FileNote: string;
   end;
 
 const
@@ -1216,11 +1222,15 @@ type
     FList: TList<THit>;
     FSeen: TDictionary<string, Boolean>;
     FCompiled: Integer;
+    FForms: Integer;
   public
     constructor Create(AWs: TMcpWorkspace);
     destructor Destroy; override;
     procedure Add(const AHit: TPasRefHit; const ATag: string = '');
+    // A form file's site, under its component (FormObjectPath).
+    procedure AddForm(const ASite: TPasFormSite);
     function Count: Integer;
+    function FormCount: Integer;
     // Own files first, then libraries; by file, line, column.
     function Sorted: TArray<THit>;
     property Compiled: Integer read FCompiled;
@@ -1267,9 +1277,83 @@ begin
   FList.Add(LH);
 end;
 
+{ The component a form file's site belongs to, as the form designer names it
+  from the root down: `btnSave`, `fraName1.btnClear` inside an inline frame,
+  `frmMain (root)` for the form or module itself. An unnamed object (a menu
+  item written without a Name) by its class. A site in an object's own
+  header (`object btnSave: TButton`) names that object already and goes one
+  level out, as a Pascal row on a declaration's name line does - '' when
+  that is the root: the file level. The document is the one the binder
+  read, from PasDfmLoad's cache. }
+function FormObjectPath(const ASite: TPasFormSite): string;
+var
+  LHandle: IPasDfmDoc;
+  LDoc: TPasDfmDoc;
+  LObj: Integer;
+  LName: string;
+begin
+  Result := ASite.ObjectName;
+  LHandle := PasDfmLoad(ASite.FilePath);
+  if LHandle = nil then
+    Exit;
+  LDoc := LHandle.Doc;
+  LObj := ASite.ObjIndex;
+  if (LObj < 0) or (LObj > High(LDoc.Objects)) then
+    Exit;
+  if ASite.PropName = '' then
+  begin
+    LObj := LDoc.Objects[LObj].Parent;
+    if (LObj < 0) or (LDoc.Objects[LObj].Parent < 0) then
+      Exit('');
+  end
+  else if LDoc.Objects[LObj].Parent < 0 then
+    Exit(LDoc.ObjectName(LObj) + ' (root)');
+  Result := '';
+  while (LObj >= 0) and (LDoc.Objects[LObj].Parent >= 0) do
+  begin
+    LName := LDoc.ObjectName(LObj);
+    if LName = '' then
+      LName := LDoc.ObjectClassName(LObj);
+    if Result = '' then
+      Result := LName
+    else
+      Result := LName + '.' + Result;
+    LObj := LDoc.Objects[LObj].Parent;
+  end;
+end;
+
+procedure THitSet.AddForm(const ASite: TPasFormSite);
+var
+  LKey: string;
+  LH: THit;
+begin
+  if ASite.FilePath = '' then
+    Exit;
+  LKey := LowerCase(ASite.FilePath) + ':' + IntToStr(ASite.Line) + ':' +
+    IntToStr(ASite.Col);
+  if not FSeen.TryAdd(LKey, True) then
+    Exit;
+  LH := Default(THit);
+  LH.FilePath := ASite.FilePath;
+  LH.Line := ASite.Line;
+  LH.Col := ASite.Col;
+  LH.Snippet := ASite.Snippet;
+  LH.Own := FWs.IsOwnFile(ASite.FilePath);
+  LH.Where := FormObjectPath(ASite);
+  if ASite.IsBinary then
+    LH.FileNote := 'binary - lines of its text conversion';
+  FList.Add(LH);
+  Inc(FForms);
+end;
+
 function THitSet.Count: Integer;
 begin
   Result := FList.Count;
+end;
+
+function THitSet.FormCount: Integer;
+begin
+  Result := FForms;
 end;
 
 function THitSet.Sorted: TArray<THit>;
@@ -1591,6 +1675,10 @@ end;
 //       120  LFoo.Bar(1);
 //       135  LFoo.Bar(2);
 //     300  LFoo: TFoo;
+// A form file's row goes under its component (THit.Where) the same way:
+//   uMain.dfm
+//     btnSave
+//       40  OnClick = btnSaveClick
 procedure AppendHitsByFile(AWs: TMcpWorkspace; ASb: TStringBuilder;
   const AHits: TArray<THit>; ALimit: Integer; ATagOnly: Boolean = False;
   AEnclosing: TEnclosing = nil);
@@ -1609,13 +1697,19 @@ begin
     if not SameText(LH.FilePath, LFile) then
     begin
       LFile := LH.FilePath;
-      ASb.AppendLine(AWs.RelPath(LFile));
+      if LH.FileNote <> '' then
+        ASb.AppendLine(AWs.RelPath(LFile) + '  (' + LH.FileNote + ')')
+      else
+        ASb.AppendLine(AWs.RelPath(LFile));
       LLastWhere := '';
     end;
     LIndent := '  ';
-    if AEnclosing <> nil then
+    if (AEnclosing <> nil) or (LH.Where <> '') then
     begin
-      LWhere := AEnclosing.NameAt(LH.FilePath, LH.Line, LH.Col, True);
+      if LH.Where <> '' then
+        LWhere := LH.Where
+      else
+        LWhere := AEnclosing.NameAt(LH.FilePath, LH.Line, LH.Col, True);
       if LWhere <> '' then
       begin
         if LWhere <> LLastWhere then
@@ -2174,9 +2268,12 @@ var
   LLimit: Integer;
   LId: TSymId;
   LEnclosing: TEnclosing;
+  LBindable: Boolean;
+  LForms: string;
 begin
   LT := ResolveOne(AWs, AArgs);
   LLimit := EnsureRange(ArgInt(AArgs, 'limit', 150), 1, 5000);
+  LBindable := False;
   LSet := THitSet.Create(AWs);
   LSb := TStringBuilder.Create;
   LEnclosing := TEnclosing.Create(AWs);
@@ -2188,8 +2285,18 @@ begin
         Continue;
       case LT.Kind of
         tkSymbol:
-          for var LH in LA.Nav.FindReferences(LId.Mid, LId.Sym) do
-            LSet.Add(LH);
+          begin
+            for var LH in LA.Nav.FindReferences(LId.Mid, LId.Sym) do
+              LSet.Add(LH);
+            // What the form files bind by name - a handler no code calls, a
+            // component only its form file names - which a rename made from
+            // the Pascal rows alone breaks at run time, when the form loads.
+            for var LS in LA.Nav.FindFormSites(LId.Mid, LId.Sym) do
+              LSet.AddForm(LS);
+            if not LBindable then
+              LBindable := LA.Nav.FormRoleOf(LId.Mid, LId.Sym).Kind in
+                [fskComponent, fskHandler];
+          end;
         tkUnit:
           for var LH in LA.Nav.FindUnitReferences(LId.Mid) do
             LSet.Add(LH);
@@ -2202,10 +2309,18 @@ begin
       end;
     end;
     LHits := LSet.Sorted;
+    // A published field or method the forms could bind: say they were read,
+    // and what they hold - "no form file names it" is itself the answer.
+    if LSet.FormCount > 0 then
+      LForms := Format(', %d of them in form files', [LSet.FormCount])
+    else if LBindable then
+      LForms := '; no form file names it'
+    else
+      LForms := '';
     if LT.Kind in [tkSymbol, tkUnit] then
       LSb.AppendLine(Format('%s (%s) declared at %s:%d - %d references in %d '
-        + 'files', [LT.Name, LT.Head, AWs.RelPath(LT.DeclFile), LT.DeclLine,
-        Length(LHits), FileCount(LHits)]))
+        + 'files%s', [LT.Name, LT.Head, AWs.RelPath(LT.DeclFile), LT.DeclLine,
+        Length(LHits), FileCount(LHits), LForms]))
     else
       LSb.AppendLine(Format('%s (%s) - %d references in %d files', [LT.Name,
         LT.Head, Length(LHits), FileCount(LHits)]));
@@ -8828,7 +8943,11 @@ const
     + 'same-named unrelated symbols, comments and strings are not in it. '
     + 'Grouped by file and, within a file, under the routine or type each '
     + 'use sits in (TFoo.Save), with the source line - usually enough to '
-    + 'answer without opening the file. Also takes a unit name (its uses '
+    + 'answer without opening the file. The form files (.dfm, .fmx) are '
+    + 'read too: the lines that bind the symbol by name - a component''s '
+    + '`object` line, `OnClick = Handler`, `FocusControl = edtName` - under '
+    + 'the component they belong to; a rename must change those as well. '
+    + 'Also takes a unit name (its uses '
     + 'clauses), and by position a compiler built-in or a conditional '
     + 'define.",'
     + '"inputSchema":{"type":"object","properties":{' + TARGET_PROPS + ','
