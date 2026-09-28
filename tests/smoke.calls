@@ -42,6 +42,7 @@ references {"symbol":"TfrmMain.btnSaveClick"}
 references {"symbol":"TfrmMain.edtName"}
 references {"symbol":"TfrmMain.fraName1btnClearClick"}
 references {"symbol":"TdmData.pmActions"}
+references {"symbol":"TdmData"}
 references {"symbol":"TfrmBinary.btnBinaryClick"}
 references {"symbol":"TfrmMain.NeverBound"}
 references {"symbol":"TfraName.Title"}

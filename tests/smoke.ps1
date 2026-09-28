@@ -148,6 +148,8 @@ Check 'references form handler' (Block $b 'references {"symbol":"TfrmMain.btnSav
 Check 'references form component' (Block $b 'references {"symbol":"TfrmMain.edtName"}') @('4 references in 3 files, 3 of them in form files', "AppF\uChildForm.dfm`n  16  inherited edtName: TEdit", "  lblName`n    21  FocusControl = edtName`n  23  object edtName: TEdit", "  TfrmMain.NameChange`n    53  ")
 Check 'references form inline' (Block $b 'references {"symbol":"TfrmMain.fraName1btnClearClick"}') @("  fraName1.btnClear`n    48  OnClick = fraName1btnClearClick")
 Check 'references form module' (Block $b 'references {"symbol":"TdmData.pmActions"}') @("AppF\uData.dfm`n  4  object pmActions: TPopupMenu", "  btnSave`n    37  PopupMenu = dmData.pmActions")
+# A module's class: other forms reach its components through its Name.
+Check 'references module name' (Block $b 'references {"symbol":"TdmData"}') @('(other forms reach its components through its Name `dmData` on 1 form line: AppF\uMainForm.dfm:37 - renaming the module''s root, or the component, breaks them at load)')
 Check 'references form binary' (Block $b 'references {"symbol":"TfrmBinary.btnBinaryClick"}') @("AppF\uBinaryForm.dfm  (binary - lines of its text conversion)`n  btnBinary`n    21  OnClick = btnBinaryClick")
 Check 'references form none' (Block $b 'references {"symbol":"TfrmMain.NeverBound"}') @('0 references in 0 files; no form file names it', '(AppF\uMainForm.dfm names it only after the root''s `end` (from line 52), which the compiler drops - no form binds it; a stray `end`?)')
 Check 'references no form note' (Block $b 'references {"symbol":"TShape.Area"}') @() @('form file')

@@ -2535,6 +2535,62 @@ begin
     end));
 end;
 
+// For a class with a form file of its own - a data module, a form: the form
+// lines of OTHER forms that reach its components through its root's Name
+// (`Images = dmIcons.ImageList1`), which a reference search of the class or
+// of its variable does not list; renaming the module's root breaks them at
+// load. '' for none.
+function ModuleNameNote(AWs: TMcpWorkspace; AA: TMcpAnalysis;
+  AMid, ASym: Integer): string;
+var
+  LM: TPasSemaModel;
+  LRole: TPasFormRole;
+  LDoc: IPasDfmDoc;
+  LScope: Integer;
+  LLines: TArray<string>;
+  LSeen: TDictionary<string, Boolean>;
+  LKey: string;
+begin
+  Result := '';
+  LRole := AA.Nav.FormRoleOf(AMid, ASym);
+  if (LRole.Kind <> fskClass) or (LRole.FormFile = '') then
+    Exit;
+  LDoc := PasDfmLoad(LRole.FormFile);
+  if (LDoc = nil) or (LDoc.Doc.RootName = '') then
+    Exit;
+  LM := AA.Proj.Model(AMid);
+  LScope := LM.Symbols[ASym].MemberScope;
+  if LScope = NIL_SCOPE then
+    Exit;
+  LLines := nil;
+  LSeen := TDictionary<string, Boolean>.Create;
+  try
+    for var LIdx := 0 to LM.SymCount - 1 do
+      if (LM.Symbols[LIdx].Scope = LScope) and
+         (LM.Symbols[LIdx].Kind = skField) then
+        for var LS in AA.Nav.FindFormSites(AMid, LIdx) do
+          if LS.Via = fsvModule then
+          begin
+            LKey := Format('%s:%d', [AWs.RelPath(LS.FilePath), LS.Line]);
+            if LSeen.TryAdd(LowerCase(LKey), True) then
+              LLines := LLines + [LKey];
+          end;
+  finally
+    LSeen.Free;
+  end;
+  if Length(LLines) = 0 then
+    Exit;
+  TArray.Sort<string>(LLines, TComparer<string>.Construct(
+    function(const L, R: string): Integer
+    begin
+      Result := CompareText(L, R);
+    end));
+  Result := Format('(other forms reach its components through its Name `%s` '
+    + 'on %s: %s%s - renaming the module''s root, or the component, breaks '
+    + 'them at load)', [LDoc.Doc.RootName, Plural(Length(LLines), 'form line'),
+    String.Join(', ', Copy(LLines, 0, 5)), IfThen(Length(LLines) > 5, ', ...', '')]);
+end;
+
 // For a bare property redeclaration (`property PopupMenu;` in a descendant):
 // the property it republishes, whose uses through every class the rows are -
 // the agent asked about one class. '' for any other property.
@@ -2610,6 +2666,7 @@ var
   LPlainKeys, LHeaderSeen: TDictionary<string, Boolean>;
   LHeaders: TArray<TPasRefHit>;
   LInactive: TArray<string>;
+  LVarX: TSemaXType;
 begin
   LT := ResolveOne(AWs, AArgs);
   LLimit := EnsureRange(ArgInt(AArgs, 'limit', 150), 1, 5000);
@@ -2722,6 +2779,27 @@ begin
           Copy(LInactive, 0, 5)), IfThen(Length(LInactive) > 5, ', ...',
           '')]));
     end;
+    // A module's class or its variable: other forms reach its components
+    // through its root's Name.
+    if (LT.Kind = tkSymbol) and ((LT.Head = 'class') or (LT.Head = 'var')) then
+      for var LA in AWs.Analyses do
+      begin
+        LId := LT.Ids[LA.Index];
+        if LId.Mid < 0 then
+          Continue;
+        LForms := '';
+        if LT.Head = 'class' then
+          LForms := ModuleNameNote(AWs, LA, LId.Mid, LId.Sym)
+        else
+        begin
+          LVarX := LA.Proj.CanonTypeX(LA.Proj.DeclTypeX(LId.Mid, LId.Sym));
+          if XValid(LVarX) then
+            LForms := ModuleNameNote(AWs, LA, LVarX.UnitId, LVarX.Sym);
+        end;
+        if LForms <> '' then
+          LSb.AppendLine(LForms);
+        Break;
+      end;
     if (LSet.FormCount = 0) and LBindable then
     begin
       LForms := TrailingFormNote(AWs, LT);
