@@ -19,7 +19,8 @@ program pastree_mcp;
     analysis is built once and every call runs against it.
 
   Options: --project <.groupproj|.dproj|.dpr> (default: the only .groupproj,
-  else the only .dproj, in the current directory), --studio <BDS version>,
+  else the only .dproj, in the current directory or the nearest one above it
+  up to the repository root), --studio <BDS version>,
   --platform <Win32|Win64>, --config <Debug|Release>, --groups <shared|strict>,
   --build-dir <dir> (where `compile` builds; default %TEMP%\pastree-mcp),
   --log <file|none>, --version.
@@ -63,20 +64,49 @@ begin
   ExitProcess(2);
 end;
 
+{ Registered once for every repository (`claude mcp add --scope user`), the
+  server starts in whatever directory the session was opened in - often a
+  subdirectory of the project's. So the nearest directory holding a project
+  file, from the current one up: the first one holding any decides, and an
+  ambiguous one fails rather than being passed over for a project above it
+  that the session is not in. The walk stops at the repository root (a `.git`
+  directory, or the `.git` file of a worktree or submodule) - above it is
+  another repository, or none - and at the drive root. }
 function DiscoverProject: string;
 var
+  LDir, LUp: string;
   LFound: TArray<string>;
 begin
-  LFound := TDirectory.GetFiles(GetCurrentDir, '*.groupproj');
-  if Length(LFound) = 1 then
-    Exit(LFound[0]);
-  if Length(LFound) > 1 then
-    Fail('several .groupproj files in ' + GetCurrentDir + ' - pass --project');
-  LFound := TDirectory.GetFiles(GetCurrentDir, '*.dproj');
-  if Length(LFound) = 1 then
-    Exit(LFound[0]);
-  Fail('no single .groupproj or .dproj in ' + GetCurrentDir +
-    ' - pass --project <file>');
+  // With its delimiter throughout: `C:` alone is the drive's current directory.
+  LDir := IncludeTrailingPathDelimiter(GetCurrentDir);
+  repeat
+    LFound := TDirectory.GetFiles(LDir, '*.groupproj');
+    if Length(LFound) > 1 then
+      Fail('several .groupproj files in ' + LDir + ' - pass --project');
+    if Length(LFound) = 0 then
+    begin
+      LFound := TDirectory.GetFiles(LDir, '*.dproj');
+      if Length(LFound) > 1 then
+        Fail('several .dproj files and no .groupproj in ' + LDir +
+          ' - pass --project');
+    end;
+    if Length(LFound) = 1 then
+    begin
+      if not SameText(LDir, IncludeTrailingPathDelimiter(GetCurrentDir)) then
+        Log('project %s found above the working directory %s',
+          [LFound[0], GetCurrentDir]);
+      Exit(LFound[0]);
+    end;
+    if TDirectory.Exists(LDir + '.git') or TFile.Exists(LDir + '.git') then
+      Break;
+    LUp := IncludeTrailingPathDelimiter(
+      ExtractFileDir(ExcludeTrailingPathDelimiter(LDir)));
+    if Length(LUp) >= Length(LDir) then
+      Break;   // the drive root, or a share's
+    LDir := LUp;
+  until False;
+  Fail('no .groupproj or .dproj in ' + GetCurrentDir + ' or above it up to ' +
+    LDir + ' - pass --project <file>');
   Result := '';
 end;
 

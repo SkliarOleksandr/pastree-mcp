@@ -227,6 +227,32 @@ Check 'strict impact unit' (Block $b 'impact {"symbol":"uMembers"}') @('members 
 Check 'strict impact diff' (Block $b 'impact {"diff":"diff --git') @('members to build and test: AppA, AppB (not reached: AppF)', 'AppB\uBoxes.pas  [AppB]', 'Shared\uShapes.pas - interface changed, used by 3 units: AppB, uAppA, uAppB', 'callers and uses - 5 in 4 routines')
 Check 'strict compile file' (Block $b 'compile {"file"') @('compile - 2 members, those compiling Shared\uShapes.pas', '  AppA (Win32 Debug): built in', '  AppB (Win32): built in')
 
+# ---- discovery: no --project, started in a subdirectory ------------------------------
+# Registered once for every repository, the server starts wherever the session
+# was opened: the nearest project file above it is the one, and the walk stops
+# at the repository root.
+Write-Host '--- CLI, the project found above the working directory'
+$ErrorActionPreference = 'Continue'
+Push-Location (Join-Path $fixture 'Shared')
+try { $out = (& $Exe --log none --call status 2>&1 | ForEach-Object { "$_" }) -join "`n" }
+finally { Pop-Location }
+$code = $LASTEXITCODE
+$ErrorActionPreference = 'Stop'
+if ($code -ne 0) { Write-Host "FAIL [discovery above] exited with $code"; $script:failures++ }
+Check 'discovery above' $out @("project $group found above the working directory $(Join-Path $fixture 'Shared')", 'member AppF')
+$noProj = Join-Path ([IO.Path]::GetTempPath()) ('pastree-mcp-smoke-noproj-' + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Force (Join-Path $noProj '.git') | Out-Null
+New-Item -ItemType Directory -Force (Join-Path $noProj 'sub') | Out-Null
+$ErrorActionPreference = 'Continue'
+Push-Location (Join-Path $noProj 'sub')
+try { $out = (& $Exe --log none --call status 2>&1 | ForEach-Object { "$_" }) -join "`n" }
+finally { Pop-Location }
+$code = $LASTEXITCODE
+$ErrorActionPreference = 'Stop'
+Remove-Item -Recurse -Force $noProj -ErrorAction SilentlyContinue
+if ($code -ne 2) { Write-Host "FAIL [discovery none] exited with $code, not 2"; $script:failures++ }
+Check 'discovery none' $out @("no .groupproj or .dproj in $(Join-Path $noProj 'sub') or above it up to $noProj\ - pass --project <file>")
+
 # ---- 3. MCP over stdio, with an edit in between ------------------------------------
 Write-Host '--- MCP over stdio'
 $copy = Join-Path ([IO.Path]::GetTempPath()) ('pastree-mcp-smoke-' + [Guid]::NewGuid().ToString('N'))

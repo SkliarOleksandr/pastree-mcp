@@ -93,8 +93,20 @@ To work on pastree-mcp itself with the index, point a `.mcp.json` in this
 repository (ignored) at `--project pastree-mcp.dproj`: the agent gets this
 server's sources and PasTree's.
 
+Or once for every repository:
+
+```
+claude mcp add --scope user pastree -- C:\Repos\pastree-mcp\out\pastree-mcp.exe
+```
+
 Without `--project` the server takes the only `.groupproj` in its working
-directory, else the only `.dproj`. The tools then appear to the agent as
+directory, else the only `.dproj`; a directory holding neither sends it up to
+the parent, until the repository root (a `.git` directory or file). So a
+session opened in a subdirectory of the project gets the project's index. A
+directory with several `.groupproj` (or several `.dproj` and no `.groupproj`)
+stops the walk with an error - that repository needs its own `.mcp.json` with
+`--project`, which overrides the user-scope registration of the same name.
+The tools then appear to the agent as
 `mcp__pastree__find` and so on, together with instructions on when to prefer
 them over grep. A new session is needed after registering or rebuilding.
 
