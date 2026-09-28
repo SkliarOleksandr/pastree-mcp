@@ -1721,16 +1721,27 @@ procedure AppendHitsByFile(AWs: TMcpWorkspace; ASb: TStringBuilder;
   AEnclosing: TEnclosing = nil);
 var
   LFile, LLine, LPrev, LWhere, LLastWhere, LIndent: string;
-  LShown: Integer;
+  LShown, LSame, LRowLine: Integer;
 begin
   LFile := '';
   LPrev := '';
   LLastWhere := '';
   LShown := 0;
+  LSame := 0;
+  LRowLine := 0;
   for var LH in AHits do
   begin
     if LShown >= ALimit then
       Break;
+    // A line naming the symbol twice is one row: a second one reads as a
+    // second use site. The header still counts occurrences.
+    if not ATagOnly and (LH.Tag = '') and (LShown > 0) and
+       SameText(LH.FilePath, LFile) and (LH.Line = LRowLine) then
+    begin
+      Inc(LSame);
+      Continue;
+    end;
+    LRowLine := LH.Line;
     if not SameText(LH.FilePath, LFile) then
     begin
       LFile := LH.FilePath;
@@ -1772,9 +1783,9 @@ begin
         CleanLine(LH.Snippet)]));
     Inc(LShown);
   end;
-  if Length(AHits) > LShown then
+  if Length(AHits) - LSame > LShown then
     ASb.AppendLine(Format('... %d more (raise `limit`)',
-      [Length(AHits) - LShown]));
+      [Length(AHits) - LSame - LShown]));
 end;
 
 function FileCount(const AHits: TArray<THit>): Integer;

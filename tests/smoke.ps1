@@ -117,7 +117,8 @@ Check 'references by position' (Block $b 'references {"file"') @('TCircle.Radius
 Check 'references unit' (Block $b 'references {"symbol":"uShapes"}') @('3 references in 3 files', 'AppB\AppB.dpr', "AppA\uAppA.pas`n  13  uShapes;")
 # Rows under what they sit in: a member declaration under its class, a
 # statement under its routine, two uses on one line under one heading.
-Check 'references grouped' (Block $b 'references {"symbol":"TCircle.FRadius"}') @('5 references in 1 files', "  TCircle`n    27  property Radius", "  TCircle.Create`n    50  FRadius := ARadius;", "  TCircle.Area`n    55  Result := Pi * FRadius * FRadius;`n    55  ")
+# A line naming it twice is one row; the header counts occurrences.
+Check 'references grouped' (Block $b 'references {"symbol":"TCircle.FRadius"}') @('5 references in 1 files', "  TCircle`n    27  property Radius: Double read FRadius write FRadius;`n  TCircle.Create", "  TCircle.Create`n    50  FRadius := ARadius;", "  TCircle.Area`n    55  Result := Pi * FRadius * FRadius;") @("FRadius;`n    55  ", "FRadius;`n    27  ")
 # What the form files bind by name, under the component each line belongs to:
 # a handler no code calls, bound by a form and by the inherited form's own
 # component; a component named by its object line and by another's property;
