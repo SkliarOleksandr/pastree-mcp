@@ -262,12 +262,16 @@ and to `<project>-pastree-mcp.log` beside the project.
    default and `shared` the option.
 2. **Does the agent use it well?** The real test is an agent on a real task,
    compared with the same task without the server: tokens, turns, and whether
-   the answers were right. Not done yet.
+   the answers were right. Whether the answers are right is measured now
+   (section 10); whether an agent solves a task with them is not done yet.
 3. **Tool descriptions.** They are what the model decides by; wording them is
    empirical. Adjust after watching real sessions.
 4. **Re-demotion.** Library units hydrated by queries stay hydrated until the
    next build. Measure how much that grows over a long session.
 5. **Result caps.** 150 references and 60 diagnostics by default are guesses.
+   Over 384 sampled symbols on the client group (section 10) 150 rows put
+   24 answers about library members at 5.0-6.3k tokens; `outline` and
+   `form` were measured to 300.
 
 ## 9. Planned
 
@@ -285,7 +289,8 @@ optimizing - is three things this section goes after:
 
 Everything here is a plan, not a contract. Section 8, question 2 comes first:
 two or three real tasks on the client group, read back from the transcripts,
-will say where the tokens actually go and may reorder this list. Each item
+will say where the tokens actually go and may reorder this list. Section 10
+reordered it once by what the answers got wrong (9.8). Each item
 gets its questions in a `.bench` file (README) before it is built, so its
 answer is measured against grep and against the calls it replaces.
 
@@ -320,6 +325,11 @@ are here so a new tool is not the one that breaks them.
   never content. pastree-lsp lost an investigation to a hand-rolled read: one
   BOM made a whole file resolve nothing while the log said only "no
   identifier". A `.dfm` adds a second trap - it may be binary (9.5).
+- **Says what it did not see.** An empty answer names the other ways the
+  thing is reached (through a base, a form file, a branch not compiled); a
+  cut answer drops the least telling rows first and says what it dropped.
+  Nearly every serious defect section 10 found was an answer wrong without a
+  word - "0 references" read as dead code.
 - **Covered by the smoke test, empty cases included.** A new model-walking
   handler gets a `tests\smoke.calls` row over the fixture, and one over an
   input where the walk finds nothing (a type with no members, a routine with
@@ -576,9 +586,15 @@ gap between the answers and the truth.
 ### 9.6 Refactoring and new code
 
 1. **`rename_plan`** - `PlanRename` / `PlanUnitRename` as a list of edits
-   (file, line, column, old, new) the agent applies itself. It includes the
-   form bindings of 9.5 once they exist; until then the answer says forms
-   were not checked.
+   (file, line, column, old, new) the agent applies itself. Section 10 found
+   what a rename made from `references` rows has to collect by hand today,
+   each said in a note of its own: the form lines that bind a handler or set
+   a property (sub-properties and items included), other forms reaching a
+   module's components through its Name, the class name in its methods'
+   implementation headers, every link of a property's redeclaration chain,
+   and the lines in branches the configuration does not compile, which no
+   analysis resolves. The plan lists them as edits, the last as lines to
+   check.
 2. **`change_plan`** - for a routine, everything a signature change must
    touch, in one answer: the declaration and implementation, the overrides
    with theirs, the interface methods it implements and their other
@@ -641,10 +657,141 @@ gap between the answers and the truth.
 2. `callers` (done, 0.5.0), `callees` (done, 0.7.0), `impact` (done,
    0.8.0).
 3. `compile` (done, 0.9.0).
-4. Forms (9.5) - the largest gap, and new library work.
-5. `rename_plan`, `change_plan`.
-6. `lint` (the two `uses` rules first), `metrics`.
+4. Forms (9.5) - done: `references` 0.10.0, `callers` 0.11.0, `impact`
+   0.12.0, `form` 0.13.0, then corrected against the forms oracle of
+   section 10 (0.15.0-0.16.7). Left: a form file's link error (E2161)
+   attached to the `.dfm` in `compile`'s answer.
+5. The task comparison of section 8, question 2 (10.4), before any new
+   tool: section 10 says the answers are right; only that run says whether
+   they are enough, and where an agent still falls back to grep - which is
+   what this list should be ordered by.
+6. `rename_plan`, `change_plan` - the notes section 10 added to
+   `references` are the rename's parts, collected by hand today (9.6).
+7. `mode: count | files` (9.2) - the answers the limits cut are about widely
+   used library members and properties set on thousands of form lines; a
+   count per file first, then the lines of the files that matter.
+8. `defines` (9.6) - `references` now names the lines in branches not
+   compiled; which define selects each is the next question.
+9. `lint` (the two `uses` rules first), `metrics`. `unused-symbol`'s
+   exceptions are measured: 24 of 384 sampled symbols that no code names
+   are called through a base, an interface or a property, and a published
+   property's uses are form lines.
 
-`type_of`, `mode`, several targets per call, `overview`, `implement_plan`,
-`scope_at`, `uses_for` and `defines` go in when a measured session asks for
-them.
+`type_of`, several targets per call, `overview`, `implement_plan`,
+`scope_at` and `uses_for` go in when a measured session asks for them.
+
+## 10. What deep testing showed
+
+The bench (README) sets an answer's tokens against grep; it does not say
+whether the answer is right, or whether "none found" is true. In 0.13.0 an
+ancestor's form binding a descendant's handler was found by chance, so a
+round of testing looked for such defects on purpose: five phases on a copy
+of the client group (9 members, about 4,000 units, 1.3M lines, 1,075 form
+files), each against an oracle that is not PasTree, run on a frozen 0.13.0;
+then one session fixing all they found - pastree-mcp 0.13.1 -> 0.16.7,
+PasTree 0.65.0 -> 0.70.0, every fix with its smoke row or PasTree check -
+and the phases rerun on the fixed server. The records name the client's
+code and stay in `local/`; this section is what they concluded.
+
+### 10.1 The oracles
+
+| Phase | Oracle | Size |
+| --- | --- | --- |
+| 1 sweep | none: every answer checked for an error, a hang, its time and size, a header its rows contradict | 384 symbols drawn by `tests\audit.ps1` (a seed, stratified by kind and own/library), 3,967 calls, `form` of every form file |
+| 2 grep | every word-boundary hit of the name in the sources and the text forms; a hit the answer lacks is classified by `definition` at it - the target (a miss), a namesake, nothing (unresolved) - and comments and strings by PasTree's tokens | 152 symbols, 101,115 hit lines, 5,811 `definition` checks |
+| 3 compiler | the symbol marked `deprecated 'tag'`: dcc warns W1000 at every compile-time use in every unit and the build still succeeds - one build per batch of ten symbols, no rename-and-fix loop | 81 symbols in 8 batches, 3,536 sites, 56 builds |
+| 4 forms | a text pass over every text form file giving, by TReader's rule and the ancestor-form rule, the lines that bind each published method | 5,702 handlers, 12,712 calls; the 5 binary forms by hand |
+| 5 freshness | a cold server started on the same files after each edit step of a long-lived one; the answers must be equal with the freshness note stripped | 45 steps (a body, a signature, a method added and removed, a unit renamed, a new unit and form file, a `.dfm` edited, a file deleted, a `.dproj` changed), 290 answer pairs |
+
+Each oracle found a class of defect the others could not: grep the form
+lines that set a property, the compiler two overload rules, the text oracle
+collapsed collection items, the cold server files the index took in and
+never watched again. The fixture, written with the same understanding as
+the code, reproduced none of them before they were found. Two things an
+oracle needs that are easy to miss: a hint directive does not change a
+unit's interface CRC, so an incremental build reports W1000 only in the
+edited units - every batch deletes the own units' `.dcu` files first; and
+dcc gives no W1000 at a method's implementation header, which the compiler
+therefore cannot settle. `compile`'s answer equalled dcc's log in all 56
+builds.
+
+### 10.2 The numbers
+
+| Criterion | Target | 0.13.0 | 0.16.7 |
+| --- | --- | --- | --- |
+| C1 false "nothing" | 0 | "0 references" for 24 of 384 routines called through a base, an interface or a property (1 to 1,334 calls each); a form file written after its unit: "no form file binds it" | such an answer says how many calls `callers` finds (the fixture's rows; the 24 not rerun one by one); the form file seen at the next call; text-visible 0 of 152 |
+| C2 recall, code | >= 99% | compile-time 99.3% (3,497 of 3,521; 23 of the 24 misses overload resolution); text-visible 99.2% | overload misses 0; text-visible 99.12%, 100% with the 74 implementation headers the answer now counts |
+| C2 recall, forms | - | handler lines 100% (6,777 of 6,777); form lines in phase 2's answers 34; `form` rows 99.92% | handler lines unchanged; form lines in phase 2's answers 5,066 (the lines that set a property, sub-properties and item properties included); `form` rows 20,687 of 20,688 - the one after a root's `end`, which dcc drops |
+| C3 precision | >= 98% | 99.9% counting a link of the property's redeclaration chain (86.9% strict), the chain unsaid; `form`: 65 false "fails to load", 13 false "names no component" | 100% by the chain, the chain said; "fails to load" 0; "names no component" 3 - the product's own |
+| C4 robustness | 0 | no crash, no hang in more than 20,000 calls over the phases | the same on the reruns |
+| C5 latency p95 | < 1 s | every tool (worst `callers` 553 ms); 0.9% of calls over 1 s, up to 10.6 s | the tail 8-10 s -> 1-2 s; p95 not yet re-measured on an idle machine |
+| C6 size p95 | < 5k tokens | every tool but `outline` (up to 141k in one answer) | `outline` and `form` bounded, 300 rows |
+| C7 notes | every gap said | every cut said; not said: uses in branches not compiled, implementation headers left out, whose property a redeclaration answers for, what a cut left out | said |
+| C8 freshness | identical | 266 of 290 pairs | 290 of 290 |
+| C9 sufficiency | >= 80% of tasks, fewer tokens | not measured (10.4) | |
+
+The tools also found four latent defects of the product itself: three form
+files naming components their forms do not have, and one with text after
+its root's `end` - seven property lines dcc drops from the exe.
+
+### 10.3 What the defects had in common
+
+1. **Silence, not failure.** Nearly every high-severity finding was an
+   answer wrong without a word: "0 references" read as dead code, "no form
+   file binds it" after a form file appeared, a unit's edits unseen once the
+   index had taken it in, the form lines of a property missing from its
+   references. The fix was each time a row or a sentence, seldom a refusal:
+   what an answer did not look at is part of the answer (9.1).
+2. **A false alarm costs what a miss costs.** 65 "the form fails to load"
+   for forms that load - a Boolean `OneOnRow` taken for an event, `OnX = nil`
+   for a missing handler: an agent told a form fails to load "fixes" one
+   that works. A rule read off a name (`On...`) is checked against the
+   value's shape and, where known, the declared type.
+3. **Forms are where the answers and the truth were furthest apart**, as
+   9.5 expected: four of the nine high-severity findings. What they needed
+   and the code did not was TReader taken literally - the class a
+   sub-property is read in, a collection's item class from its default array
+   property whatever its name, a class chosen at run time said rather than
+   guessed.
+4. **What a cut keeps matters as much as where it cuts.** Unbounded,
+   `outline` gave 141k tokens; bounded by file order, `references` let 6,019
+   form lines push the 25 redeclarations a rename changes out of a 5,000-row
+   answer. A cut drops the least telling rows first - members before types,
+   form lines before code - and says what it dropped.
+5. **The slow tail is the library's.** Every call over 1 s was about a
+   widely used VCL property or an own one redeclaring it - a scan per link of
+   the redeclaration chain; own symbols stayed under 0.5 s at p95. One pass
+   over the closure for the whole chain made it 1-2 s with the same rows.
+6. **What the index takes in later is watched like what it loaded.** Both
+   freshness defects (17 and 7 of the 24 unequal pairs) were files that came
+   in after the first build: a unit a new `uses` pulled in, a form file
+   written after its unit - an agent's order of work (section 5).
+7. **A resolution rule not modelled is a miss and a wrong row at once.** An
+   Integer argument for a parameter of a distinct `type Integer` and a
+   one-character literal for a `Char` parameter sent 23 calls to a sibling
+   overload - the only rows of any phase that were not uses of their symbol.
+
+### 10.4 Not measured, and the blind spots left
+
+- **Sufficiency (C9).** Whether an agent solves real tasks with the tools in
+  fewer tokens than with grep and reads - the same tasks run by fresh agents
+  with the server and without - has not been run. The answers are known to
+  be right and to say where they are not complete; whether they are enough
+  is still section 8, question 2. The latency p95 is re-measured with it.
+- **Said, not resolved**: late-bound OLE calls and `asm` (7 and 1 lines of
+  phase 2's hits), `X[I]` over a default array property, calls through a
+  method pointer, a form file with no unit beside it or one no project
+  compiles, uses in a branch the analyzed configuration does not compile
+  (named and counted).
+- **The oracles' own blind zones**: dcc warns only in the units it
+  recompiles and not at implementation headers; grep sees only what the text
+  names, and the hits of common names past its cap (51,385 lines) were not
+  checked one by one.
+
+### 10.5 Repeating it
+
+`tests\audit.ps1` is the tracked harness (README); the oracles of phases 2-5
+are scripts over it, kept with their data in `local/` - their generic parts
+still to move to `tests\`. A change to what `references`, `callers` or the
+form binder answer reruns phases 2 and 4 on the copy, a change to section 5
+reruns phase 5 - each under half an hour - against the numbers of 10.2.

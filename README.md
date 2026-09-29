@@ -170,5 +170,7 @@ not only what they cost. Options in the script's header.
 
 ## Status
 
-A prototype. It works end to end - including on the client group - but has not
-yet been used by an agent over a real task. See "Open questions" in SPEC.md.
+A prototype. It works end to end - including on the client group, where its
+answers were checked against the compiler, grep, a form-file oracle and a cold
+server (SPEC.md section 10) - but has not yet been used by an agent over a
+real task. See "Open questions" in SPEC.md.
