@@ -162,6 +162,13 @@ Check 'references through none' (Block $b 'references {"symbol":"TfrmMain.NeverB
 # removing it fails when the form loads. One no form sets says so.
 Check 'references form property' (Block $b 'references {"symbol":"TfraName.Title"}') @('1 references in 1 files, 1 of them in form files', "AppF\uChildForm.dfm`n  fraName1`n    32  Title = 'Child'")
 Check 'references form property none' (Block $b 'references {"symbol":"TfraName.Note"}') @('0 references in 0 files; no form file sets it')
+# Set THROUGH a property: a sub-property in its property's class, an item's
+# property in the item class its collection holds - TReader reads them there.
+# Behind a link its declared type does not have (`Style.Deep`: a descendant's,
+# chosen at run time) the line is kept, tagged, and said once.
+Check 'references form sub-property' (Block $b 'references {"symbol":"TNameStyle.Accent"}') @('2 references in 1 files, 2 of them in form files', "AppF\uChildForm.dfm`n  fraName1`n    33  Style.Accent = 2`n    38  [may be another class's]  Style.Deep.Accent = 5", "(1 form line [may be another class's]: a link of the property path is a declared type without that property")
+Check 'references form item property' (Block $b 'references {"symbol":"TNameTag.Weight"}') @('1 references in 1 files, 1 of them in form files', "AppF\uChildForm.dfm`n  fraName1`n    36  Weight = 3")
+Check 'references form sub-property none' (Block $b 'references {"symbol":"TNameStyle.Shade"}') @('0 references in 0 files; no form file sets it')
 Check 'impact form property' (Block $b 'impact {"symbols":["TfraName.Title"]}') @('uses - none in code, 1 form line', "  fraName1`n    32  Title = 'Child'")
 Check 'descendants' (Block $b 'related {"relation":"descendants"') @('  11  TBigCircle <- TCircle', "  21  TCircle`n", "  30  TSquare`n") @('<- TShape')
 # A class-reference type means the class it refers to, and says so.

@@ -47,6 +47,9 @@ references {"symbol":"TfrmBinary.btnBinaryClick"}
 references {"symbol":"TfrmMain.NeverBound"}
 references {"symbol":"TfraName.Title"}
 references {"symbol":"TfraName.Note"}
+references {"symbol":"TNameStyle.Accent"}
+references {"symbol":"TNameTag.Weight"}
+references {"symbol":"TNameStyle.Shade"}
 impact {"symbols":["TfraName.Title"]}
 references {"symbol":"TBigCircle.Area"}
 related {"relation":"descendants", "symbol":"uShapes.TShape"}

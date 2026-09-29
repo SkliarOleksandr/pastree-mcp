@@ -30,5 +30,11 @@ inherited frmChild: TfrmChild
   end
   inherited fraName1: TfraName
     Title = 'Child'
+    Style.Accent = 2
+    Tags = <
+      item
+        Weight = 3
+      end>
+    Style.Deep.Accent = 5
   end
 end

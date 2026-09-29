@@ -1362,6 +1362,7 @@ type
     FSeen: TDictionary<string, Boolean>;
     FCompiled: Integer;
     FForms: Integer;
+    FUnsure: Integer;
   public
     constructor Create(AWs: TMcpWorkspace);
     destructor Destroy; override;
@@ -1373,6 +1374,8 @@ type
     // Own files first, then libraries; by file, line, column.
     function Sorted: TArray<THit>;
     property Compiled: Integer read FCompiled;
+    // Form lines tagged cUnsureTag.
+    property Unsure: Integer read FUnsure;
   end;
 
 constructor THitSet.Create(AWs: TMcpWorkspace);
@@ -1424,6 +1427,18 @@ end;
   level out, as a Pascal row on a declaration's name line does - '' when
   that is the root: the file level. The document is the one the binder
   read, from PasDfmLoad's cache. }
+const
+  cUnsureTag = 'may be another class''s';
+
+// Once per answer, for the rows tagged cUnsureTag.
+function UnsureNote(ACount: Integer): string;
+begin
+  Result := Format('(%s [%s]: a link of the property path is a declared type '
+    + 'without that property - the class read there is chosen at run time, '
+    + 'a descendant, which may have a namesake instead)',
+    [Plural(ACount, 'form line'), cUnsureTag]);
+end;
+
 function FormObjectPath(const ASite: TPasFormSite): string;
 var
   LHandle: IPasDfmDoc;
@@ -1484,7 +1499,14 @@ begin
   // The line binds the ancestor's method of the name for the ancestor's own
   // forms too: a rename cannot rewrite it.
   if ASite.Via = fsvAncestor then
-    LH.Tag := 'ancestor''s form';
+    LH.Tag := 'ancestor''s form'
+  // A link of the property path is a class chosen at run time: the line
+  // may set a namesake instead (UnsureNote).
+  else if ASite.Unsure then
+  begin
+    LH.Tag := cUnsureTag;
+    Inc(FUnsure);
+  end;
   FList.Add(LH);
   Inc(FForms);
 end;
@@ -2753,6 +2775,8 @@ begin
       LSb.AppendLine(Format('%s (%s) - %d references in %d files', [LT.Name,
         LT.Head, Length(LHits), FileCount(LHits)]));
     AppendHitsByFile(AWs, LSb, LHits, LLimit, False, LEnclosing);
+    if LSet.Unsure > 0 then
+      LSb.AppendLine(UnsureNote(LSet.Unsure));
     if LSet.Compiled > 0 then
       LSb.AppendLine(Format('(+%d in compiled units without source, not '
         + 'shown)', [LSet.Compiled]));
@@ -4072,7 +4096,9 @@ begin
     if (ANode.Level > 0) or FTagRoots then
       LRow.Callee := ANode.Name;
     if LS.Via = fsvAncestor then
-      LRow.Note := 'ancestor''s form';
+      LRow.Note := 'ancestor''s form'
+    else if LS.Unsure then
+      LRow.Note := cUnsureTag;
     FRows.Add(LRow);
   end;
 end;
