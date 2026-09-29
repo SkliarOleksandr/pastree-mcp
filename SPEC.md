@@ -49,8 +49,13 @@ Common rules:
   pick one; `kind` narrows (`class`, `function`, `property`...).
 - **What a name can find**: declarations at unit level and struct members -
   PasTree's `ProjectOutline` filter (types, routines, variables, constants,
-  fields, properties with a source declaration). Locals and parameters are
-  reachable by position only. A name matching no declaration but a unit name
+  fields, properties with a source declaration) - and enum values, by their
+  name or as `TEnum.Value` (`kind: enum`); a scoped enum's value
+  (`{$SCOPEDENUMS ON}`) by its bare name only when nothing else has it, as
+  code cannot write it so - the RTL's scoped `Exception` value would make the
+  class ambiguous. The filter leaves enum values out, and `find` said a value
+  written on 29 lines of the client group existed nowhere (0.17.0). Locals
+  and parameters are reachable by position only. A name matching no declaration but a unit name
   targets the unit.
 - **Identity across a group**: a symbol's declaration site (file, line,
   column). A search runs in every analysis holding that site and the rows are
@@ -663,8 +668,9 @@ gap between the answers and the truth.
    0.12.0, `form` 0.13.0, then corrected against the forms oracle of
    section 10 (0.15.0-0.16.7). Left: a form file's link error (E2161)
    attached to the `.dfm` in `compile`'s answer.
-5. The findings the task pilot left open (10.4): F6.2 first - a false
-   "none found" - then F6.4, F6.3, F6.1.
+5. The findings left open (10.4): enum values by name and F6.2 - both a
+   false "nothing" - are fixed (0.17.0, 0.17.1); then the generic
+   ancestor's E2003, F6.4, F6.3, `source` of overloads, F6.1, F2084.
 6. The task comparison of section 8, question 2, scaled up on tasks that
    discriminate (10.4), before any new tool: the pilot's tasks were solved
    by grep as well, so it has not yet said where the tools are enough and
@@ -780,7 +786,15 @@ its root's `end` - seven property lines dcc drops from the exe.
    overload - the only rows of any phase that were not uses of their symbol.
    The task pilot on the fixed server found a third (F6.2): an open-array
    constructor `['x']` bound to the overload whose parameter there is a
-   string, and the overload it calls answered "none found".
+   string, and the overload it calls answered "none found" - a `[...]` now
+   rejects what it cannot be passed to (PasTree 0.71.1, 0.17.1).
+8. **An oracle that shares the tool's view shares its blind spot.** The
+   phases drew their samples from `outline`, whose filter is the one name
+   lookup uses, so no enum value was ever sampled - and none could be found
+   by name. A colleague's session renaming two found it on a real task
+   (0.17.0). `tests\audit.ps1` still samples from `outline`; the next
+   sample should come from the source text too, not only from the index
+   under test.
 
 ### 10.4 Not measured, and the blind spots left
 
@@ -809,16 +823,24 @@ its root's `end` - seven property lines dcc drops from the exe.
   - F6.1: `related assignments` of a property an own class republishes
     scans the redeclaration chain per link - up to 8.1 s, where
     `references` of the same property takes 1 s.
-  - F6.2: an open-array constructor argument is taken by an overload whose
-    parameter is a string (10.3, 7): the call is listed under the wrong
-    overload and the one it calls is "none found" - a constructor that
-    runs, read as unused.
+  - F6.2 (fixed in 0.17.1, PasTree 0.71.1): an open-array constructor
+    argument was taken by an overload whose parameter is a string (10.3,
+    7): the call listed under the wrong overload and the one it calls
+    "none found" - a constructor that runs, read as unused.
   - F6.3: a `callers` row is the first line of a call written over
     several; the argument asked about - where a value comes from - is on
     the next, and the agent read the file for it.
   - F6.4: `form` of a class without a form file of its own, which streams
     its ancestor's, refuses; the ancestor's form with each event resolved
     on the class is what runs (`callers` already finds that binding).
+- **Open from a field report** (a colleague's session on a branch of the
+  client group, mostly renames; `references` was its main gain): enum
+  values by name (fixed, 0.17.0); `diagnostics` reporting E2003 on a member
+  reached through a generic ancestor's type parameter, which dcc compiles
+  (not reproduced yet - the code is on that branch); `source` of an
+  overloaded name refusing where `definition` lists every overload, after
+  which the agent read the file; `compile` not saying that dcc's F2084 is
+  the compiler's own failure and that a second build usually passes.
 - **Said, not resolved**: late-bound OLE calls and `asm` (7 and 1 lines of
   phase 2's hits), `X[I]` over a default array property, calls through a
   method pointer, a form file with no unit beside it or one no project
