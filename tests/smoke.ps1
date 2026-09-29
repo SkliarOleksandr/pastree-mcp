@@ -93,7 +93,7 @@ Check 'definition inactive' (Block $b 'definition {"file":"AppB/uBoxes.pas","lin
 Check 'find joined cut' (Block $b 'find {"query":"TWideBox.Many"}') @('AppB\uBoxes.pas:74  TWideBox.Many (procedure)  procedure Many(const AAlphaName, ABetaName, AGammaName: string; ADeltaCount, AEpsilonCount, AZetaCount: Integer; const AEtaText, AThetaText, ...); virtual;')
 # A name no declaration matches: what the index is, and where the name is
 # written outside it - in a unit no project uses - or that it is nowhere.
-Check 'find outside the index' (Block $b 'find {"query":"OrphanRoutine"}') @('no declaration matches `OrphanRoutine` among the ', ' units indexed - what the 3 projects of Fixture.groupproj compile: 15 of their own, ', "``OrphanRoutine`` is written in 1 file(s) that no indexed project uses - no tool here sees them:`n  AppB\uOrphan.pas:8  procedure OrphanRoutine;")
+Check 'find outside the index' (Block $b 'find {"query":"OrphanRoutine"}') @('no declaration matches `OrphanRoutine` among the ', ' units indexed - what the 3 projects of Fixture.groupproj compile: 16 of their own, ', "``OrphanRoutine`` is written in 1 file(s) that no indexed project uses - no tool here sees them:`n  AppB\uOrphan.pas:8  procedure OrphanRoutine;")
 Check 'find nowhere' (Block $b 'find {"query":"NothingAnywhere"}') @('no declaration matches `NothingAnywhere` among the ', 'no Pascal file outside them writes `NothingAnywhere` either (1 searched, under the group directory')
 Check 'definition' (Block $b 'definition {"symbol":"TCircle.Area"') @('declared at Shared\uShapes.pas:26', 'implemented at Shared\uShapes.pas:53', 'Result := Pi * FRadius * FRadius;')
 Check 'source' (Block $b 'source {"symbol":"TCircle.Area"}') @('TCircle.Area (function) implemented at Shared\uShapes.pas:53-56', "53  function TCircle.Area: Double;`n54  begin", "56  end;`n") @('declared at')
@@ -316,6 +316,11 @@ Check 'related count only' (Block $b 'related {"relation":"descendants","symbol"
 Check 'form count only' (Block $b 'form {"symbol":"TfrmChild","limit":0}') @('8 components, 6 events bound, 3 references to components, 1 cleared', '... 19 more rows (raise `limit`)') @('lblHint')
 Check 'outline count only' (Block $b 'outline {"file":"Shared/uShapes.pas","limit":0}') @('... 24 more rows (raise `limit`') @('member declarations of its types are left out', 'TCircle')
 Check 'impact count only' (Block $b 'impact {"symbol":"TCircle.Area","limit":0}') @('members to build and test: AppA, AppB', 'callers - 3 calls in 3 routines', '... 3 more (raise `limit`)') @('  RunA')
+# A member reached through a generic ancestor's type parameter, the call
+# written bare (FR.2): no false E2003, the member bound, every spelling.
+Check 'diagnostics generic ancestor call' (Block $b 'diagnostics {"file":"AppB/uGenLists.pas"}') @('no diagnostics in AppB\uGenLists.pas')
+Check 'definition generic ancestor call' (Block $b 'definition {"file":"AppB/uGenLists.pas","line":69,"name":"Code"}') @('ICoded.Code (property) declared at AppB\uGenLists.pas:18')
+Check 'references generic ancestor call' (Block $b 'references {"symbol":"ICoded.Code"}') @('8 references in 1 files', '    69  Result := GetRecord(0).Code;', '    107  Result := GetRecord(0).Code;')
 # A form file with no unit beside it: said so, not "not part of any project".
 Check 'form orphan' (Block $b 'form {"file":"AppF/uOrphanForm.dfm"}') @('no unit beside AppF\uOrphanForm.dfm - an orphan form file, which no project compiles')
 Check 'outline' (Block $b 'outline {"file":"Shared') @('21  type TCircle = class', '27    property Radius: Double', '53  function TCircle.Area: Double', '40 implementation')

@@ -149,3 +149,6 @@ related {"relation":"descendants","symbol":"uShapes.TShape","limit":0}
 form {"symbol":"TfrmChild","limit":0}
 outline {"file":"Shared/uShapes.pas","limit":0}
 impact {"symbol":"TCircle.Area","limit":0}
+diagnostics {"file":"AppB/uGenLists.pas"}
+definition {"file":"AppB/uGenLists.pas","line":69,"name":"Code"}
+references {"symbol":"ICoded.Code"}

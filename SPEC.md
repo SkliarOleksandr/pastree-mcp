@@ -694,8 +694,8 @@ gap between the answers and the truth.
    attached to the `.dfm` in `compile`'s answer.
 5. The findings left open (10.4): enum values by name and F6.2 - both a
    false "nothing" - are fixed (0.17.0, 0.17.1), F6.4 and F6.3 too
-   (0.19.0); then the generic ancestor's E2003, `source` of overloads,
-   F6.1, F2084.
+   (0.19.0), and the generic ancestor's E2003 (0.19.1); then `source` of
+   overloads, F6.1, F2084.
 6. The task comparison of section 8, question 2, scaled up on tasks that
    discriminate (10.4), before any new tool: the pilot's tasks were solved
    by grep as well, so it has not yet said where the tools are enough and
@@ -867,7 +867,13 @@ its root's `end` - seven property lines dcc drops from the exe.
   client group, mostly renames; `references` was its main gain): enum
   values by name (fixed, 0.17.0); `diagnostics` reporting E2003 on a member
   reached through a generic ancestor's type parameter, which dcc compiles
-  (not reproduced yet - the code is on that branch); `source` of an
+  (fixed, 0.19.1, PasTree 0.71.2: a routine of a generic ancestor called by
+  its bare name - `GetRecord(0).Code` in a `class(TItemList<ICoded>)`
+  descendant - was bound right and typed as the open `T`, as its call node
+  had no instantiation frame; in a `with` body the member after it was left
+  unbound with no diagnostic at all, a use `references` did not list. The
+  shape was on their branch only; reproduced in the fixture, AppB\uGenLists);
+  `source` of an
   overloaded name refusing where `definition` lists every overload, after
   which the agent read the file; `compile` not saying that dcc's F2084 is
   the compiler's own failure and that a second build usually passes.

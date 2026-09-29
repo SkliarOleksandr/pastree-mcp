@@ -7,7 +7,7 @@ program AppB;
 uses
   uShapes in '..\Shared\uShapes.pas',
   uAppB in 'uAppB.pas',
-  uBoxes in 'uBoxes.pas';
+  uBoxes in 'uBoxes.pas', uGenLists in 'uGenLists.pas';
 
 begin
   RunB;
