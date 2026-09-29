@@ -64,6 +64,10 @@ end;
 procedure TfraName.btnClearClick(Sender: TObject);
 begin
   edtValue.Text := '';
+  // A code use of a property two form lines set: cut to one row, the
+  // answer keeps this one (smoke: references form cut).
+  if FStyle <> nil then
+    FStyle.Accent := 0;
 end;
 
 end.

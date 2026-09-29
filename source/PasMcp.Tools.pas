@@ -121,6 +121,7 @@ type
     // type around it - its component - and a note for the file's line.
     Where: string;
     FileNote: string;
+    Form: Boolean;         // a form file's site (THitSet.AddForm)
   end;
 
 const
@@ -1494,6 +1495,7 @@ begin
   LH.Snippet := ASite.Snippet;
   LH.Own := FWs.IsOwnFile(ASite.FilePath);
   LH.Where := FormObjectPath(ASite);
+  LH.Form := True;
   if ASite.IsBinary then
     LH.FileNote := 'binary - lines of its text conversion';
   // The line binds the ancestor's method of the name for the ancestor's own
@@ -1844,23 +1846,29 @@ end;
 //   uMain.dfm
 //     btnSave
 //       40  OnClick = btnSaveClick
-procedure AppendHitsByFile(AWs: TMcpWorkspace; ASb: TStringBuilder;
+// Returns the index of the first hit the limit left out, Length when none.
+function AppendHitsByFile(AWs: TMcpWorkspace; ASb: TStringBuilder;
   const AHits: TArray<THit>; ALimit: Integer; ATagOnly: Boolean = False;
-  AEnclosing: TEnclosing = nil);
+  AEnclosing: TEnclosing = nil): Integer;
 var
   LFile, LLine, LPrev, LWhere, LLastWhere, LIndent: string;
   LShown, LSame, LRowLine: Integer;
 begin
+  Result := Length(AHits);
   LFile := '';
   LPrev := '';
   LLastWhere := '';
   LShown := 0;
   LSame := 0;
   LRowLine := 0;
-  for var LH in AHits do
+  for var LI := 0 to High(AHits) do
   begin
+    var LH := AHits[LI];
     if LShown >= ALimit then
+    begin
+      Result := LI;
       Break;
+    end;
     // A line naming the symbol twice is one row: a second one reads as a
     // second use site. The header still counts occurrences.
     if not ATagOnly and (LH.Tag = '') and (LShown > 0) and
@@ -2674,13 +2682,29 @@ function OwnerClassX(AA: TMcpAnalysis; AMid, ASym: Integer): TSemaXType;
   forward;
 function StreamsX(AA: TMcpAnalysis; AClass: TSemaXType): Boolean; forward;
 
+// AHits with the code rows before the form rows, each part in its order.
+function CodeRowsFirst(const AHits: TArray<THit>): TArray<THit>;
+var
+  LN: Integer;
+begin
+  SetLength(Result, Length(AHits));
+  LN := 0;
+  for var LForm := False to True do
+    for var LH in AHits do
+      if LH.Form = LForm then
+      begin
+        Result[LN] := LH;
+        Inc(LN);
+      end;
+end;
+
 function ToolReferences(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
 var
   LT: TTarget;
   LSet: THitSet;
   LHits: TArray<THit>;
   LSb: TStringBuilder;
-  LLimit: Integer;
+  LLimit, LFormCut: Integer;
   LId: TSymId;
   LEnclosing: TEnclosing;
   LBindable, LSetsProp: Boolean;
@@ -2757,6 +2781,12 @@ begin
       end;
     end;
     LHits := LSet.Sorted;
+    // Cut by the limit, the code rows come first: a published property set
+    // on thousands of form lines filled the rows by file name, and the code
+    // rows a rename changes (`property TabOrder;` redeclarations) fell past
+    // the cut unsaid.
+    if (Length(LHits) > LLimit) and (LSet.FormCount > 0) then
+      LHits := CodeRowsFirst(LHits);
     // A published field or method the forms could bind: say they were read,
     // and what they hold - "no form file names it" is itself the answer.
     if LSet.FormCount > 0 then
@@ -2774,7 +2804,14 @@ begin
     else
       LSb.AppendLine(Format('%s (%s) - %d references in %d files', [LT.Name,
         LT.Head, Length(LHits), FileCount(LHits)]));
-    AppendHitsByFile(AWs, LSb, LHits, LLimit, False, LEnclosing);
+    LFormCut := 0;
+    for var LI := AppendHitsByFile(AWs, LSb, LHits, LLimit, False,
+      LEnclosing) to High(LHits) do
+      if LHits[LI].Form then
+        Inc(LFormCut);
+    if LFormCut > 0 then
+      LSb.AppendLine(Format('(cut: code rows come first - %d of the rows '
+        + 'left out are form lines)', [LFormCut]));
     if LSet.Unsure > 0 then
       LSb.AppendLine(UnsureNote(LSet.Unsure));
     if LSet.Compiled > 0 then

@@ -166,7 +166,11 @@ Check 'references form property none' (Block $b 'references {"symbol":"TfraName.
 # property in the item class its collection holds - TReader reads them there.
 # Behind a link its declared type does not have (`Style.Deep`: a descendant's,
 # chosen at run time) the line is kept, tagged, and said once.
-Check 'references form sub-property' (Block $b 'references {"symbol":"TNameStyle.Accent"}') @('2 references in 1 files, 2 of them in form files', "AppF\uChildForm.dfm`n  fraName1`n    33  Style.Accent = 2`n    38  [may be another class's]  Style.Deep.Accent = 5", "(1 form line [may be another class's]: a link of the property path is a declared type without that property")
+Check 'references form sub-property' (Block $b 'references {"symbol":"TNameStyle.Accent"}') @('3 references in 2 files, 2 of them in form files', "AppF\uChildForm.dfm`n  fraName1`n    33  Style.Accent = 2`n    38  [may be another class's]  Style.Deep.Accent = 5", "(1 form line [may be another class's]: a link of the property path is a declared type without that property") @('(cut:')
+# Cut by the limit, the code rows come first and the form lines left out are
+# counted: form lines filling the rows by file name hid the code a rename
+# changes.
+Check 'references form cut' (Block $b 'references {"symbol":"TNameStyle.Accent","limit":1}') @("AppF\uFrame.pas`n  TfraName.btnClearClick`n    70  FStyle.Accent := 0;`n... 2 more (raise ``limit``)", '(cut: code rows come first - 2 of the rows left out are form lines)') @('uChildForm.dfm')
 Check 'references form item property' (Block $b 'references {"symbol":"TNameTag.Weight"}') @('1 references in 1 files, 1 of them in form files', "AppF\uChildForm.dfm`n  fraName1`n    36  Weight = 3")
 Check 'references form sub-property none' (Block $b 'references {"symbol":"TNameStyle.Shade"}') @('0 references in 0 files; no form file sets it')
 Check 'impact form property' (Block $b 'impact {"symbols":["TfraName.Title"]}') @('uses - none in code, 1 form line', "  fraName1`n    32  Title = 'Child'")
