@@ -263,7 +263,9 @@ and to `<project>-pastree-mcp.log` beside the project.
 2. **Does the agent use it well?** The real test is an agent on a real task,
    compared with the same task without the server: tokens, turns, and whether
    the answers were right. Whether the answers are right is measured now
-   (section 10); whether an agent solves a task with them is not done yet.
+   (section 10); a first pilot of tasks (10.4) was solved as well without
+   the server, so whether the tools are enough where grep is not is still
+   open.
 3. **Tool descriptions.** They are what the model decides by; wording them is
    empirical. Adjust after watching real sessions.
 4. **Re-demotion.** Library units hydrated by queries stay hydrated until the
@@ -661,18 +663,21 @@ gap between the answers and the truth.
    0.12.0, `form` 0.13.0, then corrected against the forms oracle of
    section 10 (0.15.0-0.16.7). Left: a form file's link error (E2161)
    attached to the `.dfm` in `compile`'s answer.
-5. The task comparison of section 8, question 2 (10.4), before any new
-   tool: section 10 says the answers are right; only that run says whether
-   they are enough, and where an agent still falls back to grep - which is
-   what this list should be ordered by.
-6. `rename_plan`, `change_plan` - the notes section 10 added to
+5. The findings the task pilot left open (10.4): F6.2 first - a false
+   "none found" - then F6.4, F6.3, F6.1.
+6. The task comparison of section 8, question 2, scaled up on tasks that
+   discriminate (10.4), before any new tool: the pilot's tasks were solved
+   by grep as well, so it has not yet said where the tools are enough and
+   where an agent falls back - which is what this list should be ordered
+   by.
+7. `rename_plan`, `change_plan` - the notes section 10 added to
    `references` are the rename's parts, collected by hand today (9.6).
-7. `mode: count | files` (9.2) - the answers the limits cut are about widely
+8. `mode: count | files` (9.2) - the answers the limits cut are about widely
    used library members and properties set on thousands of form lines; a
    count per file first, then the lines of the files that matter.
-8. `defines` (9.6) - `references` now names the lines in branches not
+9. `defines` (9.6) - `references` now names the lines in branches not
    compiled; which define selects each is the next question.
-9. `lint` (the two `uses` rules first), `metrics`. `unused-symbol`'s
+10. `lint` (the two `uses` rules first), `metrics`. `unused-symbol`'s
    exceptions are measured: 24 of 384 sampled symbols that no code names
    are called through a base, an interface or a property, and a published
    property's uses are form lines.
@@ -702,6 +707,7 @@ code and stay in `local/`; this section is what they concluded.
 | 3 compiler | the symbol marked `deprecated 'tag'`: dcc warns W1000 at every compile-time use in every unit and the build still succeeds - one build per batch of ten symbols, no rename-and-fix loop | 81 symbols in 8 batches, 3,536 sites, 56 builds |
 | 4 forms | a text pass over every text form file giving, by TReader's rule and the ancestor-form rule, the lines that bind each published method | 5,702 handlers, 12,712 calls; the 5 binary forms by hand |
 | 5 freshness | a cold server started on the same files after each edit step of a long-lived one; the answers must be equal with the freshness note stripped | 45 steps (a body, a signature, a method added and removed, a unit renamed, a new unit and form file, a `.dfm` edited, a file deleted, a `.dproj` changed), 290 answer pairs |
+| 6 tasks (pilot) | answers settled beforehand by phases 3-4 and by `definition` at every grep hit; each task run by a fresh agent with the tools and one with grep and reads only, read-only, on 0.16.8 | 4 tasks x 2 arms, one run each, 8 agents |
 
 Each oracle found a class of defect the others could not: grep the form
 lines that set a property, the compiler two overload rules, the text oracle
@@ -724,11 +730,11 @@ builds.
 | C2 recall, forms | - | handler lines 100% (6,777 of 6,777); form lines in phase 2's answers 34; `form` rows 99.92% | handler lines unchanged; form lines in phase 2's answers 5,066 (the lines that set a property, sub-properties and item properties included); `form` rows 20,687 of 20,688 - the one after a root's `end`, which dcc drops |
 | C3 precision | >= 98% | 99.9% counting a link of the property's redeclaration chain (86.9% strict), the chain unsaid; `form`: 65 false "fails to load", 13 false "names no component" | 100% by the chain, the chain said; "fails to load" 0; "names no component" 3 - the product's own |
 | C4 robustness | 0 | no crash, no hang in more than 20,000 calls over the phases | the same on the reruns |
-| C5 latency p95 | < 1 s | every tool (worst `callers` 553 ms); 0.9% of calls over 1 s, up to 10.6 s | the tail 8-10 s -> 1-2 s; p95 not yet re-measured on an idle machine |
+| C5 latency p95 | < 1 s | every tool (worst `callers` 553 ms); 0.9% of calls over 1 s, up to 10.6 s | p95 < 1 s every tool (worst `callers` 511 ms); 0.3% over 1 s; the chain tail 8-10 s -> 1-2 s, but `related assignments` of a republished property still up to 8.1 s |
 | C6 size p95 | < 5k tokens | every tool but `outline` (up to 141k in one answer) | `outline` and `form` bounded, 300 rows |
 | C7 notes | every gap said | every cut said; not said: uses in branches not compiled, implementation headers left out, whose property a redeclaration answers for, what a cut left out | said |
 | C8 freshness | identical | 266 of 290 pairs | 290 of 290 |
-| C9 sufficiency | >= 80% of tasks, fewer tokens | not measured (10.4) | |
+| C9 sufficiency | >= 80% of tasks, fewer tokens | - | pilot on 0.16.8 (10.4): 4 of 4 correct with the tools and 4 of 4 without; tokens with/without 1.04, time 0.71 - the tasks do not discriminate |
 
 The tools also found four latent defects of the product itself: three form
 files naming components their forms do not have, and one with text after
@@ -761,7 +767,9 @@ its root's `end` - seven property lines dcc drops from the exe.
 5. **The slow tail is the library's.** Every call over 1 s was about a
    widely used VCL property or an own one redeclaring it - a scan per link of
    the redeclaration chain; own symbols stayed under 0.5 s at p95. One pass
-   over the closure for the whole chain made it 1-2 s with the same rows.
+   over the closure for the whole chain made it 1-2 s with the same rows -
+   for `references`, `callers` and `impact`; `related assignments` still
+   scans per link (up to 8.1 s).
 6. **What the index takes in later is watched like what it loaded.** Both
    freshness defects (17 and 7 of the 24 unequal pairs) were files that came
    in after the first build: a unit a new `uses` pulled in, a form file
@@ -770,14 +778,47 @@ its root's `end` - seven property lines dcc drops from the exe.
    Integer argument for a parameter of a distinct `type Integer` and a
    one-character literal for a `Char` parameter sent 23 calls to a sibling
    overload - the only rows of any phase that were not uses of their symbol.
+   The task pilot on the fixed server found a third (F6.2): an open-array
+   constructor `['x']` bound to the overload whose parameter there is a
+   string, and the overload it calls answered "none found".
 
 ### 10.4 Not measured, and the blind spots left
 
-- **Sufficiency (C9).** Whether an agent solves real tasks with the tools in
-  fewer tokens than with grep and reads - the same tasks run by fresh agents
-  with the server and without - has not been run. The answers are known to
-  be right and to say where they are not complete; whether they are enough
-  is still section 8, question 2. The latency p95 is re-measured with it.
+- **Sufficiency (C9) - a pilot only.** Four tasks, each with a trap for
+  grep: the call sites of a routine and the projects to rebuild (two server
+  members compile the unit too, one with no call in it); whether two
+  handlers are dead (one
+  whose name is on 76 lines of 48 files, one no code calls and only the
+  ancestor's form file binds); a component rename next to a sibling form
+  with the same name and the same code; who writes a value whose name
+  belongs to 11 properties. Every run of both arms was right: the agent
+  with grep read the declarations around each hit, knew the VCL's rule for
+  an inherited form, and scripted the uses closure of nine `.dproj`. The
+  tools saved where the grep route is long - the projects to rebuild, one
+  `impact` call against a closure scan: 0.31x the tokens, a quarter of the
+  time; elsewhere the agent with them spent the saving on checks it was not
+  asked for (1.2-1.9x). Of its 11 fallbacks to grep or a read, 5 were
+  cross-checks of a right answer, 2 a call by name through RTTI (no tool
+  sees one), 2 the tools' gaps (F6.2, F6.3), 2 a tool it did not know
+  answers. Every task named the declaring file or class, which shortens the
+  grep route. The next tasks are ones where that route is long or misleads -
+  overloads, virtual and interface dispatch, `with`, forms inherited several
+  levels deep, project membership - asked also by a bare name; one run per
+  task and arm says what discriminates, not a rate.
+- **Open after the pilot** (found on 0.16.8, not fixed yet):
+  - F6.1: `related assignments` of a property an own class republishes
+    scans the redeclaration chain per link - up to 8.1 s, where
+    `references` of the same property takes 1 s.
+  - F6.2: an open-array constructor argument is taken by an overload whose
+    parameter is a string (10.3, 7): the call is listed under the wrong
+    overload and the one it calls is "none found" - a constructor that
+    runs, read as unused.
+  - F6.3: a `callers` row is the first line of a call written over
+    several; the argument asked about - where a value comes from - is on
+    the next, and the agent read the file for it.
+  - F6.4: `form` of a class without a form file of its own, which streams
+    its ancestor's, refuses; the ancestor's form with each event resolved
+    on the class is what runs (`callers` already finds that binding).
 - **Said, not resolved**: late-bound OLE calls and `asm` (7 and 1 lines of
   phase 2's hits), `X[I]` over a default array property, calls through a
   method pointer, a form file with no unit beside it or one no project
