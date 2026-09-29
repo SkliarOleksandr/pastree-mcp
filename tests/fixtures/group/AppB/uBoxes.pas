@@ -7,7 +7,7 @@ unit uBoxes;
 interface
 
 uses
-  System.Classes;
+  System.Classes, uColors;
 
 type
   TShapeBox = class(TPersistent)

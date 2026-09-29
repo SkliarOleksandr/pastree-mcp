@@ -125,7 +125,8 @@ type
   end;
 
 const
-  DECL_KINDS = [skType, skVar, skConst, skField, skRoutine, skProperty];
+  DECL_KINDS = [skType, skVar, skConst, skField, skRoutine, skProperty,
+    skEnumValue];
   ROUTINE_HEADS: array[TPasRoutineHead] of string = ('routine', 'procedure',
     'function', 'constructor', 'destructor', 'operator');
 
@@ -398,8 +399,65 @@ begin
   end;
 end;
 
+// The owner chain a symbol is named under. An enum value sits in its enum's
+// own scope, which OwnerOf does not climb: a named enum's value is named under
+// its type ('TOuter.TTint' for TOuter.TTint.tnRed), an anonymous enum's under
+// what holds the enum.
+function SymOwner(LM: TPasSemaModel; ASym: Integer): string;
+var
+  LType, LScope: Integer;
+begin
+  if LM.Symbols[ASym].Kind <> skEnumValue then
+    Exit(OwnerOf(LM, LM.Symbols[ASym].Scope));
+  LType := LM.Symbols[ASym].TypeSym;
+  if (LType <> NIL_SYM) and (LType < LM.SymCount) then
+  begin
+    Result := OwnerOf(LM, LM.Symbols[LType].Scope);
+    if Result <> '' then
+      Result := Result + '.' + LM.Symbols[LType].Name
+    else
+      Result := LM.Symbols[LType].Name;
+    Exit;
+  end;
+  LScope := LM.Symbols[ASym].Scope;
+  if (LScope <> NIL_SCOPE) and (LScope < LM.Scopes.Count) then
+    LScope := LM.Scopes[LScope].Parent;
+  Result := OwnerOf(LM, LScope);
+end;
+
+// A value of a {$SCOPEDENUMS ON} enum: CollectEnum joins an unscoped enum's
+// scope into the scope around it (past enclosing types), a scoped one's not -
+// code reaches that value only as TEnum.Value.
+function IsScopedEnumValue(LM: TPasSemaModel; ASym: Integer): Boolean;
+var
+  LEnum, LOuter, LJoined: Integer;
+begin
+  Result := False;
+  if LM.Symbols[ASym].Kind <> skEnumValue then
+    Exit;
+  LEnum := LM.Symbols[ASym].Scope;
+  if (LEnum = NIL_SCOPE) or (LEnum >= LM.Scopes.Count) or
+     (LM.Scopes[LEnum].Kind <> sckEnum) then
+    Exit;
+  LOuter := LM.Scopes[LEnum].Parent;
+  while (LOuter <> NIL_SCOPE) and (LOuter < LM.Scopes.Count) and
+        (LM.Scopes[LOuter].Kind = sckStruct) do
+    LOuter := LM.Scopes[LOuter].Parent;
+  if (LOuter = NIL_SCOPE) or (LOuter >= LM.Scopes.Count) then
+    Exit;
+  for LJoined in LM.Scopes[LOuter].Additional do
+    if LJoined = LEnum then
+      Exit;
+  Result := True;
+end;
+
 // A declaration a reader would look up by name - ProjectOutline's filter:
-// module-level or a struct member, with a source declaration.
+// module-level or a struct member, with a source declaration - and an enum
+// value: ProjectOutline leaves those out, and `find` answered "no declaration
+// matches" and "no Pascal file outside them writes it either" for a value
+// written on 29 lines of the client group (a colleague's session renaming
+// two went to grep). The audit's samples came from `outline`, the same
+// filter, so they never drew one.
 function IsDeclSymbol(LM: TPasSemaModel; ASym: Integer): Boolean;
 var
   LScope: Integer;
@@ -411,7 +469,7 @@ begin
     Exit;
   LScope := LM.Symbols[ASym].Scope;
   while (LScope <> NIL_SCOPE) and (LScope < LM.Scopes.Count) and
-        (LM.Scopes[LScope].Kind in [sckStruct, sckGenericParams]) do
+        (LM.Scopes[LScope].Kind in [sckStruct, sckGenericParams, sckEnum]) do
     LScope := LM.Scopes[LScope].Parent;
   Result := (LScope <> NIL_SCOPE) and (LScope < LM.Scopes.Count) and
     (LM.Scopes[LScope].Kind in [sckUnit, sckImplementation]);
@@ -460,6 +518,8 @@ begin
     skConst: Result := SameText(AKind, 'const') or SameText(AKind, 'constant');
     skField: Result := SameText(AKind, 'field');
     skProperty: Result := SameText(AKind, 'property');
+    skEnumValue: Result := SameText(AKind, 'enum') or
+      SameText(AKind, 'enum value');
   else
     Result := False;
   end;
@@ -474,7 +534,7 @@ function QualifiedName(LM: TPasSemaModel; ASym: Integer): string;
 var
   LOwner: string;
 begin
-  LOwner := OwnerOf(LM, LM.Symbols[ASym].Scope);
+  LOwner := SymOwner(LM, ASym);
   if LOwner <> '' then
     Result := LOwner + '.' + LM.Symbols[ASym].Name
   else
@@ -880,7 +940,7 @@ var
   LParts, LQuals, LChain: TArray<string>;
   LName: string;
   LWild: Boolean;
-  LRaw: TList<TRawMatch>;
+  LRaw, LBareScoped: TList<TRawMatch>;
   LMatch: TRawMatch;
   LM: TPasSemaModel;
   LA: TMcpAnalysis;
@@ -904,6 +964,7 @@ begin
     LQuals[LIdx] := LowerCase(StripGenerics(LQuals[LIdx]));
 
   LRaw := TList<TRawMatch>.Create;
+  LBareScoped := TList<TRawMatch>.Create;
   LSeen := TDictionary<string, Integer>.Create;
   LMoreKeys := TDictionary<string, Boolean>.Create;
   LList := TList<TTarget>.Create;
@@ -936,7 +997,7 @@ begin
             begin
               // The qualifiers must be the END of unit-name + owner chain.
               LChain := UnitNameOfFile(LFile).Split(['.']);
-              for var LSeg in OwnerOf(LM, LM.Symbols[LSym].Scope).Split(['.']) do
+              for var LSeg in SymOwner(LM, LSym).Split(['.']) do
                 if LSeg <> '' then
                   LChain := LChain + [StripGenerics(LSeg)];
               LOk := Length(LQuals) <= Length(LChain);
@@ -965,10 +1026,21 @@ begin
             LMatch.Sym := LSym;
             LMatch.ModelFile := LFile;
             LMatch.Own := AWs.IsOwnFile(LFile);
-            LRaw.Add(LMatch);
+            // A scoped enum's value not written as TEnum.Value is taken only
+            // when nothing else has the name, as the compiler never reads it
+            // so: the RTL's scoped `Exception` value would make the class
+            // ambiguous.
+            if IsScopedEnumValue(LM, LSym) and ((Length(LQuals) = 0) or
+               not SameText(LQuals[High(LQuals)],
+                 LM.Symbols[LM.Symbols[LSym].TypeSym].Name)) then
+              LBareScoped.Add(LMatch)
+            else
+              LRaw.Add(LMatch);
           end;
         end;
     end;
+    if LRaw.Count = 0 then
+      LRaw.AddRange(LBareScoped);
 
     LRaw.Sort(TComparer<TRawMatch>.Construct(
       function(const L, R: TRawMatch): Integer
@@ -1044,6 +1116,7 @@ begin
     LList.Free;
     LSeen.Free;
     LMoreKeys.Free;
+    LBareScoped.Free;
     LRaw.Free;
   end;
 end;
@@ -10152,7 +10225,7 @@ const
     + 'when name occurs twice on the line"},'
     + '"kind":{"type":"string","description":"Narrow a name: type, class, '
     + 'record, interface, routine, procedure, function, constructor, var, '
-    + 'const, field, property"}';
+    + 'const, field, property, enum (a value)"}';
 
   TOOLS_JSON = '[' +
     '{"name":"status","description":"What is loaded: project group members, '
@@ -10173,7 +10246,7 @@ const
     + 'wildcard pattern"},'
     + '"kind":{"type":"string","description":"type, class, record, '
     + 'interface, routine, procedure, function, constructor, var, const, '
-    + 'field, property"},'
+    + 'field, property, enum (a value)"},'
     + '"scope":{"type":"string","enum":["all","project"],"description":'
     + '"project = only the group''s own units (default all)"},'
     + '"limit":{"type":"integer","description":"Max rows (default 30)"}},'

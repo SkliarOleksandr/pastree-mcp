@@ -74,6 +74,13 @@ Check 'find wildcard' (Block $b 'find {"query":"*Circ*"') @('AppB\uAppB.pas:11  
 Check 'find joined' (Block $b 'find {"query":"TWideBox.Configure"}') @("AppB\uBoxes.pas:71  TWideBox.Configure (function)  function Configure(const AFirstName: string; ASecondValue: Integer; const AThirdName: string = 'third'; AFourthFlag: Boolean = False): Boolean;")
 # The outer type with the nested one left out: its member still found.
 Check 'find nested' (Block $b 'find {"query":"TOuterBox.Depth"}') @('AppB\uBoxes.pas:103  TOuterBox.TInnerBox.Depth (field)') @('no declaration matches')
+# FR.1: enum values by name - bare, as TEnum.Value, a scoped one's bare name
+# only when nothing else has it (TSquare stays the class: `source TSquare`).
+Check 'find enum value' (Block $b 'find {"query":"tnGreen"}') @('AppB\uColors.pas:11  TTint.tnGreen (enum value)  TTint = (tnRed, tnGreen, tnBlue);') @('no declaration matches')
+Check 'find scoped enum value' (Block $b 'find {"query":"TShade.TSquare"}') @('AppB\uColors.pas:14  TShade.TSquare (enum value)') @('uShapes.pas')
+Check 'references enum value' (Block $b 'references {"symbol":"TTint.tnRed"}') @('TTint.tnRed (enum value) declared at AppB\uColors.pas:11 - 1 references in 1 files', "  TintName`n    25  tnRed: Result := 'red';")
+Check 'references enum value unused' (Block $b 'references {"symbol":"tnBlue"}') @('TTint.tnBlue (enum value) declared at AppB\uColors.pas:11 - 0 references in 0 files')
+Check 'references scoped value bare' (Block $b 'references {"symbol":"Dark"}') @('TShade.Dark (enum value) declared at AppB\uColors.pas:14 - 1 references', '    34  Result := AShade = TShade.Dark;')
 # By name: the identifier, not the same word in a string before it; and the
 # interface side of a method resolution clause.
 Check 'definition past a string' (Block $b 'definition {"file":"AppB/uBoxes.pas","line":118') @('TCountBox.BoxCount (function) declared at AppB\uBoxes.pas:112')
@@ -86,7 +93,7 @@ Check 'definition inactive' (Block $b 'definition {"file":"AppB/uBoxes.pas","lin
 Check 'find joined cut' (Block $b 'find {"query":"TWideBox.Many"}') @('AppB\uBoxes.pas:74  TWideBox.Many (procedure)  procedure Many(const AAlphaName, ABetaName, AGammaName: string; ADeltaCount, AEpsilonCount, AZetaCount: Integer; const AEtaText, AThetaText, ...); virtual;')
 # A name no declaration matches: what the index is, and where the name is
 # written outside it - in a unit no project uses - or that it is nowhere.
-Check 'find outside the index' (Block $b 'find {"query":"OrphanRoutine"}') @('no declaration matches `OrphanRoutine` among the ', ' units indexed - what the 3 projects of Fixture.groupproj compile: 13 of their own, ', "``OrphanRoutine`` is written in 1 file(s) that no indexed project uses - no tool here sees them:`n  AppB\uOrphan.pas:8  procedure OrphanRoutine;")
+Check 'find outside the index' (Block $b 'find {"query":"OrphanRoutine"}') @('no declaration matches `OrphanRoutine` among the ', ' units indexed - what the 3 projects of Fixture.groupproj compile: 14 of their own, ', "``OrphanRoutine`` is written in 1 file(s) that no indexed project uses - no tool here sees them:`n  AppB\uOrphan.pas:8  procedure OrphanRoutine;")
 Check 'find nowhere' (Block $b 'find {"query":"NothingAnywhere"}') @('no declaration matches `NothingAnywhere` among the ', 'no Pascal file outside them writes `NothingAnywhere` either (1 searched, under the group directory')
 Check 'definition' (Block $b 'definition {"symbol":"TCircle.Area"') @('declared at Shared\uShapes.pas:26', 'implemented at Shared\uShapes.pas:53', 'Result := Pi * FRadius * FRadius;')
 Check 'source' (Block $b 'source {"symbol":"TCircle.Area"}') @('TCircle.Area (function) implemented at Shared\uShapes.pas:53-56', "53  function TCircle.Area: Double;`n54  begin", "56  end;`n") @('declared at')

@@ -8,6 +8,11 @@ find {"query":"TWideBox.Many"}
 find {"query":"OrphanRoutine"}
 find {"query":"NothingAnywhere"}
 find {"query":"TOuterBox.Depth"}
+find {"query":"tnGreen"}
+find {"query":"TShade.TSquare"}
+references {"symbol":"TTint.tnRed"}
+references {"symbol":"tnBlue"}
+references {"symbol":"Dark"}
 definition {"symbol":"TCircle.Area", "context":3}
 source {"symbol":"TCircle.Area"}
 source {"symbol":"TCircle.Area", "part":"both"}
