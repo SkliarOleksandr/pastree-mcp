@@ -93,7 +93,7 @@ Check 'definition inactive' (Block $b 'definition {"file":"AppB/uBoxes.pas","lin
 Check 'find joined cut' (Block $b 'find {"query":"TWideBox.Many"}') @('AppB\uBoxes.pas:74  TWideBox.Many (procedure)  procedure Many(const AAlphaName, ABetaName, AGammaName: string; ADeltaCount, AEpsilonCount, AZetaCount: Integer; const AEtaText, AThetaText, ...); virtual;')
 # A name no declaration matches: what the index is, and where the name is
 # written outside it - in a unit no project uses - or that it is nowhere.
-Check 'find outside the index' (Block $b 'find {"query":"OrphanRoutine"}') @('no declaration matches `OrphanRoutine` among the ', ' units indexed - what the 3 projects of Fixture.groupproj compile: 14 of their own, ', "``OrphanRoutine`` is written in 1 file(s) that no indexed project uses - no tool here sees them:`n  AppB\uOrphan.pas:8  procedure OrphanRoutine;")
+Check 'find outside the index' (Block $b 'find {"query":"OrphanRoutine"}') @('no declaration matches `OrphanRoutine` among the ', ' units indexed - what the 3 projects of Fixture.groupproj compile: 15 of their own, ', "``OrphanRoutine`` is written in 1 file(s) that no indexed project uses - no tool here sees them:`n  AppB\uOrphan.pas:8  procedure OrphanRoutine;")
 Check 'find nowhere' (Block $b 'find {"query":"NothingAnywhere"}') @('no declaration matches `NothingAnywhere` among the ', 'no Pascal file outside them writes `NothingAnywhere` either (1 searched, under the group directory')
 Check 'definition' (Block $b 'definition {"symbol":"TCircle.Area"') @('declared at Shared\uShapes.pas:26', 'implemented at Shared\uShapes.pas:53', 'Result := Pi * FRadius * FRadius;')
 Check 'source' (Block $b 'source {"symbol":"TCircle.Area"}') @('TCircle.Area (function) implemented at Shared\uShapes.pas:53-56', "53  function TCircle.Area: Double;`n54  begin", "56  end;`n") @('declared at')
@@ -294,6 +294,28 @@ Check 'form module' (Block $b 'form {"file":"AppF/uData.dfm"}') @("4    pmAction
 Check 'form binary' (Block $b 'form {"file":"AppF/uBinaryForm.pas"}') @('AppF\uBinaryForm.dfm (binary - lines of its text conversion)', '21      OnClick -> TfrmBinary.btnBinaryClick')
 Check 'form none' (Block $b 'form {"file":"AppA/uAppA.pas"}') @('AppA\uAppA.pas has no form file - no .dfm or .fmx beside it')
 Check 'form not a form class' (Block $b 'form {"symbol":"TCircle"}') @('TCircle has no form file of its own')
+# A form class with no form file of its own loads its ancestor's: that file,
+# each event bound on the class asked about - by symbol and by its unit.
+Check 'form streamed' (Block $b 'form {"symbol":"TfrmPlain"}') @('form of TfrmPlain - no form file of its own, it loads its ancestor''s (an event runs TfrmPlain''s method of the name): form frmMain: TfrmMain - AppF\uMainForm.dfm', "1  frmMain: TfrmMain`n13    OnCreate -> TfrmPlain.FormCreate", '39      OnClick -> TfrmMain.btnSaveClick') @('TfrmMain.FormCreate')
+Check 'form streamed by unit' (Block $b 'form {"file":"AppF/uPlainForm.pas"}') @('form of TfrmPlain - no form file of its own', '13    OnCreate -> TfrmPlain.FormCreate')
+Check 'callers streamed form' (Block $b 'callers {"symbol":"TfrmPlain.FormCreate"}') @('- no calls, 1 form binding', "AppF\uMainForm.dfm`n  frmMain (root)`n    13  [ancestor's form]  OnCreate = FormCreate")
+# A call written over two lines is one row, joined up to its closing
+# parenthesis, the comment between dropped; a call on one line stays as is.
+Check 'callers multi-line call' (Block $b 'callers {"symbol":"TfrmPlain.Greet"}') @('- 2 calls in 1 routine', "  TfrmPlain.FormCreate`n    26  Greet(Caption, Length(Caption));`n    28  Greet('x', 1);") @('// who', '27  ')
+# `limit: 0` - whether and how many: the header's counts and the notes, no
+# rows; the empty case says nothing was found, not "nothing matched".
+Check 'find count only' (Block $b 'find {"query":"T*","limit":0}') @(' declarations match (limit 0: none listed)') @('no declaration matches', 'Shared\uShapes.pas:')
+Check 'find count only none' (Block $b 'find {"query":"NoSuchThing","limit":0}') @('no declaration matches `NoSuchThing`')
+Check 'references count only' (Block $b 'references {"symbol":"TCircle","limit":0}') @('3 references in 2 files', '... 3 more (raise `limit`)', '(+2 implementation headers of its own methods name it') @('LShape')
+Check 'references count only none' (Block $b 'references {"symbol":"TfrmMain.NeverBound","limit":0}') @('0 references in 0 files; no form file names it', 'names it only after the root''s `end`') @('more (raise')
+Check 'callers count only' (Block $b 'callers {"symbol":"TCircle.Area","depth":3,"limit":0}') @('- 3 calls in 3 routines', '... 3 more (raise `limit`)', '(limit 0: depth 1 counted, depth 2 and below not searched') @('  RunA', 'the rows reached `limit`')
+Check 'callers count only none' (Block $b 'callers {"symbol":"NeverCalled","limit":0}') @('callers of NeverCalled (AppB\uBoxes.pas:31) - none found') @('more (raise')
+Check 'callees count only' (Block $b 'callees {"symbol":"RunA","limit":0}') @('- 4 calls reaching 7 routines', '... 7 more (raise `limit`)', '(built-ins called: Writeln)')
+Check 'members count only' (Block $b 'members {"symbol":"TCircle","limit":0}') @(': 5 members', '... 5 more (raise `limit`') @('Radius')
+Check 'related count only' (Block $b 'related {"relation":"descendants","symbol":"uShapes.TShape","limit":0}') @('more (raise `limit`)') @('TCircle = class')
+Check 'form count only' (Block $b 'form {"symbol":"TfrmChild","limit":0}') @('8 components, 6 events bound, 3 references to components, 1 cleared', '... 19 more rows (raise `limit`)') @('lblHint')
+Check 'outline count only' (Block $b 'outline {"file":"Shared/uShapes.pas","limit":0}') @('... 24 more rows (raise `limit`') @('member declarations of its types are left out', 'TCircle')
+Check 'impact count only' (Block $b 'impact {"symbol":"TCircle.Area","limit":0}') @('members to build and test: AppA, AppB', 'callers - 3 calls in 3 routines', '... 3 more (raise `limit`)') @('  RunA')
 # A form file with no unit beside it: said so, not "not part of any project".
 Check 'form orphan' (Block $b 'form {"file":"AppF/uOrphanForm.dfm"}') @('no unit beside AppF\uOrphanForm.dfm - an orphan form file, which no project compiles')
 Check 'outline' (Block $b 'outline {"file":"Shared') @('21  type TCircle = class', '27    property Radius: Double', '53  function TCircle.Area: Double', '40 implementation')

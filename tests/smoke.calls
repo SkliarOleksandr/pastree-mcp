@@ -119,6 +119,10 @@ form {"file":"AppF/uData.dfm"}
 form {"file":"AppF/uBinaryForm.pas"}
 form {"file":"AppA/uAppA.pas"}
 form {"symbol":"TCircle"}
+form {"symbol":"TfrmPlain"}
+form {"file":"AppF/uPlainForm.pas"}
+callers {"symbol":"TfrmPlain.FormCreate"}
+callers {"symbol":"TfrmPlain.Greet"}
 form {"file":"AppF/uOrphanForm.dfm"}
 outline {"file":"Shared\\uShapes.pas"}
 outline {"file":"AppB\\uBoxes.pas", "section":"implementation"}
@@ -133,3 +137,15 @@ definition {"file":"AppB/uBoxes.pas","line":118,"name":"BoxCount"}
 definition {"file":"AppB/uBoxes.pas","line":111,"name":"Count"}
 references {"symbol":"TCountBox.BoxCount"}
 definition {"file":"AppB/uBoxes.pas","line":122,"name":"BoxCount"}
+find {"query":"T*","limit":0}
+find {"query":"NoSuchThing","limit":0}
+references {"symbol":"TCircle","limit":0}
+references {"symbol":"TfrmMain.NeverBound","limit":0}
+callers {"symbol":"TCircle.Area","depth":3,"limit":0}
+callers {"symbol":"NeverCalled","limit":0}
+callees {"symbol":"RunA","limit":0}
+members {"symbol":"TCircle","limit":0}
+related {"relation":"descendants","symbol":"uShapes.TShape","limit":0}
+form {"symbol":"TfrmChild","limit":0}
+outline {"file":"Shared/uShapes.pas","limit":0}
+impact {"symbol":"TCircle.Area","limit":0}

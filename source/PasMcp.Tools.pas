@@ -122,6 +122,9 @@ type
     Where: string;
     FileNote: string;
     Form: Boolean;         // a form file's site (THitSet.AddForm)
+    // A call's lines joined and cut (JoinedCallRow), shown instead of the
+    // line; a string, as a THit is often filled without Default().
+    Joined: string;
   end;
 
 const
@@ -231,7 +234,8 @@ const
   MAX_TAIL = 40;
 var
   LTail: string;
-  LClose, LCut: Integer;
+  LClose, LCut, LLimit: Integer;
+  LQuoted: Boolean;
 begin
   if Length(AText) <= AMax then
     Exit(AText);
@@ -239,9 +243,16 @@ begin
   LClose := LastDelimiter(')', AText);
   if (LClose > 0) and (Length(AText) - LClose < MAX_TAIL) then
     LTail := Copy(AText, LClose, MaxInt);
-  LCut := AMax - Length(LTail) - Length(' ...');
-  while (LCut > 0) and not CharInSet(AText[LCut], [';', ',']) do
-    Dec(LCut);
+  // The last boundary before the limit outside a string: a comma in a
+  // message text is none.
+  LLimit := AMax - Length(LTail) - Length(' ...');
+  LCut := 0;
+  LQuoted := False;
+  for var LI := 1 to Min(LLimit, Length(AText)) do
+    if AText[LI] = '''' then
+      LQuoted := not LQuoted
+    else if not LQuoted and CharInSet(AText[LI], [';', ',']) then
+      LCut := LI;
   if LCut <= 0 then
     Exit(Copy(AText, 1, AMax - 3) + '...');
   Result := Copy(AText, 1, LCut) + ' ...' + LTail;
@@ -1979,7 +1990,7 @@ begin
       ASb.AppendLine(Format('%s%d  %s', [LIndent, LH.Line, LH.Tag]))
     else if LH.Tag <> '' then
     begin
-      LLine := CleanLine(LH.Snippet);
+      LLine := IfThen(LH.Joined <> '', LH.Joined, CleanLine(LH.Snippet));
       if LLine = LPrev then
         ASb.AppendLine(Format('%s%d  [%s]', [LIndent, LH.Line, LH.Tag]))
       else
@@ -1989,7 +2000,7 @@ begin
     end
     else
       ASb.AppendLine(Format('%s%d  %s', [LIndent, LH.Line,
-        CleanLine(LH.Snippet)]));
+        IfThen(LH.Joined <> '', LH.Joined, CleanLine(LH.Snippet))]));
     Inc(LShown);
   end;
   if Length(AHits) - LSame > LShown then
@@ -2031,12 +2042,12 @@ begin
   if LQuery = '' then
     raise EToolError.Create('`query` is required');
   LKind := ArgStr(AArgs, 'kind');
-  LLimit := EnsureRange(ArgInt(AArgs, 'limit', 30), 1, 500);
+  LLimit := EnsureRange(ArgInt(AArgs, 'limit', 30), 0, 500);
   LOwnOnly := SameText(ArgStr(AArgs, 'scope'), 'project');
   LCands := ResolveName(AWs, LQuery, LKind, LOwnOnly, LLimit, LMore);
   LFallback := False;
-  if (Length(LCands) = 0) and (Pos('*', LQuery) = 0) and (Pos('?', LQuery) = 0)
-  then
+  if (Length(LCands) = 0) and (LMore = 0) and (Pos('*', LQuery) = 0) and
+     (Pos('?', LQuery) = 0) then
   begin
     // Nothing by that exact name: the agent often half-remembers one.
     LCands := ResolveName(AWs, '*' + LQuery + '*', LKind, LOwnOnly, LLimit,
@@ -2048,7 +2059,7 @@ begin
     // Nothing of that name in the index: say what the index is, and where
     // the name is written outside it - a unit no project uses is invisible
     // to every tool, and nothing else would say so.
-    if Length(LCands) = 0 then
+    if (Length(LCands) = 0) and (LMore = 0) then
     begin
       if LOwnOnly then
       begin
@@ -2069,7 +2080,11 @@ begin
         + 'containing it:', [LQuery]));
     for var LC in LCands do
       LSb.AppendLine(DescribeTarget(AWs, LC));
-    if LMore > 0 then
+    // `limit: 0` asks whether anything matches: the count, no rows.
+    if LLimit = 0 then
+      LSb.AppendLine(Format('%s match (limit 0: none listed)', [Plural(LMore,
+        'declaration')]))
+    else if LMore > 0 then
       LSb.AppendLine(Format('... %d more (narrow the query, add `kind`, or '
         + 'raise `limit`)', [LMore]));
     // The names containing it may be the wrong ones when the name itself is
@@ -2788,7 +2803,7 @@ var
   LVarX: TSemaXType;
 begin
   LT := ResolveOne(AWs, AArgs);
-  LLimit := EnsureRange(ArgInt(AArgs, 'limit', 150), 1, 5000);
+  LLimit := EnsureRange(ArgInt(AArgs, 'limit', 150), 0, 5000);
   LBindable := False;
   LSetsProp := False;
   LHeaders := nil;
@@ -3056,7 +3071,7 @@ begin
       end;
       Break;
     end;
-  LLimit := EnsureRange(ArgInt(AArgs, 'limit', 150), 1, 5000);
+  LLimit := EnsureRange(ArgInt(AArgs, 'limit', 150), 0, 5000);
   LAccepted := False;
   LEnclosing := nil;
   LSet := THitSet.Create(AWs);
@@ -3224,6 +3239,7 @@ type
     AllVia: string;        // the one symbol every first-level row is bound to
     Libraries: Integer;    // library routines met, shown and not followed
     CutAt: Integer;        // the depth `limit` kept from being searched; 0
+    CountOnly: Boolean;    // `limit: 0` - the first level counted, no rows
     Pending: Integer;      // routines of the last depth, not searched
   end;
 
@@ -3644,7 +3660,8 @@ type
       ANode: Integer): string;
     function CallerOfSym(AA: TMcpAnalysis; AMid, ASym: Integer): string;
     procedure AddRow(const AHit: TPasRefHit; const ANode: TCallNode;
-      const AVia, ANote, ACaller: string; ACall: Boolean);
+      const AVia, ANote, ACaller: string; ACall: Boolean;
+      const AJoined: string = '');
     procedure SearchRefs(AA: TMcpAnalysis; const ANode: TCallNode;
       ASources: TList<TCallSource>; const AClass: TSemaXType;
       AReturns, AVirtual: Boolean);
@@ -3950,8 +3967,84 @@ begin
   FCallerOf.Add(LKey, Result);
 end;
 
+{ The row of a use on a line that leaves a parenthesis or bracket open - a
+  call written over several lines: the line and the ones after it up to the
+  close, joined, comments dropped, at most MAX_LINES and MAX_CHARS (cut at
+  an argument boundary). Where a value comes from is in the arguments, and
+  the first line of `X := Foo(A,` holds one of them: the task pilot's agent
+  read the file for the rest; the client group's such calls run to 190
+  characters, past a line row's 160. '' when the line closes what it opens -
+  the row stays the line. }
+function JoinedCallRow(LM: TPasSemaModel; ANode: Integer): string;
+const
+  MAX_LINES = 6;
+  MAX_CHARS = 240;
+var
+  LTS: TPasTokenStream;
+  LFileId, LLine, LCol, LTok, LDepth, LLines, LLineEnd: Integer;
+  LSb: TStringBuilder;
+begin
+  Result := '';
+  LTok := LM.Tree.NodeLeftmostVis(ANode);
+  if not VisPos(LM, LTok, LFileId, LLine, LCol) or (LFileId <> 0) then
+    Exit;
+  LTS := LM.Tree.Source.Files[0];
+  LTok := LM.Tree.Source.Visible[LTok].TokenIndex;
+  while (LTok > 0) and (LTS.Tokens[LTok - 1].Start >= LTS.LineStarts[LLine -
+     1]) do
+    Dec(LTok);
+  LSb := TStringBuilder.Create;
+  try
+    LDepth := 0;
+    LLines := 1;
+    if LLine <= High(LTS.LineStarts) then
+      LLineEnd := LTS.LineStarts[LLine]
+    else
+      LLineEnd := MaxInt;
+    while LTok <= High(LTS.Tokens) do
+    begin
+      if LTS.Tokens[LTok].Start >= LLineEnd then
+      begin
+        // A new line: the row goes on only while the line left one open.
+        if LDepth <= 0 then
+          Break;
+        Inc(LLine);
+        Inc(LLines);
+        if LLines > MAX_LINES then
+        begin
+          LSb.Append(' ...');
+          Break;
+        end;
+        if LLine <= High(LTS.LineStarts) then
+          LLineEnd := LTS.LineStarts[LLine]
+        else
+          LLineEnd := MaxInt;
+        Continue;
+      end;
+      case LTS.Tokens[LTok].Kind of
+        tkLParen, tkLBracket:
+          Inc(LDepth);
+        tkRParen, tkRBracket:
+          Dec(LDepth);
+      end;
+      if LTS.Tokens[LTok].Kind in [tkCommentLine, tkCommentBrace,
+         tkCommentParen, tkDirective] then
+        LSb.Append(' ')
+      else
+        LSb.Append(LTS.TokenText(LTok));
+      Inc(LTok);
+    end;
+    if LLines > 1 then
+      Result := CutDecl(CleanLine(LSb.ToString, MaxInt).Replace('( ', '(').
+        Replace(' )', ')').Replace('[ ', '[').Replace(' ]', ']'), MAX_CHARS);
+  finally
+    LSb.Free;
+  end;
+end;
+
 procedure TCallerWalk.AddRow(const AHit: TPasRefHit; const ANode: TCallNode;
-  const AVia, ANote, ACaller: string; ACall: Boolean);
+  const AVia, ANote, ACaller: string; ACall: Boolean;
+  const AJoined: string);
 var
   LKey: string;
   LRow: TCallRow;
@@ -3976,6 +4069,7 @@ begin
   LRow.Hit.Line := AHit.Line;
   LRow.Hit.Col := AHit.Col;
   LRow.Hit.Snippet := AHit.Snippet;
+  LRow.Hit.Joined := AJoined;
   LRow.Hit.Tag := '';
   LRow.Hit.Own := FWs.IsOwnFile(AHit.FilePath);
   LRow.Caller := ACaller;
@@ -4110,8 +4204,11 @@ begin
         if LCaller = '' then
           LNote := RootPlace(LM, LIdent.Node);
       end;
+      LName := '';
+      if LNodeOk then
+        LName := JoinedCallRow(LM, LIdent.Node);
       AddRow(LH, ANode, IfThen(LS.Kind <> csSelf, LS.Name, ''), LNote,
-        LCaller, LUse in [ruCall, ruExported]);
+        LCaller, LUse in [ruCall, ruExported], LName);
     end;
   end;
 end;
@@ -4505,6 +4602,7 @@ var
   LTag: string;
 begin
   AInfo := Default(TCallWalkInfo);
+  AInfo.CountOnly := ALimit = 0;
   FTagRoots := FNodes.Count > 1;
   LFrontier := TList<Integer>.Create;
   LNext := TList<Integer>.Create;
@@ -4728,7 +4826,11 @@ begin
       ASb.AppendLine(Format('(%s at depth %d not searched for callers%s)',
         [Plural(AInfo.Pending, 'routine'), ADepth, IfThen(ADepth < 4,
         ' - raise `depth`', '')]));
-    if AInfo.CutAt > 0 then
+    if AInfo.CountOnly and (AInfo.CutAt > 0) then
+      ASb.AppendLine(Format('(limit 0: depth 1 counted, depth %d and below '
+        + 'not searched - a deeper level is searched only for the rows '
+        + 'shown)', [AInfo.CutAt]))
+    else if AInfo.CutAt > 0 then
       ASb.AppendLine(Format('(depth %d not searched: the rows reached `limit` '
         + '- raise it, or ask for the callers of one routine above)',
         [AInfo.CutAt]));
@@ -4821,7 +4923,7 @@ begin
   LWalk := TCallerWalk.Create(AWs);
   try
     Result := LWalk.Answer(LT, EnsureRange(ArgInt(AArgs, 'depth', 1), 1, 4),
-      EnsureRange(ArgInt(AArgs, 'limit', 150), 1, 5000));
+      EnsureRange(ArgInt(AArgs, 'limit', 150), 0, 5000));
   finally
     LWalk.Free;
   end;
@@ -5162,7 +5264,7 @@ begin
   if (LMatch <> '') and (Pos('*', LMatch) = 0) and (Pos('?', LMatch) = 0) then
     LMatch := '*' + LMatch + '*';
   LMatchLower := LowerCase(LMatch);
-  LLimit := EnsureRange(ArgInt(AArgs, 'limit', 150), 1, 5000);
+  LLimit := EnsureRange(ArgInt(AArgs, 'limit', 150), 0, 5000);
   LT := ResolveOne(AWs, AArgs);
   case LT.Kind of
     tkUnit:
@@ -6533,7 +6635,11 @@ begin
       LSb.AppendLine(Format('(%s at depth %d not searched for callees%s)',
         [Plural(LFrontier.Count, 'routine'), ADepth, IfThen(ADepth < 4,
         ' - raise `depth`', '')]));
-    if LCutAt > 0 then
+    if (ALimit = 0) and (LCutAt > 0) then
+      LSb.AppendLine(Format('(limit 0: depth 1 counted, depth %d and below '
+        + 'not searched - a deeper level is searched only for the rows '
+        + 'shown)', [LCutAt]))
+    else if LCutAt > 0 then
       LSb.AppendLine(Format('(depth %d not searched: the rows reached `limit` '
         + '- raise it, or ask for the callees of one routine above)',
         [LCutAt]));
@@ -6586,7 +6692,7 @@ begin
   LWalk := TCalleeWalk.Create(AWs);
   try
     Result := LWalk.Answer(LT, EnsureRange(ArgInt(AArgs, 'depth', 1), 1, 4),
-      EnsureRange(ArgInt(AArgs, 'limit', 150), 1, 5000));
+      EnsureRange(ArgInt(AArgs, 'limit', 150), 0, 5000));
   finally
     LWalk.Free;
   end;
@@ -6708,17 +6814,21 @@ type
   replaces the ancestor's. The binding is PasTree's (DescribeForm) - TReader's
   rules: an inline frame's children are the frame's fields, a handler is the
   root's method. A value that should name something and does not is said:
-  an event whose method is gone fails the form when it loads. }
+  an event whose method is gone fails the form when it loads. A form class
+  with no form file of its own loads its nearest ancestor's (TCustomForm's
+  constructor reads the resource of every class up the chain), each event
+  bound to the method of its name on that class. }
 function ToolForm(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
 var
-  LFile, LForm, LUnit, LExt, LKey, LText, LLine: string;
+  LFile, LForm, LUnit, LExt, LKey, LText, LLine, LOthers: string;
   LA: TMcpAnalysis;
   LMid, LLimit, LShown, LTotal, LNode, LComponents, LEvents, LRefs,
     LUnbound, LCleared: Integer;
   LT: TTarget;
   LInfo: TPasFormInfo;
   LInfos: TList<TPasFormInfo>;
-  LK: TSemaXType;
+  LK, LAsked, LRoot: TSemaXType;
+  LM: TPasSemaModel;
   LRole: TPasFormRole;
   LNodes: TList<TFormNode>;
   LByKey: TDictionary<string, Integer>;
@@ -6768,6 +6878,25 @@ var
       Result := Format('%s -> %s (%s)', [AB.PropName, AB.Value, LQ]);
   end;
 
+  // The form file the nearest ancestor of AX is the root class of: what an
+  // instance of AX streams when it has none of its own; '' for none.
+  function AncestorForm(const AX: TSemaXType): string;
+  var
+    LX: TSemaXType;
+  begin
+    Result := '';
+    LX := LA.Proj.CanonTypeX(LA.Proj.AncestorOfX(AX));
+    for var LDepth := 1 to 32 do
+    begin
+      if not XValid(LX) or SameX(LX, AX) then
+        Exit;
+      Result := LA.Nav.FormRoleOf(LX.UnitId, LX.Sym).FormFile;
+      if Result <> '' then
+        Exit;
+      LX := LA.Proj.CanonTypeX(LA.Proj.AncestorOfX(LX));
+    end;
+  end;
+
   function FileNote(AIdx: Integer): string;
   begin
     if AIdx = LInfos.Count - 1 then
@@ -6810,8 +6939,9 @@ var
   end;
 
 begin
-  LLimit := EnsureRange(ArgInt(AArgs, 'limit', 300), 1, 20000);
+  LLimit := EnsureRange(ArgInt(AArgs, 'limit', 300), 0, 20000);
   LA := nil;
+  LAsked := XNil;
   if ArgStr(AArgs, 'file') <> '' then
   begin
     LFile := ArgFile(AWs, AArgs);
@@ -6825,6 +6955,37 @@ begin
     begin
       LUnit := LFile;
       LForm := PasDfmFileOfUnit(LFile);
+      // No form file beside it: a form class of the unit may stream an
+      // ancestor's - the one such class is shown, several are named.
+      LOthers := '';
+      if (LForm = '') and ModelOfFile(AWs, LUnit, LA, LMid) then
+      begin
+        LM := LA.Proj.Model(LMid);
+        for var LSym := 0 to LM.SymCount - 1 do
+        begin
+          if (LM.Symbols[LSym].Kind <> skType) or
+             (LM.Symbols[LSym].TypeCat <> tcClass) or
+             (sfForward in LM.Symbols[LSym].Flags) or
+             not IsKindX(LA, XPlain(LMid, LSym), nkClassType) or
+             (LA.Nav.FormRoleOf(LMid, LSym).FormFile <> '') then
+            Continue;
+          LText := AncestorForm(XPlain(LMid, LSym));
+          if LText = '' then
+            Continue;
+          if XValid(LAsked) then
+            LOthers := LOthers + ', ' + LM.Symbols[LSym].Name
+          else
+          begin
+            LAsked := XPlain(LMid, LSym);
+            LForm := LText;
+          end;
+        end;
+        if LOthers <> '' then
+          raise EToolError.CreateFmt('%s has no form file - no .dfm or .fmx '
+            + 'beside it; its classes %s%s load an ancestor''s form: give '
+            + '`symbol`', [AWs.RelPath(LFile), LM.Symbols[LAsked.Sym].Name,
+            LOthers]);
+      end;
       if LForm = '' then
         raise EToolError.CreateFmt('%s has no form file - no .dfm or .fmx '
           + 'beside it', [AWs.RelPath(LFile)]);
@@ -6850,10 +7011,16 @@ begin
     if LA = nil then
       raise EToolError.CreateFmt('%s is in no analysis', [LT.Name]);
     LRole := LA.Nav.FormRoleOf(LT.Ids[LA.Index].Mid, LT.Ids[LA.Index].Sym);
-    if LRole.FormFile = '' then
-      raise EToolError.CreateFmt('%s has no form file of its own - no form '
-        + 'file of the group has it as its root class', [LT.Name]);
     LForm := LRole.FormFile;
+    if LForm = '' then
+    begin
+      LAsked := XPlain(LT.Ids[LA.Index].Mid, LT.Ids[LA.Index].Sym);
+      LForm := AncestorForm(LAsked);
+      if LForm = '' then
+        raise EToolError.CreateFmt('%s has no form file of its own - no form '
+          + 'file of the group has it or one of its ancestors as its root '
+          + 'class', [LT.Name]);
+    end;
   end
   else
     raise EToolError.Create('give `file` (a unit or its .dfm/.fmx) or '
@@ -6882,6 +7049,11 @@ begin
         LInfos.Insert(0, LInfo);
       LK := LA.Proj.CanonTypeX(LA.Proj.AncestorOfX(LK));
     end;
+    // The class of the instance the files stream onto.
+    if XValid(LAsked) then
+      LRoot := LAsked
+    else
+      LRoot := LInfos[LInfos.Count - 1].RootClass;
 
     LComponents := 0;
     for var LFi := 0 to LInfos.Count - 1 do
@@ -6942,11 +7114,10 @@ begin
         // MethodAddress finds the most derived published method of the name
         // - a descendant's redeclaration, not the ancestor's.
         LBx := LBi;
-        if (LFi < LInfos.Count - 1) and LBx.IsMethod and
-           XValid(LInfos[LInfos.Count - 1].RootClass) and
-           LA.Proj.FindMemberX(LInfos[LInfos.Count - 1].RootClass.UnitId,
-           LInfos[LInfos.Count - 1].RootClass, LowerCase(LBx.Value), LFMid,
-           LFSym, LCtx) and (LFMid >= 0) and (LFSym <> NIL_SYM) and
+        if ((LFi < LInfos.Count - 1) or XValid(LAsked)) and LBx.IsMethod and
+           XValid(LRoot) and LA.Proj.FindMemberX(LRoot.UnitId, LRoot,
+           LowerCase(LBx.Value), LFMid, LFSym, LCtx) and (LFMid >= 0) and
+           (LFSym <> NIL_SYM) and
            (LA.Proj.Model(LFMid).Symbols[LFSym].Kind = skRoutine) and
            (LA.Proj.Model(LFMid).Symbols[LFSym].Visibility in [svDefault,
            svPublished]) then
@@ -7005,6 +7176,10 @@ begin
     LInfo := LInfos[LInfos.Count - 1];
     LLine := Format('form %s: %s - %s', [LNodes[0].Name, LNodes[0].ClassName,
       AWs.RelPath(LInfo.FilePath)]);
+    if XValid(LAsked) then
+      LLine := Format('form of %s - no form file of its own, it loads its '
+        + 'ancestor''s (an event runs %0:s''s method of the name): %s',
+        [QualifiedName(LA.Proj.Model(LAsked.UnitId), LAsked.Sym), LLine]);
     if LInfo.IsBinary then
       LLine := LLine + ' (binary - lines of its text conversion)';
     if LInfos.Count > 1 then
@@ -7134,7 +7309,7 @@ begin
   LOwner := ArgStr(AArgs, 'owner');
   LSection := LowerCase(ArgStr(AArgs, 'section'));
   LMembers := ArgBool(AArgs, 'members', True);
-  LLimit := EnsureRange(ArgInt(AArgs, 'limit', 300), 1, 100000);
+  LLimit := EnsureRange(ArgInt(AArgs, 'limit', 300), 0, 100000);
   LM := LA.Proj.Model(LMid);
   LEntries := PasModuleOutline(LM.Tree);
   LRows := TList<string>.Create;
@@ -7146,8 +7321,9 @@ begin
     // Too long whole: the types' members go first - the unit's types and
     // routines are what an outline is read for, and `owner` gives one
     // type's members back. Not when members were asked for by name.
-    if (LRows.Count > LLimit) and LMembers and (AArgs.GetValue('members') = nil)
-       and (LMemberRows > 0) then
+    // `limit: 0` counts the rows asked for.
+    if (LRows.Count > LLimit) and (LLimit > 0) and LMembers and
+       (AArgs.GetValue('members') = nil) and (LMemberRows > 0) then
     begin
       Collect(False);
       LSb.AppendLine(Format('(%d rows in all - the %d member declarations of '
@@ -9444,7 +9620,7 @@ begin
         + 'declarations you will change: `symbol`, `symbols`, or `file` + '
         + '`line` + `name`');
     Result := LImpact.Answer(EnsureRange(ArgInt(AArgs, 'depth', 1), 1, 4),
-      EnsureRange(ArgInt(AArgs, 'limit', 150), 1, 5000));
+      EnsureRange(ArgInt(AArgs, 'limit', 150), 0, 5000));
   finally
     LImpact.Free;
   end;
@@ -10249,7 +10425,8 @@ const
     + 'field, property, enum (a value)"},'
     + '"scope":{"type":"string","enum":["all","project"],"description":'
     + '"project = only the group''s own units (default all)"},'
-    + '"limit":{"type":"integer","description":"Max rows (default 30)"}},'
+    + '"limit":{"type":"integer","description":"Max rows (default 30; '
+    + '0: the counts and notes alone, no rows)"}},'
     + '"required":["query"]}},' +
 
     '{"name":"definition","description":"Where a symbol is declared and, for '
@@ -10296,7 +10473,8 @@ const
     + 'matches: wildcards (*Save*) or a part of the name"},'
     + '"library":{"type":"boolean","description":"List the members of '
     + 'ancestors outside the group too (default false: counted)"},'
-    + '"limit":{"type":"integer","description":"Max rows (default 150)"}}}},' +
+    + '"limit":{"type":"integer","description":"Max rows (default 150; '
+    + '0: the counts and notes alone, no rows)"}}}},' +
 
     '{"name":"references","description":"Every use of a symbol across all '
     + 'projects of the group, by resolved identity rather than text: '
@@ -10311,10 +10489,13 @@ const
     + 'clauses), and by position a compiler built-in or a conditional '
     + 'define.",'
     + '"inputSchema":{"type":"object","properties":{' + TARGET_PROPS + ','
-    + '"limit":{"type":"integer","description":"Max rows (default 150)"}}}},' +
+    + '"limit":{"type":"integer","description":"Max rows (default 150; '
+    + '0: the counts and notes alone, no rows)"}}}},' +
 
     '{"name":"callers","description":"Who calls a routine: each call grouped '
-    + 'by file under the routine it sits in, with the source line. Includes '
+    + 'by file under the routine it sits in, with the source line - a call '
+    + 'written over several lines joined up to its closing parenthesis, '
+    + 'arguments and all. Includes '
     + 'what a reference search misses: calls that may dispatch to it through '
     + 'the virtual method it overrides or an interface method it implements '
     + '([via X]), reads or writes of a property it is the accessor of, bare '
@@ -10329,7 +10510,7 @@ const
     + '"depth":{"type":"integer","description":"Levels of callers (default 1, '
     + 'max 4)"},'
     + '"limit":{"type":"integer","description":"Max rows over all levels '
-    + '(default 150)"}}}},' +
+    + '(default 150; 0: the counts and notes alone, no rows)"}}}},' +
 
     '{"name":"callees","description":"What a routine calls: each routine its '
     + 'body reaches, once, at its declaration line - grouped by file under '
@@ -10346,7 +10527,7 @@ const
     + '"depth":{"type":"integer","description":"Levels of callees (default 1, '
     + 'max 4)"},'
     + '"limit":{"type":"integer","description":"Max rows over all levels '
-    + '(default 150)"}}}},' +
+    + '(default 150; 0: the counts and notes alone, no rows)"}}}},' +
 
     '{"name":"impact","description":"What a change reaches - after editing, '
     + 'pass the output of `git diff` as `diff`; before, the declarations you '
@@ -10371,7 +10552,7 @@ const
     + '"depth":{"type":"integer","description":"Levels of callers (default 1, '
     + 'max 4)"},'
     + '"limit":{"type":"integer","description":"Max caller rows over all '
-    + 'levels (default 150)"}}}},' +
+    + 'levels (default 150; 0: the counts and notes alone, no rows)"}}}},' +
 
     '{"name":"compile","description":"Build with the real compiler - MSBuild '
     + 'over the member''s .dproj, its own platform and configuration - and '
@@ -10415,7 +10596,8 @@ const
     + '"relation":{"type":"string","enum":["descendants","overrides",'
     + '"implementations","assignments","creations","destructions"]},'
     + TARGET_PROPS + ','
-    + '"limit":{"type":"integer","description":"Max rows (default 150)"}},'
+    + '"limit":{"type":"integer","description":"Max rows (default 150; '
+    + '0: the counts and notes alone, no rows)"}},'
     + '"required":["relation"]}},' +
 
     '{"name":"outline","description":"The structure of one unit without '
@@ -10430,7 +10612,8 @@ const
     + '"members":{"type":"boolean","description":"Include fields, properties '
     + 'and method declarations inside types (default true; left out, and '
     + 'said, when the whole outline is over `limit`)"},'
-    + '"limit":{"type":"integer","description":"Max rows (default 300)"}},'
+    + '"limit":{"type":"integer","description":"Max rows (default 300; '
+    + '0: the counts and notes alone, no rows)"}},'
     + '"required":["file"]}},' +
 
     '{"name":"form","description":"The component tree of one form without '
@@ -10439,7 +10622,9 @@ const
     + 'it names (FocusControl, a data module''s component), each with its '
     + 'line in the form file. An inherited form is shown merged with its '
     + 'ancestors'' form files, as the form designer shows it; a row from an '
-    + 'ancestor names its file. A handler whose method is gone - the form '
+    + 'ancestor names its file. A form class with no form file of its own '
+    + 'shows the ancestor''s it loads, each event bound on that class. A '
+    + 'handler whose method is gone - the form '
     + 'fails to load - and a component a value names that does not exist are '
     + 'said. Plain properties (Left, Caption) are left out.",'
     + '"inputSchema":{"type":"object","properties":{'
@@ -10447,7 +10632,8 @@ const
     + '.dfm/.fmx, absolute or relative to the project group directory"},'
     + '"symbol":{"type":"string","description":"Or the form''s class, e.g. '
     + 'TfrmMain"},'
-    + '"limit":{"type":"integer","description":"Max rows (default 400)"}}}},' +
+    + '"limit":{"type":"integer","description":"Max rows (default 300; '
+    + '0: the counts and notes alone, no rows)"}}}},' +
 
     '{"name":"diagnostics","description":"Semantic errors PasTree finds - '
     + 'undeclared identifiers, unknown members, wrong argument counts, '
@@ -10503,6 +10689,8 @@ begin
     + 'its uses graph, `diagnostics` checks name '
     + 'resolution after edits. Their rows name the routine or type they sit '
     + 'in, which usually answers the question without opening the file. '
+    + 'A header counts every row, cut or not: `limit: 0` asks whether and '
+    + 'how many, without the rows. '
     + 'Symbols are addressed by name (TFoo, '
     + 'TFoo.Bar, Unit.TFoo.Bar) or by file + line + name. Result paths are '
     + 'relative to ' + AWs.Root + '. The index holds what the projects '

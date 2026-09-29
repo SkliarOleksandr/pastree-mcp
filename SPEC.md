@@ -61,6 +61,21 @@ Common rules:
   column). A search runs in every analysis holding that site and the rows are
   merged and de-duplicated by hit site.
 - **Order**: the group's own files first, then libraries; by file and line.
+- **The cap and the count**: `limit` caps the rows; the header counts every
+  row, cut or not, and the cut says how many it left out. `limit: 0` (0.19.0,
+  every tool that lists rows: `find`, `references`, `callers`, `callees`,
+  `impact`, `related`, `members`, `outline`, `form`) answers whether and how
+  many with no rows at all - the header, the notes (what was not seen, the
+  form lines among the uses, the implementation headers) and the "N more".
+  Many agent questions are "is it used", "is there one", and the rows of a
+  heavily used symbol are paid for anyway: on the client group
+  `references` of TabOrder 2,683 tokens (150 of 6,355 rows) -> 83, of an
+  enum type 3,595 -> 28, `find *Lab*` 758 -> 11. The work is the same - every
+  row is found to be counted - except the walks by level: `callers`,
+  `callees` and `impact` search a deeper level only for rows that are shown,
+  so with 0 only the first level is counted, and the answer says so. The
+  rows `find` does not list are counted by declaration node, an estimate
+  when two analyses hold a unit (it was one off in 5,575).
 - **Where a row sits**: `references`, `callers`, `impact`, `compile`, the statement relations of
   `related` (`assignments`, `creations`, `destructions`) and `diagnostics` name the
   innermost routine or type around each row - `TFoo.Save`, `TFoo.Save.Helper`
@@ -311,7 +326,8 @@ are here so a new tool is not the one that breaks them.
   results. A tool that invents its own addressing is one more thing the
   model gets wrong.
 - **Answered like the others.** Relative paths, grouped by file, one trimmed
-  line per row, a cap with "N more", own files first. Look at the tokens
+  line per row, a cap with "N more", own files first; a header that counts
+  every row, and `limit: 0` for the counts alone. Look at the tokens
   (`--script`) before and after: a tool whose answer costs as much as the
   grep it replaces is not a win, however right it is - the indented
   descendants tree of section 3 was exactly that.
@@ -561,7 +577,15 @@ gap between the answers and the truth.
   (`Items[1].OnClick`), and a descendant's collection replaces the
   ancestor's whole; text after the root's `end`, which dcc drops, is said -
   and so is a handler named only there, in `references` and `callers`. The
-  row limit is 300 (400 put 7 forms over 5k tokens).
+  row limit is 300 (400 put 7 forms over 5k tokens). A form class with no
+  form file of its own - a second class in a form's unit, a unit with no
+  `.dfm` beside it - loads its nearest ancestor's: TCustomForm's
+  constructor reads the resource of every class up the chain, and a class
+  without one adds nothing. `form` of it shows that file, said so, each
+  event bound to the method of the name on the class asked about (its
+  redeclaration, where it has one), as `callers` already bound it; a unit
+  with several such classes names them. It used to refuse with "no form
+  file of its own", and the task pilot's agent went to Glob (F6.4, 0.19.0).
 - **Needs a form reader in PasTree**, which it does not have. Text DFM is a
   small grammar (`object`/`inherited`/`inline`, properties, collections,
   binary data blocks). Binary DFM must be recognized (the `TPF0` signature)
@@ -669,8 +693,9 @@ gap between the answers and the truth.
    section 10 (0.15.0-0.16.7). Left: a form file's link error (E2161)
    attached to the `.dfm` in `compile`'s answer.
 5. The findings left open (10.4): enum values by name and F6.2 - both a
-   false "nothing" - are fixed (0.17.0, 0.17.1); then the generic
-   ancestor's E2003, F6.4, F6.3, `source` of overloads, F6.1, F2084.
+   false "nothing" - are fixed (0.17.0, 0.17.1), F6.4 and F6.3 too
+   (0.19.0); then the generic ancestor's E2003, `source` of overloads,
+   F6.1, F2084.
 6. The task comparison of section 8, question 2, scaled up on tasks that
    discriminate (10.4), before any new tool: the pilot's tasks were solved
    by grep as well, so it has not yet said where the tools are enough and
@@ -827,12 +852,17 @@ its root's `end` - seven property lines dcc drops from the exe.
     argument was taken by an overload whose parameter is a string (10.3,
     7): the call listed under the wrong overload and the one it calls
     "none found" - a constructor that runs, read as unused.
-  - F6.3: a `callers` row is the first line of a call written over
-    several; the argument asked about - where a value comes from - is on
-    the next, and the agent read the file for it.
-  - F6.4: `form` of a class without a form file of its own, which streams
-    its ancestor's, refuses; the ancestor's form with each event resolved
-    on the class is what runs (`callers` already finds that binding).
+  - F6.3 (fixed in 0.19.0): a `callers` row was the first line of a call
+    written over several; the argument asked about - where a value comes
+    from - was on the next, and the agent read the file for it. The row is
+    now the call joined up to its closing parenthesis or bracket, comments
+    dropped, at most 6 lines and 240 characters cut at an argument (the
+    client group's such calls run to 190); a line that closes what it opens
+    stays as it was. Over the 384-symbol battery: 82 answers of 2,592
+    changed, all `callers` and `impact`, their size +2.0% and +1.4%.
+  - F6.4 (fixed in 0.19.0): `form` of a class without a form file of its
+    own refused; it shows the ancestor's form the class loads, each event
+    bound on the class (9.5).
 - **Open from a field report** (a colleague's session on a branch of the
   client group, mostly renames; `references` was its main gain): enum
   values by name (fixed, 0.17.0); `diagnostics` reporting E2003 on a member

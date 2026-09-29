@@ -10,6 +10,7 @@ uses
   uFrame in 'uFrame.pas' {fraName: TFrame},
   uMainForm in 'uMainForm.pas' {frmMain},
   uChildForm in 'uChildForm.pas' {frmChild},
+  uPlainForm in 'uPlainForm.pas',
   uBinaryForm in 'uBinaryForm.pas' {frmBinary};
 
 begin

@@ -45,9 +45,13 @@ or **16 s / 4.3 GB** under the exact one. Typical calls take 60-500 ms.
 | `compile` | Builds the members a change reaches with the real compiler (MSBuild over the `.dproj`) into a directory of its own, and answers with the errors - each with its routine and source line - and the warnings and hints the change added. Nothing of the project is overwritten and build events are not run; the first build starts from the developer's own `.dcu` files |
 | `related` | `descendants`, `overrides`, `implementations`, `assignments`, `creations`, `destructions` |
 | `outline` | The structure of one unit with line numbers, without reading it |
-| `form` | The component tree of one form, merged with its ancestors' form files: each component's class, the method each event runs, the components it names - and a handler or a component a line names that does not exist |
+| `form` | The component tree of one form, merged with its ancestors' form files: each component's class, the method each event runs, the components it names - and a handler or a component a line names that does not exist; of a form class with no form file of its own, the ancestor's it loads |
 | `diagnostics` | PasTree's semantic errors for a file or the whole group, from the files on disk now, each naming its routine |
 | `unit_deps` | What a unit uses (resolved to files) and what uses it |
+
+Every tool that lists rows takes `limit`; its header counts every row, cut
+or not, and `limit: 0` answers whether and how many with no rows - "is it
+used" for the price of one line.
 
 Design and rationale of each: [SPEC.md](SPEC.md).
 
