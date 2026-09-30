@@ -2373,13 +2373,23 @@ end;
 // The line of the unit's implementation that redeclares a routine declared
 // in its interface as external - `function SendMessage; external user32 name
 // 'SendMessageW';`, the Windows import units' shape: the interface header
-// says nothing of it. '' for none.
+// says nothing of it. Of overloads, the line with the declaration's
+// parameters - SendMessage's WPARAM and INT_PTR ones are two lines. '' for
+// none.
 function ExternalImplLine(LM: TPasSemaModel; ARoutine: Integer): string;
+
+  function Squeezed(const AText: string): string;
+  begin
+    Result := LowerCase(AText);
+    for var LWs in [' ', #9, #13, #10] do
+      Result := StringReplace(Result, LWs, '', [rfReplaceAll]);
+  end;
+
 var
-  LName, LLine: string;
+  LName, LLine, LParams: string;
   LLines: TArray<string>;
   LImpl: Boolean;
-  LAt: Integer;
+  LAt, LOpen, LClose, LFileId, LFrom, LDeclAt, LTo: Integer;
 begin
   Result := '';
   if (LM.Tree.Nodes[ARoutine].FirstChild = NIL_NODE) or
@@ -2389,6 +2399,16 @@ begin
   LName := Copy(LName, LastDelimiter('.', LName) + 1, MaxInt);
   if LName = '' then
     Exit;
+  LParams := '';
+  if DeclLines(LM, ARoutine, LFileId, LFrom, LDeclAt, LTo) then
+    for var LIdx := LDeclAt to LTo do
+      LParams := LParams + Squeezed(LM.Tree.Source.Files[LFileId].LineText(LIdx));
+  LOpen := Pos('(', LParams);
+  LClose := Pos(')', LParams);
+  if (LOpen > 0) and (LClose > LOpen) then
+    LParams := Copy(LParams, LOpen, LClose - LOpen + 1)
+  else
+    LParams := '';
   LLines := ReadLines(LM.Tree.Source.FileNames[0]);
   LImpl := False;
   for LLine in LLines do
@@ -2402,7 +2422,13 @@ begin
     if (LAt > 0) and (Pos('external', LowerCase(LLine)) > LAt) and
        (StartsText('function', TrimLeft(LLine)) or
         StartsText('procedure', TrimLeft(LLine))) then
-      Exit(CleanLine(LLine));
+    begin
+      // The first such line, unless a later one has the parameters.
+      if Result = '' then
+        Result := CleanLine(LLine);
+      if (LParams = '') or (Pos(LParams, Squeezed(LLine)) > 0) then
+        Exit(CleanLine(LLine));
+    end;
   end;
 end;
 
@@ -2429,12 +2455,13 @@ begin
 end;
 
 // One part - a declaration or an implementation - under its heading, the
-// lines numbered as in the file, at most ALimit of them.
-procedure AppendPart(ASb: TStringBuilder; AWs: TMcpWorkspace; LM: TPasSemaModel;
-  ANode: Integer; const AHead: string; ALimit: Integer);
+// lines numbered as in the file, at most ALimit of them; the number shown.
+function AppendPart(ASb: TStringBuilder; AWs: TMcpWorkspace; LM: TPasSemaModel;
+  ANode: Integer; const AHead: string; ALimit: Integer): Integer;
 var
   LFileId, LFrom, LAt, LTo, LLast, LWidth: Integer;
 begin
+  Result := 0;
   if not DeclLines(LM, ANode, LFileId, LFrom, LAt, LTo) then
   begin
     ASb.AppendLine(AHead + ' across an $I include - not shown; read the file');
@@ -2457,47 +2484,49 @@ begin
   if LTo > LLast then
     ASb.AppendLine(Format('... %d more lines, to line %d (raise `limit`)',
       [LTo - LLast, LTo]));
+  Result := Max(0, LLast - LFrom + 1);
 end;
 
-{ The exact text of one declaration (SPEC 9.2.2): a routine's implementation
-  from its header to its `end;`, a type's whole declaration, a constant with
-  its value - where `definition` + `context` makes the agent guess how many
-  lines a routine has. The lines come from the model's own token stream, so
-  their numbers are the ones every other answer uses. }
-function ToolSource(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
+function IsRoutineTarget(const AT: TTarget): Boolean;
+begin
+  Result := (AT.Kind = tkSymbol) and ((AT.Head = 'procedure') or
+    (AT.Head = 'function') or (AT.Head = 'constructor') or
+    (AT.Head = 'destructor') or (AT.Head = 'operator') or
+    (AT.Head = 'routine'));
+end;
+
+{ The text of declaration AT into ASb (SPEC 9.2.2), ATitle heading its first
+  part: a routine's implementation from its header to its `end;`, a type's
+  whole declaration, a constant with its value - where `definition` +
+  `context` makes the agent guess how many lines a routine has. The lines
+  come from the model's own token stream, so their numbers are the ones
+  every other answer uses. ALimit caps each part; the lines shown. }
+function AppendSourceOf(ASb: TStringBuilder; AWs: TMcpWorkspace;
+  const AT: TTarget; APart, ATitle: string; ALimit: Integer): Integer;
 var
-  LT: TTarget;
-  LPart, LTitle: string;
-  LLimit, LMid, LSym, LDeclNode, LImplNode, LDm, LFileId: Integer;
+  LMid, LSym, LDeclNode, LImplNode, LDm, LFileId: Integer;
   LA: TMcpAnalysis;
   LM, LImplM: TPasSemaModel;
   LNavT: TPasNavTarget;
-  LSb: TStringBuilder;
   LIsRoutine, LSame, LShowDecl, LShowImpl: Boolean;
 begin
-  LPart := LowerCase(ArgStr(AArgs, 'part'));
-  if (LPart <> '') and (LPart <> 'impl') and (LPart <> 'decl') and
-     (LPart <> 'both') then
-    raise EToolError.Create('`part` is impl, decl or both');
-  LLimit := EnsureRange(ArgInt(AArgs, 'limit', 300), 1, 5000);
-  LT := ResolveOne(AWs, AArgs);
-  case LT.Kind of
+  case AT.Kind of
     tkUnit:
       raise EToolError.CreateFmt('%s is a unit - `outline` shows its '
         + 'structure with line numbers; `source` takes one of its '
-        + 'declarations', [LT.Name]);
+        + 'declarations', [AT.Name]);
     tkBuiltin, tkDefine:
       raise EToolError.CreateFmt('%s is a %s - it has no source declaration',
-        [LT.Name, LT.Head]);
+        [AT.Name, AT.Head]);
   end;
-  if SameText(TPath.GetExtension(LT.DeclFile), '.dcu') then
+  if SameText(TPath.GetExtension(AT.DeclFile), '.dcu') then
     raise EToolError.CreateFmt('%s is declared in a compiled unit without '
-      + 'source (%s)', [LT.Name, AWs.RelPath(LT.DeclFile)]);
+      + 'source (%s)', [AT.Name, AWs.RelPath(AT.DeclFile)]);
 
   // The declaration node, from the first analysis that holds the symbol.
   LA := nil;
   for var LCand in AWs.Analyses do
-    if LT.Ids[LCand.Index].Mid >= 0 then
+    if AT.Ids[LCand.Index].Mid >= 0 then
     begin
       LA := LCand;
       Break;
@@ -2507,8 +2536,8 @@ begin
   LMid := -1;
   if LA <> nil then
   begin
-    LMid := LT.Ids[LA.Index].Mid;
-    LSym := LT.Ids[LA.Index].Sym;
+    LMid := AT.Ids[LA.Index].Mid;
+    LSym := AT.Ids[LA.Index].Sym;
     if LA.Proj.EnsureHydrated(LMid) then
     begin
       LM := LA.Proj.Model(LMid);
@@ -2517,7 +2546,7 @@ begin
     end;
   end;
   if LDeclNode = NIL_NODE then
-    raise EToolError.CreateFmt('no source declaration of %s found', [LT.Name]);
+    raise EToolError.CreateFmt('no source declaration of %s found', [AT.Name]);
 
   // A routine declared apart from its body - a method, an interface-section
   // or a forward routine - is implemented in the declaring unit: the routine
@@ -2532,10 +2561,10 @@ begin
   end
   else if LIsRoutine then
   begin
-    LDm := LA.Nav.ModelIdOf(LT.DeclFile);
+    LDm := LA.Nav.ModelIdOf(AT.DeclFile);
     if LDm < 0 then
       LDm := LMid;
-    if LA.Nav.GotoImplementation(LDm, LT.DeclLine, LT.DeclCol, LNavT) and
+    if LA.Nav.GotoImplementation(LDm, AT.DeclLine, AT.DeclCol, LNavT) and
        LA.Proj.EnsureHydrated(LNavT.UnitId) then
     begin
       LImplM := LA.Proj.Model(LNavT.UnitId);
@@ -2548,39 +2577,102 @@ begin
   // Declared where it is implemented (a routine of the implementation
   // section only): one text, whichever part is asked.
   LSame := (LImplNode = LDeclNode) and (LImplM = LM);
-  if LPart = '' then
-    LPart := IfThen(LImplNode <> NIL_NODE, 'impl', 'decl');
-  LShowImpl := (LImplNode <> NIL_NODE) and ((LPart = 'impl') or
-    (LPart = 'both'));
-  LShowDecl := not (LSame and LShowImpl) and ((LPart <> 'impl') or
+  if APart = '' then
+    APart := IfThen(LImplNode <> NIL_NODE, 'impl', 'decl');
+  LShowImpl := (LImplNode <> NIL_NODE) and ((APart = 'impl') or
+    (APart = 'both'));
+  LShowDecl := not (LSame and LShowImpl) and ((APart <> 'impl') or
     (LImplNode = NIL_NODE));
-  LTitle := Format('%s (%s) ', [LT.Name, LT.Head]);
+  Result := 0;
+  if LShowDecl then
+  begin
+    Inc(Result, AppendPart(ASb, AWs, LM, LDeclNode, ATitle + 'declared',
+      ALimit));
+    ATitle := '';
+    if LIsRoutine and (LImplNode = NIL_NODE) then
+      ASb.AppendLine('(' + NoBodyNote(LM, LDeclNode) + ')')
+    else if not LIsRoutine and (APart = 'impl') then
+      ASb.AppendLine('(not a routine: its declaration is all its source)');
+  end;
+  if LShowImpl then
+    Inc(Result, AppendPart(ASb, AWs, LImplM, LImplNode, ATitle + IfThen(LSame,
+      'declared', 'implemented'), ALimit));
+end;
+
+// Are the candidates of a name the overloads of one routine - one type's
+// method or one unit's routine - rather than namesakes?
+function IsOverloadSet(const ACands: TArray<TTarget>): Boolean;
+begin
+  Result := Length(ACands) > 1;
+  for var LC in ACands do
+    if not IsRoutineTarget(LC) or not SameText(LC.Name, ACands[0].Name) or
+       not SameText(LC.DeclFile, ACands[0].DeclFile) then
+      Exit(False);
+end;
+
+// The exact text of one declaration - or, for a name whose candidates are
+// the overloads of one routine, of each of them: an agent refused there read
+// the file instead (field report FR.3), as `definition` lists them all.
+function ToolSource(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
+var
+  LCands: TArray<TTarget>;
+  LPart: string;
+  LLimit, LMore, LLeft, LNext: Integer;
+  LSb: TStringBuilder;
+begin
+  LPart := LowerCase(ArgStr(AArgs, 'part'));
+  if (LPart <> '') and (LPart <> 'impl') and (LPart <> 'decl') and
+     (LPart <> 'both') then
+    raise EToolError.Create('`part` is impl, decl or both');
+  LLimit := EnsureRange(ArgInt(AArgs, 'limit', 300), 1, 5000);
+  if (ArgStr(AArgs, 'file') = '') and (ArgStr(AArgs, 'symbol') <> '') then
+  begin
+    LCands := ResolveName(AWs, ArgStr(AArgs, 'symbol'), ArgStr(AArgs, 'kind'),
+      False, 12, LMore);
+    if Length(LCands) = 0 then
+      raise EToolError.Create(NoSuchDeclaration(AWs, ArgStr(AArgs, 'symbol')));
+    // Namesakes: refused with the candidates listed, as everywhere.
+    if (LMore > 0) or ((Length(LCands) > 1) and not IsOverloadSet(LCands)) then
+      ResolveNamed(AWs, ArgStr(AArgs, 'symbol'), ArgStr(AArgs, 'kind'));
+    for var LIdx := 0 to High(LCands) do
+      MapToOthers(AWs, LCands[LIdx]);
+  end
+  else
+    LCands := [ResolveOne(AWs, AArgs)];
   LSb := TStringBuilder.Create;
   try
-    if LShowDecl then
+    if Length(LCands) = 1 then
+      AppendSourceOf(LSb, AWs, LCands[0], LPart, Format('%s (%s) ',
+        [LCands[0].Name, LCands[0].Head]), LLimit)
+    else
     begin
-      AppendPart(LSb, AWs, LM, LDeclNode, LTitle + 'declared', LLimit);
-      LTitle := '';
-      if LIsRoutine and (LImplNode = NIL_NODE) then
-        LSb.AppendLine('(' + NoBodyNote(LM, LDeclNode) + ')')
-      else if not LIsRoutine and (LPart = 'impl') then
-        LSb.AppendLine('(not a routine: its declaration is all its source)');
+      // Each overload told apart by its declaration line, as in `callers`;
+      // `limit` caps the lines over them all, the ones past it named.
+      LSb.AppendLine(Format('%s - %d overloads:', [LCands[0].Name,
+        Length(LCands)]));
+      LLeft := LLimit;
+      LNext := 0;
+      while (LNext <= High(LCands)) and (LLeft > 0) do
+      begin
+        LSb.AppendLine;
+        Dec(LLeft, AppendSourceOf(LSb, AWs, LCands[LNext], LPart,
+          Format('%s (%s, line %d) ', [LCands[LNext].Name, LCands[LNext].Head,
+          LCands[LNext].DeclLine]), LLeft));
+        Inc(LNext);
+      end;
+      if LNext <= High(LCands) then
+      begin
+        LSb.AppendLine;
+        LSb.AppendLine(Format('%d more not shown (raise `limit`, or pass '
+          + '`file` + `line` + `name` of one):', [Length(LCands) - LNext]));
+        for var LIdx := LNext to High(LCands) do
+          LSb.AppendLine('  ' + DescribeTarget(AWs, LCands[LIdx]));
+      end;
     end;
-    if LShowImpl then
-      AppendPart(LSb, AWs, LImplM, LImplNode, LTitle + IfThen(LSame,
-        'declared', 'implemented'), LLimit);
     Result := LSb.ToString.TrimRight;
   finally
     LSb.Free;
   end;
-end;
-
-function IsRoutineTarget(const AT: TTarget): Boolean;
-begin
-  Result := (AT.Kind = tkSymbol) and ((AT.Head = 'procedure') or
-    (AT.Head = 'function') or (AT.Head = 'constructor') or
-    (AT.Head = 'destructor') or (AT.Head = 'operator') or
-    (AT.Head = 'routine'));
 end;
 
 // The lines of the group's own files where ANameLower is written as a word
@@ -10441,13 +10533,14 @@ const
     + 'declaration, by name: a routine''s implementation from its header to '
     + 'its end, a type''s whole declaration, a constant with its value - '
     + 'numbered as in the file, with the comment written directly above it. '
+    + 'The name of an overloaded routine shows each overload. '
     + 'Use it instead of reading a file at a guessed offset.",'
     + '"inputSchema":{"type":"object","properties":{' + TARGET_PROPS + ','
     + '"part":{"type":"string","enum":["impl","decl","both"],"description":'
     + '"For a routine: its implementation (the default when it has one), its '
     + 'declaration, or both"},'
     + '"limit":{"type":"integer","description":"Max lines per part (default '
-    + '300)"}}}},' +
+    + '300); over all the overloads when a name has several"}}}},' +
 
     '{"name":"members","description":"What can be used on a class, record '
     + 'or interface, inherited members included - instead of an outline per '

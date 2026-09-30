@@ -36,7 +36,7 @@ or **16 s / 4.3 GB** under the exact one. Typical calls take 60-500 ms.
 | `status` | What is loaded: members, analyses, unit counts, unit names that do not resolve, load progress |
 | `find` | Declarations by name, qualified name or wildcard, project units first; for a name the index does not hold, the Pascal files outside it that write it |
 | `definition` | Where a symbol is declared and implemented, optionally with the source that follows |
-| `source` | The exact text of one declaration - a routine's body, a whole type, a constant - numbered, with the comment above it |
+| `source` | The exact text of one declaration - a routine's body, a whole type, a constant - numbered, with the comment above it; each overload of an overloaded name |
 | `members` | What a class, record or interface has, inherited members included, under the type declaring each - or what can be called on a variable, by its type |
 | `references` | Every use across the group, grouped by file and by the routine or type it sits in; the form files' lines that bind it by name, under their component; also units, built-ins and conditional defines |
 | `callers` | Who calls a routine - through the virtual method it overrides, an interface method it implements or a property it is the accessor of too, bare `inherited;` included, and the form lines that bind an event handler - and, with `depth`, who calls those |

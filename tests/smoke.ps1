@@ -108,6 +108,16 @@ Check 'source interface' (Block $b 'source {"symbol":"IShape.Area"}') @('declare
 Check 'source unit' (Block $b 'source {"symbol":"uShapes"}') @('is a unit - `outline` shows its structure')
 # A local has no name to find it by; by position it has a source like any other.
 Check 'source local' (Block $b 'source {"file"') @('LShape (var) declared at Shared\uShapes.pas:71', '71    LShape: IShape;')
+# FR.3: the name of an overloaded method shows each overload, told apart by
+# its declaration line; `limit` counts over them all and names the rest. A
+# name of namesakes in several types is still refused with the candidates.
+Check 'source overloads' (Block $b 'source {"symbol":"TBase.Add"}') @('TBase.Add - 2 overloads:', 'TBase.Add (procedure, line 25) implemented at AppA\uMembers.pas:75-78', '77    Inc(FCount, AValue);', 'TBase.Add (procedure, line 26) implemented at AppA\uMembers.pas:80-83', '82    Add(Length(AText));') @('ambiguous', 'TDerived')
+Check 'source overloads limit' (Block $b 'source {"symbol":"TBase.Add", "limit"') @('... 1 more lines, to line 78', '1 more not shown', 'AppA\uMembers.pas:26  TBase.Add (procedure)') @('80  ')
+Check 'source one overload' (Block $b 'source {"symbol":"TDerived.Add"') @('TDerived.Add (procedure) implemented at AppA\uMembers.pas:95-97') @('overloads')
+Check 'source namesakes' (Block $b 'source {"symbol":"Add"}') @('`Add` is ambiguous', 'AppA\uMembers.pas:35  TDerived.Add') @('implemented at')
+# Side by side, each external overload with its own import line - the
+# INT_PTR one showed the WPARAM one's (the RTL's lines are not pinned).
+Check 'source external overloads' (Block $b 'source {"symbol":"Winapi.Windows.SendMessage"}') @('SendMessage - 2 overloads:', '(external - `function SendMessage(hWnd: HWND; Msg: UINT; wParam: WPARAM;', '(external - `function SendMessage(hWnd: HWND; Msg: UINT; wParam: INT_PTR;')
 # members: by the type declaring each, under its visibility section. Seen from
 # TDerived's own methods: its ancestor's private field (same unit) but not the
 # strict private one; an override, and the property republished, once at the
