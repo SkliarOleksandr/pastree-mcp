@@ -900,7 +900,11 @@ its root's `end` - seven property lines dcc drops from the exe.
   `references` of TStrings.Strings from 312 to 2,566 (2,254 of them
   `[X[I]]`). Of the 2,592 battery answers 10 changed, each by the uses it
   had missed - `callees` of TStringGrid.GetCells was "none found" - and no
-  tool got slower at p95.
+  tool got slower at p95. Found on the way (0.21.1, PasTree 0.76.1): a
+  default property of several parameters took one index expression for
+  all of them, so `S[C, R]` was typed one level deeper - to Char off a
+  string, through the default property of its own type - and the member
+  after it went unbound.
 - **Said, not resolved**: late-bound OLE calls and `asm` (7 and 1 lines of
   phase 2's hits), calls through a method pointer, a form file with no unit beside it or one no project
   compiles, uses in a branch the analyzed configuration does not compile
