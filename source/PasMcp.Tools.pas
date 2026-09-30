@@ -676,32 +676,6 @@ begin
     Result := CleanLine(ALine);
 end;
 
-{ Is the property named at ANameNode the default array property - `property
-  Items[I: Integer]: T read GetItem; default;`? `X[I]` uses it without
-  writing its name, and a reference search, which follows names, finds none
-  of those uses. Reads the tokens: the model must be hydrated. }
-function IsDefaultArrayProperty(LM: TPasSemaModel; ANameNode: Integer): Boolean;
-var
-  LDecl, LChild: Integer;
-begin
-  Result := False;
-  if ANameNode = NIL_NODE then
-    Exit;
-  LDecl := LM.Tree.Nodes[ANameNode].Parent;
-  if (LDecl = NIL_NODE) or (LM.Tree.Nodes[LDecl].Kind <> nkPropertyDecl) then
-    Exit;
-  LChild := LM.Tree.Nodes[LDecl].FirstChild;
-  while LChild <> NIL_NODE do
-  begin
-    // The trailing `default;` has no value, unlike `default alLeft`.
-    if (LM.Tree.Nodes[LChild].Kind = nkPropSpec) and
-       (LM.Tree.Nodes[LChild].FirstChild = NIL_NODE) and
-       LM.Tree.NodeTextEquals(LChild, 'default') then
-      Exit(True);
-    LChild := LM.Tree.Nodes[LChild].NextSibling;
-  end;
-end;
-
 { ---- targets ---------------------------------------------------------------- }
 
 function NewIds(AWs: TMcpWorkspace): TArray<TSymId>;
@@ -1448,6 +1422,7 @@ type
     FCompiled: Integer;
     FForms: Integer;
     FUnsure: Integer;
+    FImplicit: Integer;
   public
     constructor Create(AWs: TMcpWorkspace);
     destructor Destroy; override;
@@ -1461,6 +1436,8 @@ type
     property Compiled: Integer read FCompiled;
     // Form lines tagged cUnsureTag.
     property Unsure: Integer read FUnsure;
+    // Uses through a default array property's brackets, tagged `X[I]`.
+    property Implicit: Integer read FImplicit;
   end;
 
 constructor THitSet.Create(AWs: TMcpWorkspace);
@@ -1500,6 +1477,14 @@ begin
   LH.Col := AHit.Col;
   LH.Snippet := AHit.Snippet;
   LH.Tag := ATag;
+  // `L[I]` through a default array property: a use with no name written,
+  // which a rename leaves as it is.
+  if AHit.Implicit then
+  begin
+    Inc(FImplicit);
+    if ATag = '' then
+      LH.Tag := 'X[I]';
+  end;
   LH.Own := FWs.IsOwnFile(AHit.FilePath);
   FList.Add(LH);
 end;
@@ -2994,6 +2979,10 @@ begin
         + 'left out are form lines)', [LFormCut]));
     if LSet.Unsure > 0 then
       LSb.AppendLine(UnsureNote(LSet.Unsure));
+    if LSet.Implicit > 0 then
+      LSb.AppendLine(Format('(%s [X[I]]: the default array property used '
+        + 'through brackets, its name not written - a rename leaves them as '
+        + 'they are)', [Plural(LSet.Implicit, 'use')]));
     if LSet.Compiled > 0 then
       LSb.AppendLine(Format('(+%d in compiled units without source, not '
         + 'shown)', [LSet.Compiled]));
@@ -3062,10 +3051,6 @@ begin
         if LForms <> '' then
           LSb.Insert(Pos(sLineBreak, LSb.ToString) + Length(sLineBreak) - 1,
             LForms + sLineBreak);
-        if IsDefaultArrayProperty(LA.Proj.Model(LId.Mid),
-           LA.Proj.Model(LId.Mid).Symbols[LId.Sym].DeclNode) then
-          LSb.AppendLine('(the default array property: `X[I]` uses it '
-            + 'without its name, and those uses are not listed)');
         Break;
       end;
     Result := LSb.ToString.TrimRight;
@@ -3529,7 +3514,10 @@ var
 begin
   Result := True;
   LP := LM.Tree.Nodes[ANode].Parent;
-  if (LP <> NIL_NODE) and (LM.Tree.Nodes[LP].Kind = nkMember) and
+  // `L[I]` through a default array property: the object is L.
+  if LM.Tree.Nodes[ANode].Kind = nkIndex then
+    LX := AA.Proj.WithTargetTypeX(AMid, LM.Tree.Nodes[ANode].FirstChild)
+  else if (LP <> NIL_NODE) and (LM.Tree.Nodes[LP].Kind = nkMember) and
      (LM.Tree.Nodes[LP].FirstChild <> ANode) then
     LX := AA.Proj.WithTargetTypeX(AMid, LM.Tree.Nodes[LP].FirstChild)
   else
@@ -3608,6 +3596,15 @@ function IsAssignTarget(LM: TPasSemaModel; ANode: Integer): Boolean;
 var
   LE, LP: Integer;
 begin
+  // The brackets of `L[I]` through a default array property (a use PasTree
+  // keys on the nkIndex): assigned only as the whole target - the inner
+  // `L[I]` of `L[I][J] := V` is read.
+  if LM.Tree.Nodes[ANode].Kind = nkIndex then
+  begin
+    LP := LM.Tree.Nodes[ANode].Parent;
+    Exit((LP <> NIL_NODE) and (LM.Tree.Nodes[LP].Kind = nkAssign) and
+      (LM.Tree.Nodes[LP].FirstChild = ANode));
+  end;
   LE := DesignatorOf(LM, ANode);
   LP := LM.Tree.Nodes[LE].Parent;
   if (LP <> NIL_NODE) and (LM.Tree.Nodes[LP].Kind = nkIndex) and
@@ -4198,7 +4195,16 @@ begin
     begin
       LM := nil;
       LMid := AA.Nav.ModelIdOf(LH.FilePath);
-      LNodeOk := (LMid >= 0) and AA.Nav.IdentAt(LMid, LH.Line, LH.Col, LIdent);
+      // `L[I]` through a default array property writes no name to find at
+      // the hit: the hit carries its node.
+      if LH.Implicit then
+      begin
+        LNodeOk := LMid >= 0;
+        LIdent.Node := LH.IndexNode;
+      end
+      else
+        LNodeOk := (LMid >= 0) and AA.Nav.IdentAt(LMid, LH.Line, LH.Col,
+          LIdent);
       if LNodeOk then
       begin
         LM := AA.Proj.Model(LMid);
@@ -4266,12 +4272,6 @@ begin
             ASources.Add(LNew);
             if ANode.Level = 0 then
               NoteThrough(LNew);
-            LName := Format('%s is the default array property: `X[I]` uses '
-              + 'it without its name, and those uses are not found',
-              [LNew.Name]);
-            if (LUse <> ruMaps) and IsDefaultArrayProperty(LM, LNamed) and
-               (FNotes.IndexOf(LName) < 0) then
-              FNotes.Add(LName);
             Continue;
           end;
       end;
@@ -5776,7 +5776,9 @@ var
 begin
   Result := XNil;
   LP := LM.Tree.Nodes[ANode].Parent;
-  if (LP <> NIL_NODE) and (LM.Tree.Nodes[LP].Kind = nkMember) and
+  if LM.Tree.Nodes[ANode].Kind = nkIndex then
+    Result := AA.Proj.WithTargetTypeX(AMid, LM.Tree.Nodes[ANode].FirstChild)
+  else if (LP <> NIL_NODE) and (LM.Tree.Nodes[LP].Kind = nkMember) and
      (LM.Tree.Nodes[LP].FirstChild <> ANode) then
     Result := AA.Proj.WithTargetTypeX(AMid, LM.Tree.Nodes[LP].FirstChild)
   else if not InWithBody(LM, ANode) then
@@ -6432,7 +6434,9 @@ begin
         LStack.Push(LChild);
         LChild := LIM.Tree.Nodes[LChild].NextSibling;
       end;
-      if LIM.Tree.Nodes[LN].Kind <> nkIdent then
+      // A name, or the brackets of `L[I]` - a default array property's use
+      // with no name, which PasTree keys on the nkIndex.
+      if not (LIM.Tree.Nodes[LN].Kind in [nkIdent, nkIndex]) then
         Continue;
       if (LN < Length(LIM.RefMap)) and (LIM.RefMap[LN] <> NIL_SYM) then
       begin

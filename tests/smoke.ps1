@@ -93,7 +93,7 @@ Check 'definition inactive' (Block $b 'definition {"file":"AppB/uBoxes.pas","lin
 Check 'find joined cut' (Block $b 'find {"query":"TWideBox.Many"}') @('AppB\uBoxes.pas:74  TWideBox.Many (procedure)  procedure Many(const AAlphaName, ABetaName, AGammaName: string; ADeltaCount, AEpsilonCount, AZetaCount: Integer; const AEtaText, AThetaText, ...); virtual;')
 # A name no declaration matches: what the index is, and where the name is
 # written outside it - in a unit no project uses - or that it is nowhere.
-Check 'find outside the index' (Block $b 'find {"query":"OrphanRoutine"}') @('no declaration matches `OrphanRoutine` among the ', ' units indexed - what the 3 projects of Fixture.groupproj compile: 16 of their own, ', "``OrphanRoutine`` is written in 1 file(s) that no indexed project uses - no tool here sees them:`n  AppB\uOrphan.pas:8  procedure OrphanRoutine;")
+Check 'find outside the index' (Block $b 'find {"query":"OrphanRoutine"}') @('no declaration matches `OrphanRoutine` among the ', ' units indexed - what the 3 projects of Fixture.groupproj compile: 17 of their own, ', "``OrphanRoutine`` is written in 1 file(s) that no indexed project uses - no tool here sees them:`n  AppB\uOrphan.pas:8  procedure OrphanRoutine;")
 Check 'find nowhere' (Block $b 'find {"query":"NothingAnywhere"}') @('no declaration matches `NothingAnywhere` among the ', 'no Pascal file outside them writes `NothingAnywhere` either (1 searched, under the group directory')
 Check 'definition' (Block $b 'definition {"symbol":"TCircle.Area"') @('declared at Shared\uShapes.pas:26', 'implemented at Shared\uShapes.pas:53', 'Result := Pi * FRadius * FRadius;')
 Check 'source' (Block $b 'source {"symbol":"TCircle.Area"}') @('TCircle.Area (function) implemented at Shared\uShapes.pas:53-56', "53  function TCircle.Area: Double;`n54  begin", "56  end;`n") @('declared at')
@@ -331,6 +331,15 @@ Check 'impact count only' (Block $b 'impact {"symbol":"TCircle.Area","limit":0}'
 Check 'diagnostics generic ancestor call' (Block $b 'diagnostics {"file":"AppB/uGenLists.pas"}') @('no diagnostics in AppB\uGenLists.pas')
 Check 'definition generic ancestor call' (Block $b 'definition {"file":"AppB/uGenLists.pas","line":69,"name":"Code"}') @('ICoded.Code (property) declared at AppB\uGenLists.pas:18')
 Check 'references generic ancestor call' (Block $b 'references {"symbol":"ICoded.Code"}') @('8 references in 1 files', '    69  Result := GetRecord(0).Code;', '    107  Result := GetRecord(0).Code;')
+# `AList[0]` uses a default array property with no name written: a row
+# tagged [X[I]] at each, a read calls its getter and a write its setter, and
+# an array's own brackets (FCells[I]) are not such a use.
+Check 'references default property' (Block $b 'references {"symbol":"TCellList.Cells"}') @('TCellList.Cells (property) declared at AppB\uCells.pas:21 - 5 references in 1 files', '    43  [X[I]]  LCell := AList[0];', '    50  [X[I]]  Result := AList[0].Text;', '(5 uses [X[I]]: the default array property used through brackets, its name not written') @('not listed')
+Check 'callers default property getter' (Block $b 'callers {"symbol":"TCellList.GetCell"}') @('3 calls in 2 routines', 'all through TCellList.Cells (property read)', '    43  LCell := AList[0];', '    50  Result := AList[0].Text;') @('45  ', 'not found')
+Check 'callers default property setter' (Block $b 'callers {"symbol":"TCellList.SetCell"}') @('2 calls in 1 routine', 'all through TCellList.Cells (property write)', '    44  AList[0] := AList[1];', '    45  AList[1] := LCell;') @('43  ')
+Check 'callees default property' (Block $b 'callees {"symbol":"SwapCells"}') @('4 calls reaching 2 routines', '18  [at 43, 44 via TCellList.Cells]  function GetCell', '19  [at 44, 45 via TCellList.Cells]  procedure SetCell')
+Check 'assignments default property' (Block $b 'related {"relation":"assignments","symbol":"TCellList.Cells"}') @('assignments of TCellList.Cells (AppB\uCells.pas:21): 2', '44  [X[I]]  AList[0] := AList[1];', '45  [X[I]]  AList[1] := LCell;')
+Check 'references array brackets' (Block $b 'references {"symbol":"TCellList.FCells"}') @('2 references in 1 files') @('[X[I]]')
 # A form file with no unit beside it: said so, not "not part of any project".
 Check 'form orphan' (Block $b 'form {"file":"AppF/uOrphanForm.dfm"}') @('no unit beside AppF\uOrphanForm.dfm - an orphan form file, which no project compiles')
 Check 'outline' (Block $b 'outline {"file":"Shared') @('21  type TCircle = class', '27    property Radius: Double', '53  function TCircle.Area: Double', '40 implementation')

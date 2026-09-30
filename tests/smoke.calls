@@ -157,3 +157,9 @@ impact {"symbol":"TCircle.Area","limit":0}
 diagnostics {"file":"AppB/uGenLists.pas"}
 definition {"file":"AppB/uGenLists.pas","line":69,"name":"Code"}
 references {"symbol":"ICoded.Code"}
+references {"symbol":"TCellList.Cells"}
+callers {"symbol":"TCellList.GetCell"}
+callers {"symbol":"TCellList.SetCell"}
+callees {"symbol":"SwapCells"}
+related {"relation":"assignments","symbol":"TCellList.Cells"}
+references {"symbol":"TCellList.FCells"}
