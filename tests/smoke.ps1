@@ -518,6 +518,31 @@ Check 'compile internal error twice' $out @('compile AppB (Win32): FAILED in', "
 $out = Run-F2084 3 2
 Check 'compile internal error known' $out @("built twice, both stopped at dcc's internal error", "stopped at dcc's internal error F2084 Internal Error: TEST1 (PASTREE_MCP_TEST_F2084) in AppB\AppB.dpr, as the compile at ", 'not built twice this time') @('the second passed')
 
+# ---- a form file dcc does not link ------------------------------------------------------
+# dcc names no file(line) for either: E2161 when a text form file does not
+# convert, E1026 when a unit's {$R *.dfm} finds none. Both were rows under
+# "(no file)"; they go on the form file at the line the reader stops at, and
+# on the unit's directive. A copy, broken: the fixture's forms must link.
+Write-Host '--- CLI, a form file dcc does not link'
+$formCopy = Join-Path ([IO.Path]::GetTempPath()) ('pastree-mcp-smoke-forms-' + [Guid]::NewGuid().ToString('N'))
+$formCalls = $formCopy + '.calls'
+Copy-Item -Recurse $fixture $formCopy
+try {
+    $dfm = Join-Path $formCopy 'AppF\uData.dfm'
+    [IO.File]::WriteAllText($dfm, ([IO.File]::ReadAllText($dfm).Replace("Caption = 'Save'", "Caption = 'Save")))
+    Remove-Item -Force (Join-Path $formCopy 'AppF\uChildForm.dfm')
+    [IO.File]::WriteAllText($formCalls, "compile {`"member`":`"AppF`"}`n")
+    $ErrorActionPreference = 'Continue'
+    try { $out = (& $Exe --project (Join-Path $formCopy 'Fixture.groupproj') --log none --build-dir ($formCopy + '-build') --script $formCalls 2>$null | ForEach-Object { "$_" }) -join "`n" }
+    finally { $ErrorActionPreference = 'Stop' }
+}
+finally {
+    Remove-Item -Recurse -Force $formCopy, ($formCopy + '-build') -ErrorAction SilentlyContinue
+    Remove-Item -Force $formCalls -ErrorAction SilentlyContinue
+}
+Check 'compile form malformed' $out @('compile AppF (Win32): FAILED in', 'errors - 2:', "AppF\uData.dfm`n  8  E2161 Error: RLINK32: Error opening file - the form file does not read from this line: Invalid string constant`n        Caption = 'Save") @('(no file)', 'uData.dfm"')
+Check 'compile form missing' $out @("AppF\uChildForm.pas`n  27  E1026 File not found: 'uChildForm.dfm'`n        {`$R *.dfm}`n")
+
 # ---- 3. MCP over stdio, with an edit in between ------------------------------------
 Write-Host '--- MCP over stdio'
 $copy = Join-Path ([IO.Path]::GetTempPath()) ('pastree-mcp-smoke-' + [Guid]::NewGuid().ToString('N'))

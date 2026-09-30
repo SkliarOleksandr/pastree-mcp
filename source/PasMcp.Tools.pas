@@ -62,6 +62,7 @@ implementation
 
 uses
   System.Classes,
+  System.RTLConsts,
   System.StrUtils,
   System.Character,
   System.Math,
@@ -10306,6 +10307,111 @@ begin
   end;
 end;
 
+// The line of a TParser error ('Invalid property value on line 3', the RTL's
+// SParseError as its resources word it), AWhy its reason; 0 and the whole
+// text when it has no line.
+function ParseErrorLine(const AError: string; out AWhy: string): Integer;
+var
+  LM: TMatch;
+begin
+  Result := 0;
+  AWhy := AError;
+  LM := TRegEx.Match(AError, '^' + TRegEx.Escape(SParseError)
+    .Replace('%s', '(?<why>.*)').Replace('%d', '(?<line>\d+)') + '$');
+  if not LM.Success then
+    Exit;
+  AWhy := LM.Groups['why'].Value;
+  Result := StrToIntDef(LM.Groups['line'].Value, 0);
+end;
+
+// dcc names no file for a form file's error: E2161 `RLINK32: Error opening
+// file "<path>"` when its text does not convert, E1026 `File not found:
+// 'uX.dfm'` when a unit's `{$R *.dfm}` finds nothing beside it - rows under
+// "(no file)", a path in the text and nothing to open. The first is put on
+// the form file, at the line PasTree's reader (TReader's grammar, which dcc's
+// conversion follows) stops at, with its reason; the second on the directive
+// of the one indexed unit that links the file.
+procedure ResolveFormFiles(AWs: TMcpWorkspace; var AResult: TBuildResult);
+var
+  LMsg: TBuildMsg;
+  LFrom, LTo, LHits: Integer;
+  LPath, LExt, LBase, LFile, LWhy: string;
+  LDoc: IPasDfmDoc;
+  LDirective: TRegEx;
+  LSeen: TDictionary<string, Boolean>;
+begin
+  for var LI := 0 to High(AResult.Messages) do
+  begin
+    LMsg := AResult.Messages[LI];
+    // dcc gives no file(line); through MSBuild the origin may be the project.
+    if (LMsg.Line > 0) or (LMsg.Kind <> bmError) then
+      Continue;
+    if SameText(LMsg.Code, 'E2161') then
+    begin
+      LFrom := Pos('"', LMsg.Text);
+      LTo := Pos('"', LMsg.Text, LFrom + 1);
+      if (LFrom = 0) or (LTo = 0) then
+        Continue;
+      LPath := Copy(LMsg.Text, LFrom + 1, LTo - LFrom - 1);
+      LExt := LowerCase(ExtractFileExt(LPath));
+      if ((LExt <> '.dfm') and (LExt <> '.fmx')) or not TFile.Exists(LPath) then
+        Continue;
+      LMsg.FileName := LPath;
+      LMsg.Text := TrimRight(Copy(LMsg.Text, 1, LFrom - 1)) +
+        Copy(LMsg.Text, LTo + 1, MaxInt);
+      LDoc := PasDfmLoad(LPath);
+      if (LDoc <> nil) and (LDoc.Doc.Error <> '') then
+      begin
+        LWhy := LDoc.Doc.Error;
+        if not LDoc.Doc.IsBinary then
+          LMsg.Line := ParseErrorLine(LDoc.Doc.Error, LWhy);
+        if LMsg.Line > 0 then
+          LMsg.Text := LMsg.Text + ' - the form file does not read from this '
+            + 'line: ' + LWhy
+        else
+          LMsg.Text := LMsg.Text + ' - the form file does not read: ' + LWhy;
+      end;
+      AResult.Messages[LI] := LMsg;
+    end
+    else if SameText(LMsg.Code, 'E1026') or SameText(LMsg.Code, 'F1026') then
+    begin
+      LPath := QuotedName(LMsg.Text);
+      LExt := LowerCase(ExtractFileExt(LPath));
+      if (LPath = '') or (ExtractFilePath(LPath) <> '') or
+        (IndexText(LExt, ['.dfm', '.fmx', '.res']) < 0) then
+        Continue;
+      LBase := ChangeFileExt(LPath, '');
+      LDirective := TRegEx.Create('\{\$(R|RESOURCE)\s+''?(\*|' +
+        TRegEx.Escape(LBase) + ')' + TRegEx.Escape(LExt) + '''?\s*\}',
+        [roIgnoreCase]);
+      LHits := 0;
+      LSeen := TDictionary<string, Boolean>.Create;
+      try
+        for var LA in AWs.Analyses do
+          for var LMid := 0 to LA.Proj.ModelCount - 1 do
+          begin
+            LFile := LA.Proj.ModelFile(LMid);
+            if not SameText(ChangeFileExt(ExtractFileName(LFile), ''), LBase) or
+              not LSeen.TryAdd(LowerCase(LFile), True) then
+              Continue;
+            var LLines := ReadLines(LFile);
+            for var LN := 0 to High(LLines) do
+              if LDirective.IsMatch(LLines[LN]) then
+              begin
+                Inc(LHits);
+                LMsg.FileName := LFile;
+                LMsg.Line := LN + 1;
+              end;
+          end;
+      finally
+        LSeen.Free;
+      end;
+      if LHits = 1 then
+        AResult.Messages[LI] := LMsg;
+    end;
+  end;
+end;
+
 function MemberProgress(const ABase: TProc<string>;
   AIndex, ACount: Integer): TProc<string>;
 var
@@ -10885,6 +10991,7 @@ begin
     if FResults[LI].Ran then
     begin
       ResolveTruncated(FWs, FResults[LI]);
+      ResolveFormFiles(FWs, FResults[LI]);
       CompareWithBaseline(FResults[LI], FWs.ChangedFiles);
     end;
   Result := CompileAnswer(FWs, FResults, FWhy, FShow, FLimit);
