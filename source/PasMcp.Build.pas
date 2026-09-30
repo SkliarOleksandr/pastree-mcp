@@ -42,6 +42,11 @@ unit PasMcp.Build;
     nothing but its TBuildSpec: the workspace belongs to the thread that runs
     the tools. MemberBuildSpec, MemberBuildDir and CompareWithBaseline's
     caller run on that one.
+  - A build that stops at dcc's own internal error (F2084 Internal Error,
+    nothing else wrong) is run once more: the compiler failing, not the
+    code, and a second Make - over the .dcu files the first one wrote -
+    usually passes (field report FR.4). The answer is the second build's,
+    with the first one's error said beside it.
 
   What is new (CompareWithBaseline): with Make, dcc reports a unit's warnings
   only when it recompiles it, so the comparison is per unit. A unit this
@@ -126,6 +131,10 @@ type
     NotRun: TArray<string>;    // build events skipped: 'pre-build event: cmd'
     Gone: TArray<TBuildMsg>;   // CompareWithBaseline: no longer reported
     Error: string;
+    // Built twice: the first build stopped at these internal errors of dcc
+    // (F2084) after FirstMs; the rest of the record is the second build's.
+    InternalErrors: TArray<TBuildMsg>;
+    FirstMs: Int64;
   end;
 
 var
@@ -138,7 +147,8 @@ function MemberBuildDir(AWs: TMcpWorkspace; AMember: Integer): string;
 // Member AMember's build spec. On the thread that owns AWs.
 function MemberBuildSpec(AWs: TMcpWorkspace; AMember: Integer): TBuildSpec;
 
-// Builds the member of ASpec - on any thread. AProgress, when set, gets a
+// Builds the member of ASpec - on any thread - and once more when dcc
+// stopped at an internal error of its own. AProgress, when set, gets a
 // status line as the build starts and every few seconds while the compiler
 // runs; ACancel, when set and cancelled, stops it.
 function BuildMember(const ASpec: TBuildSpec; ARebuild: Boolean;
@@ -871,7 +881,21 @@ begin
   end;
 end;
 
-function BuildMember(const ASpec: TBuildSpec; ARebuild: Boolean;
+const
+  // For tests\smoke.ps1 only: the first N builds of the process report an
+  // internal error of dcc after it ran - no code makes dcc fail on demand.
+  TEST_F2084_VAR = 'PASTREE_MCP_TEST_F2084';
+
+var
+  GInjected: Integer;
+
+function InjectInternalError: Boolean;
+begin
+  Result := TInterlocked.Increment(GInjected) <=
+    StrToIntDef(GetEnvironmentVariable(TEST_F2084_VAR), 0);
+end;
+
+function BuildOnce(const ASpec: TBuildSpec; ARebuild: Boolean;
   const AProgress: TProc<string>; ACancel: TBuildCancel): TBuildResult;
 var
   LM: TMcpMember;
@@ -891,6 +915,7 @@ var
   LSaved: TStringList;
   LMutex: THandle;
   LWaits: Integer;
+  LInjected: TBuildMsg;
 
   function Sub(const AName: string): string;
   begin
@@ -1119,6 +1144,16 @@ begin
         end;
       end;
       ReadMessages(LLines, LProjectDir, Result);
+      if InjectInternalError then
+      begin
+        LInjected := Default(TBuildMsg);
+        LInjected.Kind := bmError;
+        LInjected.Code := 'F2084';
+        LInjected.Text := 'Internal Error: TEST1 (' + TEST_F2084_VAR + ')';
+        LInjected.FileName := LM.MainSource;
+        Result.Messages := Result.Messages + [LInjected];
+        Result.Ok := False;
+      end;
       LAfter := DcuStamps(LDcuDir);
       try
         for var LPair in LAfter do
@@ -1145,6 +1180,75 @@ begin
       IfThen(Result.SeededFrom <> '', Format(', seeded with %d .dcu files',
       [Result.SeededCount]), ''), IfThen(Result.TimedOut, ', TIMED OUT', '')]);
   end;
+end;
+
+// Did the build stop at dcc's own internal error - an F2084, and no error
+// of the code beside it (an F2063 follows from a unit that did not compile)?
+function StoppedAtInternalError(const AR: TBuildResult): Boolean;
+begin
+  Result := False;
+  if not AR.Ran or AR.Ok or AR.TimedOut or AR.Cancelled then
+    Exit;
+  for var LMsg in AR.Messages do
+    if LMsg.Kind = bmError then
+    begin
+      if SameText(LMsg.Code, 'F2084') then
+        Result := True
+      else if not SameText(LMsg.Code, 'F2063') then
+        Exit(False);
+    end;
+end;
+
+function BuildMember(const ASpec: TBuildSpec; ARebuild: Boolean;
+  const AProgress: TProc<string>; ACancel: TBuildCancel): TBuildResult;
+var
+  LFirst: TBuildResult;
+  LSame: Boolean;
+begin
+  Result := BuildOnce(ASpec, ARebuild, AProgress, ACancel);
+  if not StoppedAtInternalError(Result) or IsCancelled(ACancel) then
+    Exit;
+  LFirst := Result;
+  Log('compile %s: dcc stopped at an internal error (F2084) - building again',
+    [ASpec.Member.Name]);
+  if Assigned(AProgress) then
+    AProgress('dcc stopped at an internal error (F2084) - building ' +
+      ASpec.Member.Name + ' again');
+  // A Make over what the first one compiled, never a rebuild: its .dcu
+  // files are what gets it past the unit dcc failed on.
+  Result := BuildOnce(ASpec, False, AProgress, ACancel);
+  if not Result.Ran then
+    Exit(LFirst);
+  for var LMsg in LFirst.Messages do
+    if SameText(LMsg.Code, 'F2084') then
+      Result.InternalErrors := Result.InternalErrors + [LMsg];
+  Result.FirstMs := LFirst.Ms;
+  // Of the first build: what it started from, the events it did not run,
+  // the units it compiled and their warnings - the second one does not
+  // recompile them, so it does not report them again.
+  Result.FirstBuild := LFirst.FirstBuild;
+  Result.SeededFrom := LFirst.SeededFrom;
+  Result.SeededCount := LFirst.SeededCount;
+  if Length(Result.NotRun) = 0 then
+    Result.NotRun := LFirst.NotRun;
+  for var LUnit in LFirst.Compiled do
+    if IndexText(LUnit, Result.Compiled) < 0 then
+      Result.Compiled := Result.Compiled + [LUnit];
+  for var LMsg in LFirst.Messages do
+    if LMsg.Kind in [bmWarning, bmHint, bmSetupWarning, bmMissingDir] then
+    begin
+      LSame := False;
+      for var LHad in Result.Messages do
+        if (LHad.Kind = LMsg.Kind) and SameText(LHad.Code, LMsg.Code) and
+          SameText(LHad.FileName, LMsg.FileName) and (LHad.Line = LMsg.Line)
+          and (LHad.Text = LMsg.Text) then
+        begin
+          LSame := True;
+          Break;
+        end;
+      if not LSame then
+        Result.Messages := Result.Messages + [LMsg];
+    end;
 end;
 
 { ---- what is new ------------------------------------------------------------------ }

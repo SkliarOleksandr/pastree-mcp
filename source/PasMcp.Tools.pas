@@ -10147,6 +10147,8 @@ var
   var
     LM: TMcpMember;
     LErrs: Integer;
+    LInternal: string;
+    LAgain: Boolean;
   begin
     LM := R.Spec.Member;
     Result := LM.Name + ' (' + PlatformName(LM.Platform) + IfThen(LM.Config <>
@@ -10173,6 +10175,36 @@ var
     else
       Result := Result + 'FAILED in ' + Seconds(R.Ms) + ', ' +
         Plural(LErrs, 'error');
+    // Built twice (PasMcp.Build): dcc failed, not the code - said, or the
+    // agent hunts an error in a unit the change did not touch (FR.4).
+    if Length(R.InternalErrors) > 0 then
+    begin
+      LInternal := R.InternalErrors[0].Code + ' ' + R.InternalErrors[0].Text;
+      if R.InternalErrors[0].FileName <> '' then
+        LInternal := LInternal + ' in ' + AWs.RelPath(
+          R.InternalErrors[0].FileName) + IfThen(R.InternalErrors[0].Line > 0,
+          ':' + IntToStr(R.InternalErrors[0].Line), '');
+      LAgain := False;
+      for var LMsg in R.Messages do
+        LAgain := LAgain or SameText(LMsg.Code, 'F2084');
+      if R.Ok then
+        Result := Result + sLineBreak + AIndent + Format('built twice: the '
+          + 'first build (%s) stopped at dcc''s internal error %s - the '
+          + 'compiler failing, not the code; the second passed',
+          [Seconds(R.FirstMs), LInternal])
+      else if LAgain then
+        Result := Result + sLineBreak + AIndent + Format('built twice, both '
+          + 'stopped at dcc''s internal error (first: %s) - the compiler '
+          + 'failing on this code, not an error in it: `rebuild: true` '
+          + 'compiles every unit afresh, which clears one that stale .dcu '
+          + 'files cause; one that stays is a compiler defect, worked around '
+          + 'in the unit it names', [LInternal])
+      else
+        Result := Result + sLineBreak + AIndent + Format('built twice: the '
+          + 'first build (%s) stopped at dcc''s internal error %s; the '
+          + 'second got past it - its errors are below',
+          [Seconds(R.FirstMs), LInternal]);
+    end;
     if R.Ok and (R.OutputFile <> '') then
       Result := Result + sLineBreak + AIndent + 'output: ' + R.OutputFile;
     if R.Ran and R.FirstBuild then

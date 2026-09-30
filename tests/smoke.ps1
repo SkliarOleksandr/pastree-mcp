@@ -392,6 +392,31 @@ Remove-Item -Recurse -Force $noProj -ErrorAction SilentlyContinue
 if ($code -ne 2) { Write-Host "FAIL [discovery none] exited with $code, not 2"; $script:failures++ }
 Check 'discovery none' $out @("no .groupproj or .dproj in $(Join-Path $noProj 'sub') or above it up to $noProj\ - pass --project <file>")
 
+# ---- dcc's internal error: built again, and said --------------------------------------
+# F2084 is dcc failing, not the code, and a second build usually passes (FR.4).
+# No code makes dcc fail on demand: PASTREE_MCP_TEST_F2084=N makes the first N
+# builds of the process report one after dcc ran.
+Write-Host '--- CLI, an internal error of dcc'
+function Run-F2084([int]$Fail) {
+    $calls = Join-Path ([IO.Path]::GetTempPath()) ('pastree-mcp-smoke-f2084-' + [Guid]::NewGuid().ToString('N') + '.calls')
+    $buildDir = Join-Path ([IO.Path]::GetTempPath()) ('pastree-mcp-smoke-build-' + [Guid]::NewGuid().ToString('N'))
+    [IO.File]::WriteAllText($calls, "compile {`"member`":`"AppB`"}`n")
+    $env:PASTREE_MCP_TEST_F2084 = "$Fail"
+    $ErrorActionPreference = 'Continue'
+    try { $out = (& $Exe --project $group --log none --build-dir $buildDir --script $calls 2>$null | ForEach-Object { "$_" }) -join "`n" }
+    finally {
+        $ErrorActionPreference = 'Stop'
+        Remove-Item Env:PASTREE_MCP_TEST_F2084
+        Remove-Item -Force $calls -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force $buildDir -ErrorAction SilentlyContinue
+    }
+    return $out
+}
+$out = Run-F2084 1
+Check 'compile internal error once' $out @('compile AppB (Win32): built in', "built twice: the first build (", "stopped at dcc's internal error F2084 Internal Error: TEST1 (PASTREE_MCP_TEST_F2084) in AppB\AppB.dpr - the compiler failing, not the code; the second passed", 'first build here', 'no errors, warnings or hints') @('errors -', 'FAILED')
+$out = Run-F2084 2
+Check 'compile internal error twice' $out @('compile AppB (Win32): FAILED in', "built twice, both stopped at dcc's internal error (first: F2084", '`rebuild: true` compiles every unit afresh', 'errors - 1:', 'F2084 Internal Error: TEST1') @('the second passed')
+
 # ---- 3. MCP over stdio, with an edit in between ------------------------------------
 Write-Host '--- MCP over stdio'
 $copy = Join-Path ([IO.Path]::GetTempPath()) ('pastree-mcp-smoke-' + [Guid]::NewGuid().ToString('N'))
