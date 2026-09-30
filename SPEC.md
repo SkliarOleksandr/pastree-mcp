@@ -695,7 +695,8 @@ gap between the answers and the truth.
 5. The findings left open (10.4): enum values by name and F6.2 - both a
    false "nothing" - are fixed (0.17.0, 0.17.1), F6.4 and F6.3 too
    (0.19.0), the generic ancestor's E2003 (0.19.1) and `source` of
-   overloads (0.20.0), F2084 (0.20.1); then F6.1.
+   overloads (0.20.0), F2084 (0.20.1) and F6.1 (0.20.2, PasTree 0.75.2) -
+   none of 10.4's list is open.
 6. The task comparison of section 8, question 2, scaled up on tasks that
    discriminate (10.4), before any new tool: the pilot's tasks were solved
    by grep as well, so it has not yet said where the tools are enough and
@@ -761,7 +762,7 @@ builds.
 | C2 recall, forms | - | handler lines 100% (6,777 of 6,777); form lines in phase 2's answers 34; `form` rows 99.92% | handler lines unchanged; form lines in phase 2's answers 5,066 (the lines that set a property, sub-properties and item properties included); `form` rows 20,687 of 20,688 - the one after a root's `end`, which dcc drops |
 | C3 precision | >= 98% | 99.9% counting a link of the property's redeclaration chain (86.9% strict), the chain unsaid; `form`: 65 false "fails to load", 13 false "names no component" | 100% by the chain, the chain said; "fails to load" 0; "names no component" 3 - the product's own |
 | C4 robustness | 0 | no crash, no hang in more than 20,000 calls over the phases | the same on the reruns |
-| C5 latency p95 | < 1 s | every tool (worst `callers` 553 ms); 0.9% of calls over 1 s, up to 10.6 s | p95 < 1 s every tool (worst `callers` 511 ms); 0.3% over 1 s; the chain tail 8-10 s -> 1-2 s, but `related assignments` of a republished property still up to 8.1 s |
+| C5 latency p95 | < 1 s | every tool (worst `callers` 553 ms); 0.9% of calls over 1 s, up to 10.6 s | p95 < 1 s every tool (worst `callers` 511 ms); 0.3% over 1 s; the chain tail 8-10 s -> 1-2 s, and `related assignments` of a republished property 8.0 s -> 0.5 s (0.20.2) |
 | C6 size p95 | < 5k tokens | every tool but `outline` (up to 141k in one answer) | `outline` and `form` bounded, 300 rows |
 | C7 notes | every gap said | every cut said; not said: uses in branches not compiled, implementation headers left out, whose property a redeclaration answers for, what a cut left out | said |
 | C8 freshness | identical | 266 of 290 pairs | 290 of 290 |
@@ -799,8 +800,8 @@ its root's `end` - seven property lines dcc drops from the exe.
    widely used VCL property or an own one redeclaring it - a scan per link of
    the redeclaration chain; own symbols stayed under 0.5 s at p95. One pass
    over the closure for the whole chain made it 1-2 s with the same rows -
-   for `references`, `callers` and `impact`; `related assignments` still
-   scans per link (up to 8.1 s).
+   for `references`, `callers` and `impact`, and in 0.20.2 for `related
+   assignments` (8.0 s -> 0.5 s), the last to scan per link.
 6. **What the index takes in later is watched like what it loaded.** Both
    freshness defects (17 and 7 of the 24 unequal pairs) were files that came
    in after the first build: a unit a new `uses` pulled in, a form file
@@ -844,10 +845,13 @@ its root's `end` - seven property lines dcc drops from the exe.
   overloads, virtual and interface dispatch, `with`, forms inherited several
   levels deep, project membership - asked also by a bare name; one run per
   task and arm says what discriminates, not a rate.
-- **Open after the pilot** (found on 0.16.8, not fixed yet):
-  - F6.1: `related assignments` of a property an own class republishes
-    scans the redeclaration chain per link - up to 8.1 s, where
-    `references` of the same property takes 1 s.
+- **Found by the pilot** (on 0.16.8):
+  - F6.1 (fixed in 0.20.2, PasTree 0.75.2): `related assignments` of a
+    property an own class republishes scanned the closure once per link of
+    the redeclaration chain - up to 8.1 s, where `references` of the same
+    property takes 1 s; now one pass for the whole chain, as there. The 86
+    `assignments` calls of the battery: every answer equal, the slowest
+    8.0 s -> 0.49 s, all of them 35.9 s -> 12.6 s.
   - F6.2 (fixed in 0.17.1, PasTree 0.71.1): an open-array constructor
     argument was taken by an overload whose parameter is a string (10.3,
     7): the call listed under the wrong overload and the one it calls
@@ -863,7 +867,7 @@ its root's `end` - seven property lines dcc drops from the exe.
   - F6.4 (fixed in 0.19.0): `form` of a class without a form file of its
     own refused; it shows the ancestor's form the class loads, each event
     bound on the class (9.5).
-- **Open from a field report** (a colleague's session on a branch of the
+- **From a field report** (a colleague's session on a branch of the
   client group, mostly renames; `references` was its main gain): enum
   values by name (fixed, 0.17.0); `diagnostics` reporting E2003 on a member
   reached through a generic ancestor's type parameter, which dcc compiles
