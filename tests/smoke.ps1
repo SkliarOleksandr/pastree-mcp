@@ -66,7 +66,7 @@ function Block($Blocks, [string]$Prefix) {
 # ---- 1. shared policy ---------------------------------------------------------
 Write-Host '--- CLI, shared policy'
 $b = Run-Cli @()
-Check 'status' (Block $b 'status') @('member AppA', 'member AppB', 'member AppF', 'analysis 0:', 'every `uses` name resolved') @('analysis 1:')
+Check 'status' (Block $b 'status') @('member AppA', 'member AppB', 'member AppF', 'analysis 0:', 'every `uses` name resolved', 'server: pastree-mcp ', '; pid ', 'log: none (stderr only)') @('analysis 1:', 'added by --also')
 Check 'find' (Block $b 'find {"query":"TCircle"}') @('Shared\uShapes.pas:21  TCircle (class)')
 Check 'find wildcard' (Block $b 'find {"query":"*Circ*"') @('AppB\uAppB.pas:11  TBigCircle', 'Shared\uShapes.pas:21  TCircle')
 # A declaration written over several lines is one row, whole - or, longer than
@@ -117,6 +117,13 @@ Check 'source one overload' (Block $b 'source {"symbol":"TDerived.Add"') @('TDer
 Check 'source namesakes' (Block $b 'source {"symbol":"Add"}') @('`Add` is ambiguous', 'AppA\uMembers.pas:35  TDerived.Add') @('implemented at')
 # Side by side, each external overload with its own import line - the
 # INT_PTR one showed the WPARAM one's (the RTL's lines are not pinned).
+# `lines`: the piece of a routine wanted, by file line numbers.
+Check 'source lines' (Block $b 'source {"symbol":"RunB", "lines":"29-31"}') @('RunB (procedure) implemented at AppB\uAppB.pas:26-32', '(lines 29-31 of it, as `lines` asks)', "29  begin`n30    LSquare := TSquare.Create(4);`n31    Writeln") @('28  ', '32  end;', 'more lines')
+Check 'source lines to' (Block $b 'source {"symbol":"RunB", "lines":"-26"}') @('(lines 25-26 of it', "25  // Project B's run", '26  procedure RunB;') @('27  ')
+Check 'source lines limit' (Block $b 'source {"symbol":"RunB", "lines":"28-"') @('(lines 28-32 of it', '29  begin', '... 3 more lines, to line 32 (raise `limit`)') @('30  ')
+Check 'source lines outside' (Block $b 'source {"symbol":"RunB", "lines":"100-120"}') @('RunB (procedure) implemented at AppB\uAppB.pas:26-32', '(`lines` 100-120 is outside it)') @('26  procedure')
+Check 'source lines bad' (Block $b 'source {"symbol":"RunB", "lines":"31-29"}') @('`lines` 31-29: give file line numbers as the answers number them')
+Check 'source lines overloads' (Block $b 'source {"symbol":"TBase.Add", "lines"') @('TBase.Add - 2 overloads:', '(line 77 of it', '77    Inc(FCount, AValue);', '(`lines` 77 is outside it)') @('76  ', '82  ')
 Check 'source external overloads' (Block $b 'source {"symbol":"Winapi.Windows.SendMessage"}') @('SendMessage - 2 overloads:', '(external - `function SendMessage(hWnd: HWND; Msg: UINT; wParam: WPARAM;', '(external - `function SendMessage(hWnd: HWND; Msg: UINT; wParam: INT_PTR;')
 # members: by the type declaring each, under its visibility section. Seen from
 # TDerived's own methods: its ancestor's private field (same unit) but not the
@@ -423,15 +430,75 @@ Remove-Item -Recurse -Force $noProj -ErrorAction SilentlyContinue
 if ($code -ne 2) { Write-Host "FAIL [discovery none] exited with $code, not 2"; $script:failures++ }
 Check 'discovery none' $out @("no .groupproj or .dproj in $(Join-Path $noProj 'sub') or above it up to $noProj\ - pass --project <file>")
 
+# ---- a project outside the group: --also ----------------------------------------------
+# The client group's tests are a project no .groupproj lists: indexed, checked
+# and built with the group when the server is given it. Outside the group's
+# directory here, so its files are own through the extra root.
+Write-Host '--- CLI, a project outside the group'
+$alsoCalls = Join-Path ([IO.Path]::GetTempPath()) ('pastree-mcp-smoke-also-' + [Guid]::NewGuid().ToString('N') + '.calls')
+$alsoBuild = Join-Path ([IO.Path]::GetTempPath()) ('pastree-mcp-smoke-build-' + [Guid]::NewGuid().ToString('N'))
+[IO.File]::WriteAllText($alsoCalls, "status`nfind {`"query`":`"CheckAreas`"}`nreferences {`"symbol`":`"TotalArea`"}`ndiagnostics {`"file`":`"../extra/AppT/uAppT.pas`"}`ncompile {`"member`":`"AppT`"}`n")
+$ErrorActionPreference = 'Continue'
+try { $out = (& $Exe --project $group --also '..\extra\AppT\AppT.dpr' --log none --build-dir $alsoBuild --script $alsoCalls 2>$null | ForEach-Object { "$_" }) -join "`n" }
+finally {
+    $ErrorActionPreference = 'Stop'
+    Remove-Item -Force $alsoCalls -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force $alsoBuild -ErrorAction SilentlyContinue
+}
+Check 'also status' $out @('member AppT: Win32 (bare project file), 0 listed files, analysis 0 - not in the group, added by --also (', 'member AppF')
+Check 'also find' $out @('uAppT.pas:8  CheckAreas (procedure)')
+Check 'also references' $out @('uAppT.pas', '  CheckAreas', '17  if TotalArea([TCircle.Create(1)]) <= 0 then')
+Check 'also diagnostics' $out @('no diagnostics')
+Check 'also compile' $out @('compile AppT (Win32): built in', 'AppT.exe - built to check the compile')
+$ErrorActionPreference = 'Continue'
+$out = (& $Exe --project $group --also 'nowhere\AppX.dpr' --log none --call status 2>&1 | ForEach-Object { "$_" }) -join "`n"
+$code = $LASTEXITCODE
+$ErrorActionPreference = 'Stop'
+if ($code -eq 0) { Write-Host "FAIL [also missing] exited with 0"; $script:failures++ }
+Check 'also missing' $out @('no such project (--also): ', 'nowhere\AppX.dpr')
+
+# ---- one --log for two servers ---------------------------------------------------------
+# The first holds the file for its life; the second logs beside it under a name
+# of its own and says so - it had no log at all.
+Write-Host '--- two servers, one --log'
+$logFile = Join-Path ([IO.Path]::GetTempPath()) ('pastree-mcp-smoke-' + [Guid]::NewGuid().ToString('N') + '.log')
+$psi1 = New-Object Diagnostics.ProcessStartInfo
+$psi1.FileName = $Exe
+$psi1.Arguments = '--project "' + $group + '" --log "' + $logFile + '"'
+$psi1.UseShellExecute = $false
+$psi1.RedirectStandardInput = $true
+$psi1.RedirectStandardOutput = $true
+$psi1.RedirectStandardError = $true
+$first = [Diagnostics.Process]::Start($psi1)
+$null = $first.StandardError.ReadToEndAsync()
+try {
+    $deadline = (Get-Date).AddSeconds(20)
+    while (-not (Test-Path $logFile) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 100 }
+    $ErrorActionPreference = 'Continue'
+    $out = (& $Exe --project $group --log $logFile --call status 2>&1 | ForEach-Object { "$_" }) -join "`n"
+    $ErrorActionPreference = 'Stop'
+    $second = [IO.Path]::ChangeExtension($logFile, $null).TrimEnd('.') + '-'
+    Check 'log held' $out @("cannot open log file $logFile (", 'held by another server? Logging to ' + $second, 'log: ' + $second, 'server: pastree-mcp ', '; pid ')
+    $alt = Get-ChildItem ($second + '*.log') | Select-Object -First 1
+    if ($null -eq $alt) { Write-Host 'FAIL [log held] no second log file'; $script:failures++ }
+    else { Check 'log held file' ([IO.File]::ReadAllText($alt.FullName)) @('pastree-mcp ', 'project ') }
+}
+finally {
+    $first.StandardInput.Close()
+    if (-not $first.WaitForExit(10000)) { $first.Kill() }
+    Remove-Item -Force $logFile -ErrorAction SilentlyContinue
+    Get-ChildItem ([IO.Path]::ChangeExtension($logFile, $null).TrimEnd('.') + '-*.log') -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+}
+
 # ---- dcc's internal error: built again, and said --------------------------------------
 # F2084 is dcc failing, not the code, and a second build usually passes (FR.4).
 # No code makes dcc fail on demand: PASTREE_MCP_TEST_F2084=N makes the first N
 # builds of the process report one after dcc ran.
 Write-Host '--- CLI, an internal error of dcc'
-function Run-F2084([int]$Fail) {
+function Run-F2084([int]$Fail, [int]$Compiles = 1) {
     $calls = Join-Path ([IO.Path]::GetTempPath()) ('pastree-mcp-smoke-f2084-' + [Guid]::NewGuid().ToString('N') + '.calls')
     $buildDir = Join-Path ([IO.Path]::GetTempPath()) ('pastree-mcp-smoke-build-' + [Guid]::NewGuid().ToString('N'))
-    [IO.File]::WriteAllText($calls, "compile {`"member`":`"AppB`"}`n")
+    [IO.File]::WriteAllText($calls, ("compile {`"member`":`"AppB`"}`n" * $Compiles))
     $env:PASTREE_MCP_TEST_F2084 = "$Fail"
     $ErrorActionPreference = 'Continue'
     try { $out = (& $Exe --project $group --log none --build-dir $buildDir --script $calls 2>$null | ForEach-Object { "$_" }) -join "`n" }
@@ -447,6 +514,9 @@ $out = Run-F2084 1
 Check 'compile internal error once' $out @('compile AppB (Win32): built in', "built twice: the first build (", "stopped at dcc's internal error F2084 Internal Error: TEST1 (PASTREE_MCP_TEST_F2084) in AppB\AppB.dpr - the compiler failing, not the code; the second passed", 'first build here', 'no errors, warnings or hints') @('errors -', 'FAILED')
 $out = Run-F2084 2
 Check 'compile internal error twice' $out @('compile AppB (Win32): FAILED in', "built twice, both stopped at dcc's internal error (first: F2084", '`rebuild: true` compiles every unit afresh', 'errors - 1:', 'F2084 Internal Error: TEST1') @('the second passed')
+# Both builds stopped at it: the next compile stopping at the same one builds once.
+$out = Run-F2084 3 2
+Check 'compile internal error known' $out @("built twice, both stopped at dcc's internal error", "stopped at dcc's internal error F2084 Internal Error: TEST1 (PASTREE_MCP_TEST_F2084) in AppB\AppB.dpr, as the compile at ", 'not built twice this time') @('the second passed')
 
 # ---- 3. MCP over stdio, with an edit in between ------------------------------------
 Write-Host '--- MCP over stdio'

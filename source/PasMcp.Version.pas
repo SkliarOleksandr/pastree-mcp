@@ -16,7 +16,7 @@ unit PasMcp.Version;
 interface
 
 const
-  PasTreeMcpVersion = '0.22.0';
+  PasTreeMcpVersion = '0.23.0';
   cMinPasTreeVersion = '0.76.1';
 
 // 'pastree-mcp 0.1.0 (PasTree 0.50.1), built 2026-09-25 15:00' - the first
@@ -26,16 +26,25 @@ function PasMcpVersionBanner: string;
 // Raises when the linked PasTree is older than cMinPasTreeVersion.
 procedure CheckPasTreeVersion;
 
+// When this process started - `status` names it beside the pid.
+function ProcessStarted: TDateTime;
+
 implementation
 
 uses
   System.SysUtils,
   PasTree.Version;
 
+var
+  GStarted: TDateTime;
+  // Read at startup: build.bat renames a running exe aside and puts the new
+  // one at its path, so read later it would be the next build's stamp.
+  GBuiltOn: string;
+
 function PasMcpVersionBanner: string;
 begin
   Result := Format('pastree-mcp %s (PasTree %s), built %s',
-    [PasTreeMcpVersion, PasTreeVersion, BinaryBuiltOn(ParamStr(0))]);
+    [PasTreeMcpVersion, PasTreeVersion, GBuiltOn]);
 end;
 
 procedure CheckPasTreeVersion;
@@ -45,5 +54,14 @@ begin
       'PasTree %s is older than the required %s - update ../object-pascal-tree',
       [PasTreeVersion, cMinPasTreeVersion]);
 end;
+
+function ProcessStarted: TDateTime;
+begin
+  Result := GStarted;
+end;
+
+initialization
+  GStarted := Now;
+  GBuiltOn := BinaryBuiltOn(ParamStr(0));
 
 end.

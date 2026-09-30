@@ -2581,12 +2581,58 @@ begin
   end;
 end;
 
+type
+  // `source`'s `lines`: file line numbers, 0 = open at that end.
+  TLineRange = record
+    First, Last: Integer;
+    Text: string;   // as given, for the answer
+  end;
+
+// '40-80', '40-' (to the end), '-80' (from the start) or '40' (one line).
+function ParseLineRange(const AText: string): TLineRange;
+var
+  LDash: Integer;
+  LText: string;
+begin
+  Result := Default(TLineRange);
+  LText := StringReplace(AText, ' ', '', [rfReplaceAll]);
+  Result.Text := LText;
+  if LText = '' then
+    Exit;
+  LDash := Pos('-', LText);
+  if LDash = 0 then
+  begin
+    Result.First := StrToIntDef(LText, -1);
+    Result.Last := Result.First;
+  end
+  else
+  begin
+    Result.First := StrToIntDef(Copy(LText, 1, LDash - 1), -1);
+    if LDash = 1 then
+      Result.First := 0;
+    Result.Last := StrToIntDef(Copy(LText, LDash + 1, MaxInt), -1);
+    if LDash = Length(LText) then
+      Result.Last := 0;
+  end;
+  if (Result.First < 0) or (Result.Last < 0) or ((Result.Last > 0) and
+    (Result.First > Result.Last)) or ((Result.First = 0) and (Result.Last = 0))
+  then
+    raise EToolError.CreateFmt('`lines` %s: give file line numbers as the '
+      + 'answers number them - 40-80, 40- to the end, -80 from the start, or '
+      + '40', [AText]);
+end;
+
 // One part - a declaration or an implementation - under its heading, the
 // lines numbered as in the file, at most ALimit of them; the number shown.
+// ARange: only the part's lines within it (file line numbers, 0 = open) -
+// the piece of a long routine an agent came for, by the numbers another
+// answer gave it, instead of a file read that must guess where it ends.
 function AppendPart(ASb: TStringBuilder; AWs: TMcpWorkspace; LM: TPasSemaModel;
-  ANode: Integer; const AHead: string; ALimit: Integer): Integer;
+  ANode: Integer; const AHead: string; ALimit: Integer;
+  const ARange: TLineRange): Integer;
 var
-  LFileId, LFrom, LAt, LTo, LLast, LWidth: Integer;
+  LFileId, LFrom, LAt, LTo, LLast, LWidth, LEnd: Integer;
+  LRanged: Boolean;
 begin
   Result := 0;
   if not DeclLines(LM, ANode, LFileId, LFrom, LAt, LTo) then
@@ -2597,20 +2643,35 @@ begin
   ASb.AppendLine(Format('%s at %s:%s', [AHead,
     AWs.RelPath(LM.Tree.Source.FileNames[LFileId]),
     IfThen(LTo > LAt, Format('%d-%d', [LAt, LTo]), IntToStr(LAt))]));
-  if LAt - LFrom > MAX_COMMENT_LINES then
+  LRanged := (ARange.First > 0) or (ARange.Last > 0);
+  LEnd := LTo;
+  if LRanged then
+  begin
+    LFrom := Max(LFrom, ARange.First);
+    if ARange.Last > 0 then
+      LEnd := Min(LTo, ARange.Last);
+    if LFrom > LEnd then
+    begin
+      ASb.AppendLine(Format('(`lines` %s is outside it)', [ARange.Text]));
+      Exit;
+    end;
+    ASb.AppendLine(Format('(%s of it, as `lines` asks)', [IfThen(LFrom = LEnd,
+      Format('line %d', [LFrom]), Format('lines %d-%d', [LFrom, LEnd]))]));
+  end
+  else if LAt - LFrom > MAX_COMMENT_LINES then
   begin
     ASb.AppendLine(Format('(%d comment lines above it, from line %d)',
       [LAt - LFrom, LFrom]));
     LFrom := LAt;
   end;
-  LLast := Min(LTo, LFrom + ALimit - 1);
+  LLast := Min(LEnd, LFrom + ALimit - 1);
   LWidth := Length(IntToStr(LLast));
   for var LLine := LFrom to LLast do
     ASb.AppendLine(Format('%*d  %s', [LWidth, LLine,
       LM.Tree.Source.Files[LFileId].LineText(LLine)]));
-  if LTo > LLast then
+  if LEnd > LLast then
     ASb.AppendLine(Format('... %d more lines, to line %d (raise `limit`)',
-      [LTo - LLast, LTo]));
+      [LEnd - LLast, LEnd]));
   Result := Max(0, LLast - LFrom + 1);
 end;
 
@@ -2620,9 +2681,11 @@ end;
   whole declaration, a constant with its value - where `definition` +
   `context` makes the agent guess how many lines a routine has. The lines
   come from the model's own token stream, so their numbers are the ones
-  every other answer uses. ALimit caps each part; the lines shown. }
+  every other answer uses. ALimit caps each part, ARange cuts it; the
+  lines shown. }
 function AppendSourceOf(ASb: TStringBuilder; AWs: TMcpWorkspace;
-  const AT: TTarget; APart, ATitle: string; ALimit: Integer): Integer;
+  const AT: TTarget; APart, ATitle: string; ALimit: Integer;
+  const ARange: TLineRange): Integer;
 var
   LMid, LSym, LDeclNode, LImplNode, LDm, LFileId: Integer;
   LA: TMcpAnalysis;
@@ -2707,7 +2770,7 @@ begin
   if LShowDecl then
   begin
     Inc(Result, AppendPart(ASb, AWs, LM, LDeclNode, ATitle + 'declared',
-      ALimit));
+      ALimit, ARange));
     ATitle := '';
     if LIsRoutine and (LImplNode = NIL_NODE) then
       ASb.AppendLine('(' + NoBodyNote(LM, LDeclNode) + ')')
@@ -2716,7 +2779,7 @@ begin
   end;
   if LShowImpl then
     Inc(Result, AppendPart(ASb, AWs, LImplM, LImplNode, ATitle + IfThen(LSame,
-      'declared', 'implemented'), ALimit));
+      'declared', 'implemented'), ALimit, ARange));
 end;
 
 // The exact text of one declaration - or, for a name whose candidates are
@@ -2727,6 +2790,7 @@ var
   LCands: TArray<TTarget>;
   LPart: string;
   LLimit, LLeft, LNext: Integer;
+  LRange: TLineRange;
   LSb: TStringBuilder;
 begin
   LPart := LowerCase(ArgStr(AArgs, 'part'));
@@ -2734,12 +2798,13 @@ begin
      (LPart <> 'both') then
     raise EToolError.Create('`part` is impl, decl or both');
   LLimit := EnsureRange(ArgInt(AArgs, 'limit', 300), 1, 5000);
+  LRange := ParseLineRange(ArgStr(AArgs, 'lines'));
   LCands := ResolveOneOrOverloads(AWs, AArgs);
   LSb := TStringBuilder.Create;
   try
     if Length(LCands) = 1 then
       AppendSourceOf(LSb, AWs, LCands[0], LPart, Format('%s (%s) ',
-        [LCands[0].Name, LCands[0].Head]), LLimit)
+        [LCands[0].Name, LCands[0].Head]), LLimit, LRange)
     else
     begin
       // Each overload told apart by its declaration line, as in `callers`;
@@ -2753,7 +2818,7 @@ begin
         LSb.AppendLine;
         Dec(LLeft, AppendSourceOf(LSb, AWs, LCands[LNext], LPart,
           Format('%s (%s, line %d) ', [LCands[LNext].Name, LCands[LNext].Head,
-          LCands[LNext].DeclLine]), LLeft));
+          LCands[LNext].DeclLine]), LLeft, LRange));
         Inc(LNext);
       end;
       if LNext <= High(LCands) then
@@ -2771,20 +2836,149 @@ begin
   end;
 end;
 
+// The models of LA whose uses reach ADeclMid, directly or through other
+// units, ADeclMid itself included: those alone can name what it declares.
+function UsersOf(LA: TMcpAnalysis; ADeclMid: Integer): TArray<Boolean>;
+var
+  LStart, LEdges, LFill: TArray<Integer>;
+  LQueue: TList<Integer>;
+  LTo, LN: Integer;
+  LM: TPasSemaModel;
+begin
+  LN := LA.Proj.ModelCount;
+  SetLength(Result, LN);
+  if (ADeclMid < 0) or (ADeclMid >= LN) then
+    Exit;
+  // Every unit uses System and SysInit without naming them.
+  if MatchText(LA.Proj.Model(ADeclMid).UnitNameLower, ['system', 'sysinit'])
+  then
+  begin
+    for var LMid := 0 to LN - 1 do
+      Result[LMid] := True;
+    Exit;
+  end;
+  // The reverse uses graph, compressed: the users of unit U are
+  // LEdges[LStart[U] .. LStart[U + 1] - 1].
+  SetLength(LStart, LN + 1);
+  for var LMid := 0 to LN - 1 do
+  begin
+    LM := LA.Proj.Model(LMid);
+    for var LU := 0 to High(LM.UsesList) do
+    begin
+      LTo := LM.UsesList[LU].UnitId;
+      if (LTo >= 0) and (LTo < LN) then
+        Inc(LStart[LTo + 1]);
+    end;
+  end;
+  for var LI := 1 to LN do
+    Inc(LStart[LI], LStart[LI - 1]);
+  SetLength(LEdges, LStart[LN]);
+  LFill := Copy(LStart);
+  for var LMid := 0 to LN - 1 do
+  begin
+    LM := LA.Proj.Model(LMid);
+    for var LU := 0 to High(LM.UsesList) do
+    begin
+      LTo := LM.UsesList[LU].UnitId;
+      if (LTo >= 0) and (LTo < LN) then
+      begin
+        LEdges[LFill[LTo]] := LMid;
+        Inc(LFill[LTo]);
+      end;
+    end;
+  end;
+  LQueue := TList<Integer>.Create;
+  try
+    Result[ADeclMid] := True;
+    LQueue.Add(ADeclMid);
+    LTo := 0;
+    while LTo < LQueue.Count do
+    begin
+      for var LE := LStart[LQueue[LTo]] to LStart[LQueue[LTo] + 1] - 1 do
+        if not Result[LEdges[LE]] then
+        begin
+          Result[LEdges[LE]] := True;
+          LQueue.Add(LEdges[LE]);
+        end;
+      Inc(LTo);
+    end;
+  finally
+    LQueue.Free;
+  end;
+end;
+
+type
+  // A word found in an uncompiled branch: the include file index of the
+  // model, and the offset in that file.
+  TSkippedWord = record
+    Fi, Offset: Integer;
+  end;
+
+// Where AWord (lower case) is written as a whole word in the branches of LM
+// the configuration does not compile, in the files of the group's tree - an
+// include file of a library's is not the group's to edit. AFirst: the first
+// place only.
+function SkippedWords(AWs: TMcpWorkspace; LM: TPasSemaModel;
+  const AWord: string; AFirst: Boolean): TArray<TSkippedWord>;
+var
+  LText: string;
+  LAt: Integer;
+  LHit: TSkippedWord;
+begin
+  Result := nil;
+  for var LFi := 0 to Min(High(LM.Tree.Source.Skipped),
+    High(LM.Tree.Source.Files)) do
+  begin
+    if (Length(LM.Tree.Source.Skipped[LFi]) = 0) or not AWs.IsOwnFile(
+      LM.Tree.Source.FileNames[LFi]) then
+      Continue;
+    for var LR in LM.Tree.Source.Skipped[LFi] do
+    begin
+      LText := LowerCase(Copy(LM.Tree.Source.Files[LFi].Source, LR.Start + 1,
+        LR.EndPos - LR.Start));
+      LAt := Pos(AWord, LText);
+      while LAt > 0 do
+      begin
+        if ((LAt = 1) or not IsIdentChar(LText[LAt - 1])) and
+           ((LAt + Length(AWord) > Length(LText)) or
+           not IsIdentChar(LText[LAt + Length(AWord)])) then
+        begin
+          LHit.Fi := LFi;
+          LHit.Offset := LR.Start + LAt - 1;
+          Result := Result + [LHit];
+          if AFirst then
+            Exit;
+        end;
+        LAt := PosEx(AWord, LText, LAt + 1);
+      end;
+    end;
+  end;
+end;
+
 // The lines of the group's own files where ANameLower is written as a word
 // inside a conditional branch the analyzed configuration does not compile
 // ({$IFDEF DEMO}, the {$ELSE} of a {$IFDEF DEBUG}) - not resolved, so maybe a
 // namesake, but an edit made from the answer never reaches them, and the
 // build that compiles them breaks. 'file:line', each line once.
-function InactiveMentions(AWs: TMcpWorkspace;
-  const ANameLower: string): TArray<string>;
+//
+// Only in a unit that could name the symbol - the unit declaring it
+// (ADeclMids: its model by analysis index, < 0 when not in that analysis),
+// one whose uses reach it, or one whose uncompiled text names that unit (a
+// uses clause in such a branch) - and not in an include file from outside
+// the group's tree. Without that, `Create` of one class counted 196 lines
+// across the client group and `TStream.Read` 127: namesakes in type library
+// imports, vendored sources and a library's .inc, drowning the few that
+// matter.
+function InactiveMentions(AWs: TMcpWorkspace; const ANameLower: string;
+  const ADeclMids: TArray<Integer>): TArray<string>;
 var
   LSeen: TDictionary<string, Boolean>;
   LM: TPasSemaModel;
   LTS: TPasTokenStream;
-  LText: string;
-  LAt, LLine, LCol: Integer;
-  LKey: string;
+  LLine, LCol, LDecl: Integer;
+  LKey, LDeclUnit: string;
+  LUsers: TArray<Boolean>;
+  LAsked: Boolean;
 begin
   Result := nil;
   if Length(ANameLower) < 3 then
@@ -2792,6 +2986,13 @@ begin
   LSeen := TDictionary<string, Boolean>.Create;
   try
     for var LA in AWs.Analyses do
+    begin
+      if (LA.Proj = nil) or (LA.Index >= Length(ADeclMids)) or
+        (ADeclMids[LA.Index] < 0) then
+        Continue;
+      LDecl := ADeclMids[LA.Index];
+      LDeclUnit := LA.Proj.Model(LDecl).UnitNameLower;
+      LUsers := nil;
       for var LMid := 0 to LA.Proj.ModelCount - 1 do
       begin
         if not AWs.IsOwnFile(LA.Proj.ModelFile(LMid)) then
@@ -2799,38 +3000,31 @@ begin
         LM := LA.Proj.Model(LMid);
         if LM.Demoted then
           Continue;
-        for var LFi := 0 to Min(High(LM.Tree.Source.Skipped),
-          High(LM.Tree.Source.Files)) do
+        LAsked := False;
+        for var LHit in SkippedWords(AWs, LM, ANameLower, False) do
         begin
-          if Length(LM.Tree.Source.Skipped[LFi]) = 0 then
+          LTS := LM.Tree.Source.Files[LHit.Fi];
+          LTS.OffsetToLineCol(LHit.Offset, LLine, LCol);
+          // A word in a comment or a string there is text, not a use.
+          if FindWord(LTS.LineText(LLine), ANameLower) <> LCol then
             Continue;
-          LTS := LM.Tree.Source.Files[LFi];
-          for var LR in LM.Tree.Source.Skipped[LFi] do
+          if not LAsked then
           begin
-            LText := LowerCase(Copy(LTS.Source, LR.Start + 1,
-              LR.EndPos - LR.Start));
-            LAt := Pos(ANameLower, LText);
-            while LAt > 0 do
-            begin
-              if ((LAt = 1) or not IsIdentChar(LText[LAt - 1])) and
-                 ((LAt + Length(ANameLower) > Length(LText)) or
-                 not IsIdentChar(LText[LAt + Length(ANameLower)])) then
-              begin
-                LTS.OffsetToLineCol(LR.Start + LAt - 1, LLine, LCol);
-                // A word in a comment or a string there is text, not a use.
-                if FindWord(LTS.LineText(LLine), ANameLower) = LCol then
-                begin
-                  LKey := Format('%s:%d', [AWs.RelPath(
-                    LM.Tree.Source.FileNames[LFi]), LLine]);
-                  if LSeen.TryAdd(LowerCase(LKey), True) then
-                    Result := Result + [LKey];
-                end;
-              end;
-              LAt := PosEx(ANameLower, LText, LAt + 1);
-            end;
+            // Asked only of a unit that writes the name: most never do.
+            if LUsers = nil then
+              LUsers := UsersOf(LA, LDecl);
+            if not LUsers[LMid] and (Length(SkippedWords(AWs, LM, LDeclUnit,
+              True)) = 0) then
+              Break;
+            LAsked := True;
           end;
+          LKey := Format('%s:%d', [AWs.RelPath(LM.Tree.Source.FileNames[
+            LHit.Fi]), LLine]);
+          if LSeen.TryAdd(LowerCase(LKey), True) then
+            Result := Result + [LKey];
         end;
       end;
+    end;
   finally
     LSeen.Free;
   end;
@@ -2988,6 +3182,7 @@ var
   LPlainKeys, LHeaderSeen: TDictionary<string, Boolean>;
   LHeaders: TArray<TPasRefHit>;
   LInactive: TArray<string>;
+  LDeclMids: TArray<Integer>;
   LVarX: TSemaXType;
   LTargets: TArray<TTarget>;
   LCodeRows: TArray<Integer>;
@@ -3138,8 +3333,11 @@ begin
     end;
     if LT.Kind = tkSymbol then
     begin
+      LDeclMids := nil;
+      for var LOne in LT.Ids do
+        LDeclMids := LDeclMids + [LOne.Mid];
       LInactive := InactiveMentions(AWs, LowerCase(Copy(LT.Name,
-        LastDelimiter('.', LT.Name) + 1, MaxInt)));
+        LastDelimiter('.', LT.Name) + 1, MaxInt)), LDeclMids);
       if Length(LInactive) > 0 then
         LSb.AppendLine(Format('(in branches this configuration does not compile the name is '
           + 'written on %s more, none resolved - a namesake, or a use an '
@@ -10382,7 +10580,12 @@ var
       LAgain := False;
       for var LMsg in R.Messages do
         LAgain := LAgain or SameText(LMsg.Code, 'F2084');
-      if R.Ok then
+      if R.KnownSince > 0 then
+        Result := Result + sLineBreak + AIndent + Format('stopped at dcc''s '
+          + 'internal error %s, as the compile at %s did in both its builds - '
+          + 'not built twice this time: `rebuild: true` compiles every unit '
+          + 'afresh', [LInternal, FormatDateTime('hh:nn', R.KnownSince)])
+      else if R.Ok then
         Result := Result + sLineBreak + AIndent + Format('built twice: the '
           + 'first build (%s) stopped at dcc''s internal error %s - the '
           + 'compiler failing, not the code; the second passed',
@@ -10399,9 +10602,18 @@ var
           + 'first build (%s) stopped at dcc''s internal error %s; the '
           + 'second got past it - its errors are below',
           [Seconds(R.FirstMs), LInternal]);
+      if Length(R.DroppedDcus) > 0 then
+        Result := Result + ' (the second without the old ' + string.Join(', ',
+          R.DroppedDcus) + ')';
     end;
+    // An agent ran a COM server built here and a system dialog came up: the
+    // DLLs, configuration and data it loads sit beside the project's own
+    // output, not in this directory.
     if R.Ok and (R.OutputFile <> '') then
-      Result := Result + sLineBreak + AIndent + 'output: ' + R.OutputFile;
+      Result := Result + sLineBreak + AIndent + 'output: ' + R.OutputFile +
+        IfThen(SameText(TPath.GetExtension(R.OutputFile), '.exe'),
+        ' - built to check the compile; not beside the files the project''s '
+        + 'own output has, so run it only if it is a console test runner');
     if R.Ran and R.FirstBuild then
     begin
       if R.SeededFrom <> '' then
@@ -10763,13 +10975,18 @@ const
     + 'its end, a type''s whole declaration, a constant with its value - '
     + 'numbered as in the file, with the comment written directly above it. '
     + 'The name of an overloaded routine shows each overload. '
+    + '`lines` cuts it to the piece wanted - by the line numbers another '
+    + 'answer gave (a caller row, an error) or its first call showed. '
     + 'Use it instead of reading a file at a guessed offset.",'
     + '"inputSchema":{"type":"object","properties":{' + TARGET_PROPS + ','
     + '"part":{"type":"string","enum":["impl","decl","both"],"description":'
     + '"For a routine: its implementation (the default when it has one), its '
     + 'declaration, or both"},'
     + '"limit":{"type":"integer","description":"Max lines per part (default '
-    + '300); over all the overloads when a name has several"}}}},' +
+    + '300); over all the overloads when a name has several"},'
+    + '"lines":{"type":"string","description":"Only these lines of it, '
+    + 'numbered as in the file: 40-80, 40- (to its end), -80 (from its '
+    + 'start) or 40"}}}},' +
 
     '{"name":"members","description":"What can be used on a class, record '
     + 'or interface, inherited members included - instead of an outline per '
@@ -10885,8 +11102,9 @@ const
     + 'member''s previous compile (the old ones are counted). With no '
     + 'arguments it builds the members of the group that compile the files '
     + 'changed this session. Everything is written to a directory of the '
-    + 'server''s own (the answer names the exe it built, to run tests '
-    + 'against): the project''s output, its .dcu files and the source tree '
+    + 'server''s own (the answer names the exe it built - a build '
+    + 'check, not a copy to run: a console test runner may run from there, an '
+    + 'application or server misses the files beside the project''s own output): the project''s output, its .dcu files and the source tree '
     + 'are not touched, and pre- and post-build events are not run. Takes '
     + 'seconds for a small change, minutes for a first build or a rebuild of '
     + 'a large member - the other tools answer meanwhile, and cancelling the '

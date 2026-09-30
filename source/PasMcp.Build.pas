@@ -44,9 +44,13 @@ unit PasMcp.Build;
     caller run on that one.
   - A build that stops at dcc's own internal error (F2084 Internal Error,
     nothing else wrong) is run once more: the compiler failing, not the
-    code, and a second Make - over the .dcu files the first one wrote -
-    usually passes (field report FR.4). The answer is the second build's,
-    with the first one's error said beside it.
+    code, and a second Make - over the .dcu files the first one wrote, less
+    those of the units the error names - usually passes (field report
+    FR.4). The answer is the second build's, with the first one's error
+    said beside it. When the second stops at it too, the build directory
+    keeps a note, and the next compile stopping at the same error does not
+    build twice: on the client group's COM server it came back on every
+    compile, and the retry was a whole build more each time.
 
   What is new (CompareWithBaseline): with Make, dcc reports a unit's warnings
   only when it recompiles it, so the comparison is per unit. A unit this
@@ -135,6 +139,12 @@ type
     // (F2084) after FirstMs; the rest of the record is the second build's.
     InternalErrors: TArray<TBuildMsg>;
     FirstMs: Int64;
+    // The .dcu files the second build deleted first: those of the units the
+    // internal error names.
+    DroppedDcus: TArray<string>;
+    // Not built twice: the previous compile here stopped at the same internal
+    // error in both builds, at this time. InternalErrors is this build's.
+    KnownSince: TDateTime;
   end;
 
 var
@@ -191,6 +201,7 @@ const
   BASELINE_FILE = 'diagnostics.txt';
   BASELINE_HEADER = '# pastree-mcp compile baseline 1';
   PROBE_FILE = 'probe.txt';
+  INTERNAL_FILE = 'internal-error.txt';
 
 { ---- TBuildCancel ------------------------------------------------------------- }
 
@@ -895,8 +906,11 @@ begin
     StrToIntDef(GetEnvironmentVariable(TEST_F2084_VAR), 0);
 end;
 
+// ADropDcus: .dcu files of the member's dcu directory to delete first, under
+// the build's lock (the retry after an internal error).
 function BuildOnce(const ASpec: TBuildSpec; ARebuild: Boolean;
-  const AProgress: TProc<string>; ACancel: TBuildCancel): TBuildResult;
+  const AProgress: TProc<string>; ACancel: TBuildCancel;
+  const ADropDcus: TArray<string> = nil): TBuildResult;
 var
   LM: TMcpMember;
   LEnv: TStringList;
@@ -987,6 +1001,12 @@ begin
       if ARebuild then
         for var LFile in TDirectory.GetFiles(LDcuDir, '*.dcu') do
           TFile.Delete(LFile);
+      for var LDrop in ADropDcus do
+        if TFile.Exists(TPath.Combine(LDcuDir, LDrop)) then
+        begin
+          TFile.Delete(TPath.Combine(LDcuDir, LDrop));
+          Result.DroppedDcus := Result.DroppedDcus + [LDrop];
+        end;
     except
       on E: Exception do
       begin
@@ -1199,26 +1219,115 @@ begin
     end;
 end;
 
+// The .dcu file names of the units an internal error names ('' for the
+// program or package itself, which has none), and those errors as one key:
+// the code and the files, not the text - an access violation's address
+// differs from build to build.
+function InternalErrorUnits(const AR: TBuildResult;
+  out AKey: string): TArray<string>;
+var
+  LDcu: string;
+begin
+  Result := nil;
+  AKey := '';
+  for var LMsg in AR.Messages do
+    if SameText(LMsg.Code, 'F2084') then
+    begin
+      AKey := AKey + LMsg.Code + ' ' + LowerCase(LMsg.FileName) + ';';
+      if (LMsg.FileName = '') or LMsg.Truncated or not SameText(
+        TPath.GetExtension(LMsg.FileName), '.pas') then
+        Continue;
+      LDcu := TPath.GetFileNameWithoutExtension(LMsg.FileName) + '.dcu';
+      if IndexText(LDcu, Result) < 0 then
+        Result := Result + [LDcu];
+    end;
+end;
+
+// INTERNAL_FILE in a member's build directory: the key of an internal error
+// both builds of a compile stopped at, and when. The next compile that stops
+// at it does not build a second time - on the client group's COM server the
+// retry never got past it, and cost a whole build on every `compile`.
+function ReadKnownInternal(const ADir, AKey: string): TDateTime;
+var
+  LLines: TArray<string>;
+begin
+  Result := 0;
+  try
+    if not TFile.Exists(TPath.Combine(ADir, INTERNAL_FILE)) then
+      Exit;
+    LLines := TFile.ReadAllLines(TPath.Combine(ADir, INTERNAL_FILE));
+    if (Length(LLines) >= 2) and (LLines[0] = AKey) then
+      Result := StrToFloatDef(LLines[1], 0, TFormatSettings.Invariant);
+  except
+    Result := 0;
+  end;
+end;
+
+procedure WriteKnownInternal(const ADir, AKey: string);
+begin
+  try
+    if AKey = '' then
+      TFile.Delete(TPath.Combine(ADir, INTERNAL_FILE))
+    else
+      TFile.WriteAllLines(TPath.Combine(ADir, INTERNAL_FILE), [AKey,
+        FloatToStr(Now, TFormatSettings.Invariant)]);
+  except
+    // a note for the next compile is never worth failing this one
+  end;
+end;
+
 function BuildMember(const ASpec: TBuildSpec; ARebuild: Boolean;
   const AProgress: TProc<string>; ACancel: TBuildCancel): TBuildResult;
 var
   LFirst: TBuildResult;
   LSame: Boolean;
+  LKey, LAgainKey: string;
+  LDrop: TArray<string>;
 begin
   Result := BuildOnce(ASpec, ARebuild, AProgress, ACancel);
-  if not StoppedAtInternalError(Result) or IsCancelled(ACancel) then
+  if IsCancelled(ACancel) then
     Exit;
+  if not StoppedAtInternalError(Result) then
+  begin
+    if Result.Ok then
+      WriteKnownInternal(ASpec.Dir, '');
+    Exit;
+  end;
+  LDrop := InternalErrorUnits(Result, LKey);
+  if not ARebuild then
+  begin
+    Result.KnownSince := ReadKnownInternal(ASpec.Dir, LKey);
+    if Result.KnownSince > 0 then
+    begin
+      Log('compile %s: dcc stopped at the internal error (F2084) the previous '
+        + 'compile stopped at twice - not building again', [ASpec.Member.Name]);
+      for var LMsg in Result.Messages do
+        if SameText(LMsg.Code, 'F2084') then
+          Result.InternalErrors := Result.InternalErrors + [LMsg];
+      Exit;
+    end;
+  end;
   LFirst := Result;
-  Log('compile %s: dcc stopped at an internal error (F2084) - building again',
-    [ASpec.Member.Name]);
+  Log('compile %s: dcc stopped at an internal error (F2084) - building again%s',
+    [ASpec.Member.Name, IfThen(Length(LDrop) > 0, ' without ' +
+    string.Join(', ', LDrop), '')]);
   if Assigned(AProgress) then
     AProgress('dcc stopped at an internal error (F2084) - building ' +
       ASpec.Member.Name + ' again');
   // A Make over what the first one compiled, never a rebuild: its .dcu
-  // files are what gets it past the unit dcc failed on.
-  Result := BuildOnce(ASpec, False, AProgress, ACancel);
+  // files are what gets it past the unit dcc failed on - all but those of
+  // the units the error names, which a stale one of may be the cause.
+  Result := BuildOnce(ASpec, False, AProgress, ACancel, LDrop);
   if not Result.Ran then
     Exit(LFirst);
+  if not IsCancelled(ACancel) then
+    if StoppedAtInternalError(Result) then
+    begin
+      InternalErrorUnits(Result, LAgainKey);
+      WriteKnownInternal(ASpec.Dir, LAgainKey);
+    end
+    else if Result.Ok then
+      WriteKnownInternal(ASpec.Dir, '');
   for var LMsg in LFirst.Messages do
     if SameText(LMsg.Code, 'F2084') then
       Result.InternalErrors := Result.InternalErrors + [LMsg];

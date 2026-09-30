@@ -33,10 +33,10 @@ or **16 s / 4.3 GB** under the exact one. Typical calls take 60-500 ms.
 
 | Tool | Answers |
 | --- | --- |
-| `status` | What is loaded: members, analyses, unit counts, unit names that do not resolve, load progress |
+| `status` | What is loaded: the server's version, PasTree's, build time, pid and log file; members, analyses, unit counts, unit names that do not resolve, load progress |
 | `find` | Declarations by name, qualified name or wildcard (in any part: `*.Save`, `*Form.Save`), project units first; `TDerived.Member` finds a member TDerived inherits; for a name the index does not hold, the Pascal files outside it that write it |
 | `definition` | Where a symbol is declared and implemented, optionally with the source that follows |
-| `source` | The exact text of one declaration - a routine's body, a whole type, a constant - numbered, with the comment above it; each overload of an overloaded name |
+| `source` | The exact text of one declaration - a routine's body, a whole type, a constant - numbered, with the comment above it; each overload of an overloaded name; `lines` cuts it to a piece of it by file line numbers |
 | `members` | What a class, record or interface has, inherited members included, under the type declaring each - or what can be called on a variable, by its type |
 | `references` | Every use across the group, grouped by file and by the routine or type it sits in; the form files' lines that bind it by name, under their component; also units, built-ins and conditional defines; for an overloaded name, each overload's uses, told apart |
 | `callers` | Who calls a routine - through the virtual method it overrides, an interface method it implements or a property it is the accessor of too, bare `inherited;` included, and the form lines that bind an event handler - and, with `depth`, who calls those; for an overloaded name, each overload's callers, told apart |
@@ -120,12 +120,13 @@ them over grep. A new session is needed after registering or rebuilding.
 | Option | Default | |
 | --- | --- | --- |
 | `--project <file>` | discovered | `.groupproj`, `.dproj`, `.dpr` or `.dpk` |
+| `--also <file>` | none | A `.dproj` or `.dpr` outside the group, indexed, checked and built as a member of it (`status` marks it); repeats. Relative to the project's directory. For a tests project no `.groupproj` lists |
 | `--studio <ver>` | `$BDS`, else newest | RAD Studio registry version: `37.0`, `23.0` |
 | `--platform <p>` | per project | Override every member's platform: `Win32`, `Win64` |
 | `--config <c>` | per project | Build configuration: `Debug`, `Release` |
 | `--groups <p>` | `shared` | `shared`: one analysis per platform. `strict`: one per distinct configuration. See SPEC.md |
 | `--build-dir <dir>` | `%TEMP%\pastree-mcp` | Where `compile` builds: a directory per group, member and configuration, kept between sessions so a build is incremental |
-| `--log <file\|none>` | beside the project | `<project>-pastree-mcp.log`, truncated per run |
+| `--log <file\|none>` | beside the project | `<project>-pastree-mcp.log`, truncated per run. A file another server holds is not shared: this one logs to `<name>-<pid>.log` beside it and says so on stderr; `status` names the file written |
 
 ### Trying tools without a client
 

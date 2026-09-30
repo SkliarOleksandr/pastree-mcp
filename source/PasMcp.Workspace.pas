@@ -79,6 +79,7 @@ type
     Files: TArray<string>;   // the .pas files the project lists
     Analysis: Integer;       // index into TMcpWorkspace.Analyses; -1 = failed
     Error: string;
+    Extra: Boolean;          // not in the group: given by --also
   end;
 
   TMcpFileStamp = record
@@ -115,6 +116,10 @@ type
   private
     FProjectFile: string;
     FRoot: string;
+    // Projects outside the group indexed with it (--also), full paths, and
+    // the directories of those outside FRoot: their files are own too.
+    FExtra: TArray<string>;
+    FExtraRoots: TArray<string>;
     FStudioWanted: string;
     FStudio: TMcpStudio;
     FPlatformOverride: string;
@@ -158,8 +163,10 @@ type
     procedure ClearAnalyses;
     procedure RebuildOwners;
   public
+    // AExtra: projects outside the group to index with it, as its members are
+    // (the client group's tests are a project no .groupproj lists).
     constructor Create(const AProjectFile, AStudio, APlatform, AConfig: string;
-      APolicy: TMcpGroupPolicy);
+      APolicy: TMcpGroupPolicy; const AExtra: TArray<string> = nil);
     destructor Destroy; override;
     // Reads the group and analyzes it. Never raises: a failure lands in
     // LoadError and Ready is set either way, so no caller waits forever.
@@ -222,6 +229,7 @@ uses
   Winapi.Windows,
   PasTree.Types,
   PasMcp.Log,
+  PasMcp.Version,
   PasMcp.GroupProj;
 
 function StampOf(const APath: string; out AStamp: TMcpFileStamp): Boolean;
@@ -316,11 +324,24 @@ end;
 { TMcpWorkspace }
 
 constructor TMcpWorkspace.Create(const AProjectFile, AStudio, APlatform,
-  AConfig: string; APolicy: TMcpGroupPolicy);
+  AConfig: string; APolicy: TMcpGroupPolicy; const AExtra: TArray<string>);
+var
+  LDir: string;
 begin
   inherited Create;
   FProjectFile := TPath.GetFullPath(AProjectFile);
   FRoot := TPath.GetDirectoryName(FProjectFile);
+  for var LOne in AExtra do
+  begin
+    if SameText(TPath.GetFullPath(LOne), FProjectFile) then
+      Continue;
+    FExtra := FExtra + [TPath.GetFullPath(LOne)];
+    LDir := TPath.GetDirectoryName(TPath.GetFullPath(LOne));
+    if not StartsText(IncludeTrailingPathDelimiter(FRoot),
+      IncludeTrailingPathDelimiter(LDir)) and (IndexText(LDir, FExtraRoots) < 0)
+    then
+      FExtraRoots := FExtraRoots + [LDir];
+  end;
   FStudioWanted := AStudio;
   FPlatformOverride := APlatform;
   FConfig := AConfig;
@@ -415,6 +436,10 @@ function TMcpWorkspace.IsOwnFile(const APath: string): Boolean;
 begin
   Result := StartsText(IncludeTrailingPathDelimiter(FRoot), APath) or
     FListed.ContainsKey(LowerCase(APath));
+  if not Result then
+    for var LDir in FExtraRoots do
+      if StartsText(IncludeTrailingPathDelimiter(LDir), APath) then
+        Exit(True);
 end;
 
 function TMcpWorkspace.IndexedUnitCount(out AOwn: Integer): Integer;
@@ -444,8 +469,14 @@ begin
   if Length(FMembers) = 1 then
     Result := TPath.GetFileName(FMembers[0].ProjectFile)
   else
-    Result := Format('the %d projects of %s', [Length(FMembers),
-      TPath.GetFileName(FProjectFile)]);
+  begin
+    Result := '';
+    for var LMem in FMembers do
+      if LMem.Extra then
+        Result := Result + ' + ' + TPath.GetFileName(LMem.ProjectFile);
+    Result := Format('the %d projects of %s%s', [Length(FMembers),
+      TPath.GetFileName(FProjectFile), Result]);
+  end;
 end;
 
 function TMcpWorkspace.UnindexedSources: TArray<string>;
@@ -540,7 +571,8 @@ end;
 procedure TMcpWorkspace.LoadMembers;
 var
   LFiles, LMissing: TArray<string>;
-  LExt: string;
+  LExt, LFile: string;
+  LGroupCount: Integer;
   LM: TMcpMember;
   LD: TPasDProj;
   LStamp: TMcpFileStamp;
@@ -563,13 +595,21 @@ begin
   // By path as written, not lower-cased: a changed one is named in a report.
   if StampOf(FProjectFile, LStamp) then
     FConfigStamps.AddOrSetValue(FProjectFile, LStamp);
+  LGroupCount := Length(LFiles);
+  for var LOne in FExtra do
+    if not TFile.Exists(LOne) then
+      FMissing := FMissing + [LOne]
+    else if IndexText(LOne, LFiles) < 0 then
+      LFiles := LFiles + [LOne];
 
-  for var LFile in LFiles do
+  for var LIdx := 0 to High(LFiles) do
   begin
+    LFile := LFiles[LIdx];
     LM := Default(TMcpMember);
     LM.ProjectFile := LFile;
     LM.Name := TPath.GetFileNameWithoutExtension(LFile);
     LM.Analysis := -1;
+    LM.Extra := LIdx >= LGroupCount;
     if SameText(TPath.GetExtension(LFile), '.dproj') then
     begin
       LD := TPasDProj.Create;
@@ -1310,6 +1350,12 @@ var
 begin
   LSb := TStringBuilder.Create;
   try
+    // Which process answered: with a dozen servers of different builds
+    // running, finding it took the process list and strings from the renamed
+    // exe copies.
+    LSb.AppendLine(Format('server: %s; pid %d, started %s', [PasMcpVersionBanner,
+      GetCurrentProcessId, FormatDateTime('yyyy-mm-dd hh:nn', ProcessStarted)]));
+    LSb.AppendLine('log: ' + IfThen(LogFile = '', 'none (stderr only)', LogFile));
     LSb.AppendLine('project: ' + FProjectFile);
     LSb.AppendLine('paths in results are relative to: ' + FRoot);
     if FStudio.Found then
@@ -1329,10 +1375,12 @@ begin
         LSb.AppendLine(Format('  member %s: SKIPPED - %s', [LMem.Name,
           LMem.Error]))
       else
-        LSb.AppendLine(Format('  member %s: %s %s, %d listed files, analysis %d',
+        LSb.AppendLine(Format('  member %s: %s %s, %d listed files, analysis %d%s',
           [LMem.Name, PlatformName(LMem.Platform), IfThen(LMem.Config = '',
           '(bare project file)', LMem.Config),
-          Length(LMem.Files), LMem.Analysis]));
+          Length(LMem.Files), LMem.Analysis, IfThen(LMem.Extra,
+          ' - not in the group, added by --also (' + RelPath(LMem.ProjectFile) +
+          ')', '')]));
     for var LMiss in FMissing do
       LSb.AppendLine('  member missing on disk: ' + RelPath(LMiss));
     for var LA in FAnalyses do

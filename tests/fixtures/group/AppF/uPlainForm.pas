@@ -32,4 +32,13 @@ procedure TfrmPlain.Greet(const AName: string; ACount: Integer);
 begin
 end;
 
+// A namesake no build compiles, in a unit whose uses never reach uBoxes:
+// references of TCountBox.BoxCount does not count it.
+{$IFDEF PASTREE_NEVER}
+function BoxCount: Integer;
+begin
+  Result := 0;
+end;
+{$ENDIF}
+
 end.

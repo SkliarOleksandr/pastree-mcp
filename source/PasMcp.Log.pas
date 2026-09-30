@@ -14,7 +14,9 @@ unit PasMcp.Log;
 
 interface
 
+// Opens APath, or <name>-<pid><ext> beside it when another process holds it.
 procedure SetLogFile(const APath: string);
+// The file actually written, '' when none.
 function LogFile: string;
 procedure Log(const AText: string); overload;
 procedure Log(const AFmt: string; const AArgs: array of const); overload;
@@ -25,6 +27,7 @@ uses
   System.SysUtils,
   System.Classes,
   System.SyncObjs,
+  System.IOUtils,
   Winapi.Windows;
 
 var
@@ -41,22 +44,49 @@ begin
       LWritten, nil);
 end;
 
+// The file is held open and write-locked for the life of the process, so a
+// second server given the same --log cannot open it: it writes to a name of
+// its own, <name>-<pid><ext> beside it, and says so on stderr. Failing
+// silently here left eight of nine servers sharing one --log with no log.
+function OpenLog(const APath: string; out AStream: TFileStream): string;
+var
+  LAlt: string;
+begin
+  Result := '';
+  AStream := nil;
+  try
+    // Truncated per run: one run, one log - a file that grows across
+    // sessions buries the run a report is about.
+    AStream := TFileStream.Create(APath, fmCreate or fmShareDenyWrite);
+    Exit(APath);
+  except
+    on E: Exception do
+    begin
+      LAlt := TPath.Combine(TPath.GetDirectoryName(APath),
+        TPath.GetFileNameWithoutExtension(APath) + '-' +
+        IntToStr(GetCurrentProcessId) + TPath.GetExtension(APath));
+      try
+        AStream := TFileStream.Create(LAlt, fmCreate or fmShareDenyWrite);
+        Result := LAlt;
+        WriteStdErr(TEncoding.UTF8.GetBytes('cannot open log file ' + APath +
+          ' (' + E.Message + ') - held by another server? Logging to ' + LAlt +
+          sLineBreak));
+      except
+        on E2: Exception do
+          WriteStdErr(TEncoding.UTF8.GetBytes('cannot open log file ' + APath +
+            ' (' + E.Message + ') nor ' + LAlt + ' (' + E2.Message +
+            ') - logging to stderr only' + sLineBreak));
+      end;
+    end;
+  end;
+end;
+
 procedure SetLogFile(const APath: string);
 begin
   GLock.Enter;
   try
     FreeAndNil(GFile);
-    GFilePath := '';
-    try
-      // Truncated per run: one run, one log - a file that grows across
-      // sessions buries the run a report is about.
-      GFile := TFileStream.Create(APath, fmCreate or fmShareDenyWrite);
-      GFilePath := APath;
-    except
-      on E: Exception do
-        WriteStdErr(TEncoding.UTF8.GetBytes(
-          'cannot open log file ' + APath + ': ' + E.Message + sLineBreak));
-    end;
+    GFilePath := OpenLog(APath, GFile);
   finally
     GLock.Leave;
   end;

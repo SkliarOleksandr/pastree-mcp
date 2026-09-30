@@ -20,7 +20,9 @@ program pastree_mcp;
 
   Options: --project <.groupproj|.dproj|.dpr> (default: the only .groupproj,
   else the only .dproj, in the current directory or the nearest one above it
-  up to the repository root), --studio <BDS version>,
+  up to the repository root), --also <.dproj|.dpr> (repeats: a project outside
+  the group indexed and built with it - relative to the project's directory),
+  --studio <BDS version>,
   --platform <Win32|Win64>, --config <Debug|Release>, --groups <shared|strict>,
   --build-dir <dir> (where `compile` builds; default %TEMP%\pastree-mcp),
   --log <file|none>, --version.
@@ -54,6 +56,7 @@ type
 
 var
   GProject, GStudio, GPlatform, GConfig, GLog: string;
+  GAlso: TArray<string>;
   GPolicy: TMcpGroupPolicy;
   GCalls: TArray<TCall>;
   GWs: TMcpWorkspace;
@@ -163,6 +166,8 @@ begin
     end
     else if SameText(ParamStr(LIdx), '--project') then
       GProject := Next
+    else if SameText(ParamStr(LIdx), '--also') then
+      GAlso := GAlso + [Next]
     else if SameText(ParamStr(LIdx), '--studio') then
       GStudio := Next
     else if SameText(ParamStr(LIdx), '--platform') then
@@ -200,6 +205,13 @@ begin
   GProject := TPath.GetFullPath(GProject);
   if not TFile.Exists(GProject) then
     Fail('no such project: ' + GProject);
+  for var LI := 0 to High(GAlso) do
+  begin
+    GAlso[LI] := TPath.GetFullPath(TPath.Combine(TPath.GetDirectoryName(
+      GProject), GAlso[LI]));
+    if not TFile.Exists(GAlso[LI]) then
+      Fail('no such project (--also): ' + GAlso[LI]);
+  end;
 end;
 
 procedure RunCli;
@@ -276,7 +288,8 @@ begin
     Log(PasMcpVersionBanner);
     CheckPasTreeVersion;
     Log('project %s', [GProject]);
-    GWs := TMcpWorkspace.Create(GProject, GStudio, GPlatform, GConfig, GPolicy);
+    GWs := TMcpWorkspace.Create(GProject, GStudio, GPlatform, GConfig, GPolicy,
+      GAlso);
     if Length(GCalls) > 0 then
       RunCli
     else

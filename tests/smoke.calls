@@ -28,6 +28,12 @@ source {"symbol":"TBase.Add", "limit":3}
 source {"symbol":"TDerived.Add", "kind":"procedure"}
 source {"symbol":"Add"}
 source {"symbol":"Winapi.Windows.SendMessage"}
+source {"symbol":"RunB", "lines":"29-31"}
+source {"symbol":"RunB", "lines":"-26"}
+source {"symbol":"RunB", "lines":"28-", "limit":2}
+source {"symbol":"RunB", "lines":"100-120"}
+source {"symbol":"RunB", "lines":"31-29"}
+source {"symbol":"TBase.Add", "lines":"77"}
 members {"symbol":"TDerived"}
 members {"symbol":"TDerived", "visibility":"public"}
 members {"symbol":"TDerived", "visibility":"all", "member_kind":"fields"}
