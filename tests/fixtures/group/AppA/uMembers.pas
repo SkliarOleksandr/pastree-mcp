@@ -150,4 +150,20 @@ begin
   ASlots.Slots[0] := ASlots.Slots[1];
 end;
 
+type
+  // Overloads no code calls: `callers` and `references` of the name answer
+  // for both, each found uncalled.
+  TQuiet = class
+    procedure Hush(A: Integer); overload;
+    procedure Hush(const S: string); overload;
+  end;
+
+procedure TQuiet.Hush(A: Integer);
+begin
+end;
+
+procedure TQuiet.Hush(const S: string);
+begin
+end;
+
 end.

@@ -34,12 +34,12 @@ or **16 s / 4.3 GB** under the exact one. Typical calls take 60-500 ms.
 | Tool | Answers |
 | --- | --- |
 | `status` | What is loaded: members, analyses, unit counts, unit names that do not resolve, load progress |
-| `find` | Declarations by name, qualified name or wildcard, project units first; for a name the index does not hold, the Pascal files outside it that write it |
+| `find` | Declarations by name, qualified name or wildcard (in any part: `*.Save`, `*Form.Save`), project units first; `TDerived.Member` finds a member TDerived inherits; for a name the index does not hold, the Pascal files outside it that write it |
 | `definition` | Where a symbol is declared and implemented, optionally with the source that follows |
 | `source` | The exact text of one declaration - a routine's body, a whole type, a constant - numbered, with the comment above it; each overload of an overloaded name |
 | `members` | What a class, record or interface has, inherited members included, under the type declaring each - or what can be called on a variable, by its type |
-| `references` | Every use across the group, grouped by file and by the routine or type it sits in; the form files' lines that bind it by name, under their component; also units, built-ins and conditional defines |
-| `callers` | Who calls a routine - through the virtual method it overrides, an interface method it implements or a property it is the accessor of too, bare `inherited;` included, and the form lines that bind an event handler - and, with `depth`, who calls those |
+| `references` | Every use across the group, grouped by file and by the routine or type it sits in; the form files' lines that bind it by name, under their component; also units, built-ins and conditional defines; for an overloaded name, each overload's uses, told apart |
+| `callers` | Who calls a routine - through the virtual method it overrides, an interface method it implements or a property it is the accessor of too, bare `inherited;` included, and the form lines that bind an event handler - and, with `depth`, who calls those; for an overloaded name, each overload's callers, told apart |
 | `callees` | What a routine calls - the overload each call binds to, a property's getter or setter, the overrides and implementations a virtual or interface call may run - and, with `depth`, what those call |
 | `impact` | What a change reaches, from `git diff` output or the declarations about to change: which projects of the group to build and test, the declarations touched with what they override and are called through, their callers or uses, the units a changed interface recompiles, and the calls a removed routine left behind - the form lines too: a handler's bindings, a component's lines, a removed handler still bound |
 | `compile` | Builds the members a change reaches with the real compiler (MSBuild over the `.dproj`) into a directory of its own, and answers with the errors - each with its routine and source line - and the warnings and hints the change added. Nothing of the project is overwritten and build events are not run; the first build starts from the developer's own `.dcu` files |

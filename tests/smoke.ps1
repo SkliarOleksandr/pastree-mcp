@@ -280,7 +280,7 @@ Check 'impact nothing' (Block $b 'impact {}') @('give `diff`')
 # session did not change is counted, not listed. The second compiles only the
 # program - uMembers is not recompiled, so its warning is not reported again,
 # and not gone either.
-Check 'compile' (Block $b 'compile {"member":"AppA"}') @('compile AppA (Win32 Debug): built in', '278 lines compiled', 'AppA-Win32-Debug\exe\AppA.exe', 'first build here: every unit compiled', 'warnings - none in files changed this session (1 elsewhere, not listed)')
+Check 'compile' (Block $b 'compile {"member":"AppA"}') @('compile AppA (Win32 Debug): built in', '294 lines compiled', 'AppA-Win32-Debug\exe\AppA.exe', 'first build here: every unit compiled', 'warnings - none in files changed this session (1 elsewhere, not listed)')
 Check 'compile again' (Block $b 'compile {"member":"AppA", "limit"') @('compile AppA (Win32 Debug): built in', '13 lines compiled', 'no errors, warnings or hints') @('first build here')
 Check 'compile bare dpr' (Block $b 'compile {"member":"AppB"}') @('compile AppB (Win32): built in', 'AppB-Win32\exe\AppB.exe', 'first build here', 'no errors, warnings or hints')
 # The forms member: dcc converts its text form files to binary as it links
@@ -288,7 +288,7 @@ Check 'compile bare dpr' (Block $b 'compile {"member":"AppB"}') @('compile AppB 
 Check 'compile forms' (Block $b 'compile {"member":"AppF"}') @('compile AppF (Win32): built in', 'AppF-Win32\exe\AppF.exe', 'no errors, warnings or hints')
 Check 'compile file' (Block $b 'compile {"file"') @('compile - 2 members, those compiling Shared\uShapes.pas', '  AppA (Win32 Debug): built in', '  AppB (Win32): built in', 'no errors, warnings or hints')
 # A rebuild recompiles uMembers: its warning again, known, so not new.
-Check 'compile rebuild' (Block $b 'compile {"member":"AppA", "rebuild"') @('278 lines compiled', "warnings - 1 in the group's files:`nAppA\uMembers.pas", '  37  W1055 PUBLISHED caused RTTI', "to be added to type 'TDerived' (in TDerived)`n        published") @('[new]')
+Check 'compile rebuild' (Block $b 'compile {"member":"AppA", "rebuild"') @('294 lines compiled', "warnings - 1 in the group's files:`nAppA\uMembers.pas", '  37  W1055 PUBLISHED caused RTTI', "to be added to type 'TDerived' (in TDerived)`n        published") @('[new]')
 Check 'compile no member' (Block $b 'compile {"member":"NoSuch"}') @('no member named NoSuch - the group has: AppA, AppB, AppF')
 Check 'compile bad show' (Block $b 'compile {"show"') @('`show` is new, warnings or all')
 Check 'compile nothing changed' (Block $b 'compile {}') @('no file has changed since the server started - name the `member` to build (the group has: AppA, AppB, AppF)')
@@ -340,6 +340,28 @@ Check 'callers default property setter' (Block $b 'callers {"symbol":"TCellList.
 Check 'callees default property' (Block $b 'callees {"symbol":"SwapCells"}') @('4 calls reaching 2 routines', '18  [at 43, 44 via TCellList.Cells]  function GetCell', '19  [at 44, 45 via TCellList.Cells]  procedure SetCell')
 Check 'assignments default property' (Block $b 'related {"relation":"assignments","symbol":"TCellList.Cells"}') @('assignments of TCellList.Cells (AppB\uCells.pas:21): 2', '44  [X[I]]  AList[0] := AList[1];', '45  [X[I]]  AList[1] := LCell;')
 Check 'references array brackets' (Block $b 'references {"symbol":"TCellList.FCells"}') @('2 references in 1 files') @('[X[I]]')
+# A wildcard in a qualifier, `*.Name` or `*Type.Name`: it was "no declaration
+# matches", the name itself found. Nothing of the name stays nothing.
+Check 'find wildcard qualifier' (Block $b 'find {"query":"*.GetCount"}') @('AppA\uMembers.pas:23  TBase.GetCount (function)', 'TStrings.GetCount') @('no declaration matches')
+Check 'find wildcard type qualifier' (Block $b 'find {"query":"*Derived.Guarded"}') @('AppA\uMembers.pas:33  TDerived.Guarded (procedure)') @('TBase.Guarded', 'no declaration matches')
+Check 'find wildcard qualifier none' (Block $b 'find {"query":"*.NoSuchMember"}') @('no declaration matches `*.NoSuchMember`')
+# `TDerived.X` for a member TDerived inherits: the ancestor's declaration,
+# said inherited - it was "no declaration matches", as the owner chain is
+# TBase's. An unknown member of a known type stays unknown.
+Check 'find inherited member' (Block $b 'find {"query":"TDerived.GetCount"}') @('AppA\uMembers.pas:23  TBase.GetCount (function)  function GetCount: Integer;  [inherited by TDerived]')
+Check 'find inherited none' (Block $b 'find {"query":"TDerived.NoSuchMember"}') @('no declaration matches `TDerived.NoSuchMember`') @('inherited by')
+Check 'source inherited member' (Block $b 'source {"symbol":"TDerived.GetCount"}') @('TBase.GetCount (function) implemented at AppA\uMembers.pas:70-73', '72    Result := FCount + FSecret;')
+Check 'references inherited field' (Block $b 'references {"symbol":"TDerived.FCount"}') @('TBase.FCount (field) declared at AppA\uMembers.pas:19 - 3 references in 1 files', '87  FCount := 0;')
+# The overloads of one routine are answered together, each row with the one
+# it binds to, and each one's count: it was a refusal as ambiguous. Namesakes
+# are refused still (`Area` above); a tool taking one routine refuses an
+# overload set with the one advice that works.
+Check 'references overloads' (Block $b 'references {"symbol":"TBase.Add"}') @('TBase.Add (procedure) - 2 overloads declared in AppA\uMembers.pas - 2 references in 1 files', '(1 at 25, 1 at 26)', '82  [overload at 25]  Add(Length(AText));', '125  [overload at 26]  Base.Add(''done'');') @('ambiguous')
+Check 'references overloads none' (Block $b 'references {"symbol":"TQuiet.Hush"}') @('TQuiet.Hush (procedure) - 2 overloads declared in AppA\uMembers.pas - 0 references in 0 files', '(0 at 157, 0 at 158)') @('ambiguous')
+Check 'callers overloads' (Block $b 'callers {"symbol":"TBase.Add"}') @('callers of TBase.Add - 2 overloads (AppA\uMembers.pas:25, 26; rows by overload: 1 at 25, 1 at 26) - 2 calls in 2 routines', '82  [-> TBase.Add (line 25)]  Add(Length(AText));', '125  [-> TBase.Add (line 26)]  Base.Add(''done'');') @('ambiguous')
+Check 'callers overloads none' (Block $b 'callers {"symbol":"TQuiet.Hush"}') @('rows by overload: 0 at 157, 0 at 158) - none found', 'no callers found: TQuiet.Hush (line 157), TQuiet.Hush (line 158)')
+Check 'callees overloads refused' (Block $b 'callees {"symbol":"TQuiet.Hush"}') @('`TQuiet.Hush` names 2 overloads of one routine - pass `file` + `line` + `name`', 'AppA\uMembers.pas:158  TQuiet.Hush (procedure)') @('Qualify it')
+Check 'impact overloads' (Block $b 'impact {"symbol":"TBase.Add"}') @('members to build and test: AppA', '  25  TBase.Add (procedure)', '  26  TBase.Add (procedure)', 'callers - 2 calls in 2 routines')
 # A form file with no unit beside it: said so, not "not part of any project".
 Check 'form orphan' (Block $b 'form {"file":"AppF/uOrphanForm.dfm"}') @('no unit beside AppF\uOrphanForm.dfm - an orphan form file, which no project compiles')
 Check 'outline' (Block $b 'outline {"file":"Shared') @('21  type TCircle = class', '27    property Radius: Double', '53  function TCircle.Area: Double', '40 implementation')

@@ -102,6 +102,8 @@ type
     Snippet: string;
     Own: Boolean;
     Ids: TArray<TSymId>;   // by analysis index; Mid < 0 = not in it
+    // Asked for as a member of this type, which inherits it (InheritedMembers).
+    Inherits: string;
   end;
 
   // One raw name match before its declaration site is known (see ResolveName).
@@ -365,6 +367,21 @@ begin
   while (LP <= Length(APattern)) and (APattern[LP] = '*') do
     Inc(LP);
   Result := LP > Length(APattern);
+end;
+
+function IsWildPattern(const AText: string): Boolean;
+begin
+  Result := (Pos('*', AText) > 0) or (Pos('?', AText) > 0);
+end;
+
+// One qualifier of a query (lower case) against one segment of a
+// declaration's unit + owner chain: a wildcard or the name itself.
+function QualMatches(const AQual, ASeg: string): Boolean;
+begin
+  if IsWildPattern(AQual) then
+    Result := WildMatch(AQual, LowerCase(ASeg))
+  else
+    Result := SameText(AQual, ASeg);
 end;
 
 function StripGenerics(const AName: string): string;
@@ -787,8 +804,8 @@ begin
 end;
 
 function ResolveName(AWs: TMcpWorkspace; const AQuery, AKind: string;
-  AOwnOnly: Boolean; ALimit: Integer; out AMore: Integer): TArray<TTarget>;
-  forward;
+  AOwnOnly: Boolean; ALimit: Integer; out AMore: Integer;
+  AClimb: Boolean = True): TArray<TTarget>; forward;
 
 // file + line + (name | column) -> what is there.
 function ResolvePosition(AWs: TMcpWorkspace; AArgs: TJSONObject): TTarget;
@@ -916,15 +933,78 @@ begin
   MapToOthers(AWs, Result);
 end;
 
+{ `TDerived.Member` for a member TDerived inherits - code writes it so, the
+  compiler finding it in an ancestor, and "no declaration" read as "no such
+  member" sent audit agents to grep. The qualifier resolved as a type, the
+  member found as a call binds it (FindMemberX climbs the ancestors), and
+  that declaration's own qualified name resolved: every overload of it. Each
+  target's Inherits is the type as the query wrote it. }
+function InheritedMembers(AWs: TMcpWorkspace; const AParts: TArray<string>;
+  const AKind: string; AOwnOnly: Boolean; ALimit: Integer;
+  out AMore: Integer): TArray<TTarget>;
+var
+  LTypes, LFound: TArray<TTarget>;
+  LSeen: TDictionary<string, Boolean>;
+  LQual, LNameLower, LKey: string;
+  LTypeMore, LMore, LMMid, LMSym, LCtx: Integer;
+  LId: TSymId;
+  LX: TSemaXType;
+begin
+  Result := nil;
+  AMore := 0;
+  LQual := string.Join('.', Copy(AParts, 0, High(AParts)));
+  LNameLower := LowerCase(StripGenerics(AParts[High(AParts)]));
+  LTypes := ResolveName(AWs, LQual, 'type', False, 12, LTypeMore);
+  LSeen := TDictionary<string, Boolean>.Create;
+  try
+    for var LT in LTypes do
+      for var LA in AWs.Analyses do
+      begin
+        LId := LT.Ids[LA.Index];
+        if (LId.Mid < 0) or not LA.Proj.EnsureHydrated(LId.Mid) then
+          Continue;
+        if LA.Proj.Model(LId.Mid).Symbols[LId.Sym].Kind <> skType then
+          Break;
+        LX := LA.Proj.CanonTypeX(XPlain(LId.Mid, LId.Sym));
+        if not XValid(LX) then
+          LX := XPlain(LId.Mid, LId.Sym);
+        // AFromMid -1: no class helper, as in `members`.
+        if not LA.Proj.FindMemberX(-1, LX, LNameLower, LMMid, LMSym, LCtx) or
+           (LMMid < 0) or (LMSym = NIL_SYM) then
+          Break;
+        LKey := UnitNameOfFile(LA.Proj.ModelFile(LMMid)) + '.' +
+          QualifiedName(LA.Proj.Model(LMMid), LMSym);
+        if LSeen.TryAdd(LowerCase(LKey), True) then
+        begin
+          LFound := ResolveName(AWs, LKey, AKind, AOwnOnly, ALimit, LMore,
+            False);
+          Inc(AMore, LMore);
+          for var LC in LFound do
+          begin
+            var LI := LC;
+            LI.Inherits := LQual;
+            Result := Result + [LI];
+          end;
+        end;
+        Break;
+      end;
+  finally
+    LSeen.Free;
+  end;
+end;
+
 // Every declaration matching AQuery ('Bar', 'TFoo.Bar', 'Unit.TFoo.Bar',
-// wildcards in the last segment), own units first, at most ALimit distinct
-// declaration sites. AMore counts raw matches beyond them.
+// wildcards in any segment - `*.Bar`, `*Foo.Bar`), own units first, at most
+// ALimit distinct declaration sites. AMore counts raw matches beyond them.
+// With AClimb, a qualified name nothing declares is looked up as a member the
+// qualifier's type inherits (InheritedMembers).
 function ResolveName(AWs: TMcpWorkspace; const AQuery, AKind: string;
-  AOwnOnly: Boolean; ALimit: Integer; out AMore: Integer): TArray<TTarget>;
+  AOwnOnly: Boolean; ALimit: Integer; out AMore: Integer;
+  AClimb: Boolean = True): TArray<TTarget>;
 var
   LParts, LQuals, LChain: TArray<string>;
   LName: string;
-  LWild: Boolean;
+  LWild, LWildQuals: Boolean;
   LRaw, LBareScoped: TList<TRawMatch>;
   LMatch: TRawMatch;
   LM: TPasSemaModel;
@@ -943,10 +1023,14 @@ begin
   if Length(LParts) = 0 then
     raise EToolError.Create('empty symbol name');
   LName := LowerCase(StripGenerics(LParts[High(LParts)]));
-  LWild := (Pos('*', LName) > 0) or (Pos('?', LName) > 0);
+  LWild := IsWildPattern(LName);
   LQuals := Copy(LParts, 0, High(LParts));
+  LWildQuals := False;
   for LIdx := 0 to High(LQuals) do
+  begin
     LQuals[LIdx] := LowerCase(StripGenerics(LQuals[LIdx]));
+    LWildQuals := LWildQuals or IsWildPattern(LQuals[LIdx]);
+  end;
 
   LRaw := TList<TRawMatch>.Create;
   LBareScoped := TList<TRawMatch>.Create;
@@ -988,7 +1072,7 @@ begin
               LOk := Length(LQuals) <= Length(LChain);
               if LOk then
                 for LIdx := 0 to High(LQuals) do
-                  if not SameText(LQuals[LIdx],
+                  if not QualMatches(LQuals[LIdx],
                      LChain[Length(LChain) - Length(LQuals) + LIdx]) then
                   begin
                     LOk := False;
@@ -999,7 +1083,7 @@ begin
                 LSeenIdx := 0;
                 for var LSeg in LChain do
                   if (LSeenIdx <= High(LQuals)) and
-                     SameText(LQuals[LSeenIdx], LSeg) then
+                     QualMatches(LQuals[LSeenIdx], LSeg) then
                     Inc(LSeenIdx);
                 LOk := LSeenIdx > High(LQuals);
               end;
@@ -1026,7 +1110,6 @@ begin
     end;
     if LRaw.Count = 0 then
       LRaw.AddRange(LBareScoped);
-
     LRaw.Sort(TComparer<TRawMatch>.Construct(
       function(const L, R: TRawMatch): Integer
       begin
@@ -1080,7 +1163,7 @@ begin
     end;
 
     // No declaration of that name: maybe it names a unit.
-    if (LList.Count = 0) and not LWild and (AKind = '') then
+    if (LList.Count = 0) and not LWild and not LWildQuals and (AKind = '') then
       for LA in AWs.Analyses do
       begin
         for var LMid := 0 to LA.Proj.ModelCount - 1 do
@@ -1097,6 +1180,9 @@ begin
           Break;
       end;
     Result := LList.ToArray;
+    if (LRaw.Count = 0) and (LList.Count = 0) and AClimb and
+       (Length(LQuals) > 0) and not LWild and not LWildQuals then
+      Result := InheritedMembers(AWs, LParts, AKind, AOwnOnly, ALimit, AMore);
   finally
     LList.Free;
     LSeen.Free;
@@ -1119,6 +1205,8 @@ begin
   // not a file anyone can open.
   if SameText(TPath.GetExtension(AT.DeclFile), '.dcu') then
     Result := Result + '  [compiled unit, no source]';
+  if AT.Inherits <> '' then
+    Result := Result + Format('  [inherited by %s]', [AT.Inherits]);
 end;
 
 { ---- what the index does not hold ---------------------------------------------- }
@@ -1364,6 +1452,25 @@ begin
     Result := Result + sLineBreak + LNote;
 end;
 
+function IsRoutineTarget(const AT: TTarget): Boolean;
+begin
+  Result := (AT.Kind = tkSymbol) and ((AT.Head = 'procedure') or
+    (AT.Head = 'function') or (AT.Head = 'constructor') or
+    (AT.Head = 'destructor') or (AT.Head = 'operator') or
+    (AT.Head = 'routine'));
+end;
+
+// Are the candidates of a name the overloads of one routine - one type's
+// method or one unit's routine - rather than namesakes?
+function IsOverloadSet(const ACands: TArray<TTarget>): Boolean;
+begin
+  Result := Length(ACands) > 1;
+  for var LC in ACands do
+    if not IsRoutineTarget(LC) or not SameText(LC.Name, ACands[0].Name) or
+       not SameText(LC.DeclFile, ACands[0].DeclFile) then
+      Exit(False);
+end;
+
 // The ONE declaration a name means, refusing an ambiguous one with the
 // candidates listed.
 function ResolveNamed(AWs: TMcpWorkspace; const ASymbol,
@@ -1384,10 +1491,16 @@ begin
   end;
   LSb := TStringBuilder.Create;
   try
-    LSb.AppendLine(Format('`%s` is ambiguous - %d declarations%s. Qualify it '
-      + '(Unit.Type.Member), add `kind`, or pass `file` + `line` + `name` of '
-      + 'the one you mean:', [ASymbol, Length(LCands) + LMore,
-      IfThen(LMore > 0, ' (first ' + IntToStr(Length(LCands)) + ')', '')]));
+    // Overloads share every qualifier: "qualify it" sends the agent round.
+    if (LMore = 0) and IsOverloadSet(LCands) then
+      LSb.AppendLine(Format('`%s` names %d overloads of one routine - pass '
+        + '`file` + `line` + `name` of the one you mean:', [ASymbol,
+        Length(LCands)]))
+    else
+      LSb.AppendLine(Format('`%s` is ambiguous - %d declarations%s. Qualify it '
+        + '(Unit.Type.Member), add `kind`, or pass `file` + `line` + `name` of '
+        + 'the one you mean:', [ASymbol, Length(LCands) + LMore,
+        IfThen(LMore > 0, ' (first ' + IntToStr(Length(LCands)) + ')', '')]));
     for var LC in LCands do
       LSb.AppendLine('  ' + DescribeTarget(AWs, LC));
     raise EToolError.Create(LSb.ToString.TrimRight);
@@ -1405,6 +1518,35 @@ begin
     raise EToolError.Create('give `symbol` (a name like TFoo.Bar) or `file` + '
       + '`line` + `name`');
   Result := ResolveNamed(AWs, ArgStr(AArgs, 'symbol'), ArgStr(AArgs, 'kind'));
+end;
+
+// What a search is about: ResolveOne's target, or - for a name whose
+// candidates are the overloads of one routine - each of them. Namesakes are
+// refused with the candidates, as by ResolveNamed. Refused, an agent redid
+// the call with file + line in 23 of 30 cases on the client group and went
+// to grep in 7 (audit report); `source` answers so since FR.3.
+function ResolveNamedOrOverloads(AWs: TMcpWorkspace; const ASymbol,
+  AKind: string): TArray<TTarget>;
+var
+  LMore: Integer;
+begin
+  Result := ResolveName(AWs, ASymbol, AKind, False, 12, LMore);
+  if Length(Result) = 0 then
+    raise EToolError.Create(NoSuchDeclaration(AWs, ASymbol));
+  if (LMore > 0) or ((Length(Result) > 1) and not IsOverloadSet(Result)) then
+    ResolveNamed(AWs, ASymbol, AKind);
+  for var LIdx := 0 to High(Result) do
+    MapToOthers(AWs, Result[LIdx]);
+end;
+
+function ResolveOneOrOverloads(AWs: TMcpWorkspace;
+  AArgs: TJSONObject): TArray<TTarget>;
+begin
+  if (ArgStr(AArgs, 'file') <> '') or (ArgStr(AArgs, 'symbol') = '') then
+    Result := [ResolveOne(AWs, AArgs)]
+  else
+    Result := ResolveNamedOrOverloads(AWs, ArgStr(AArgs, 'symbol'),
+      ArgStr(AArgs, 'kind'));
 end;
 
 { ---- hits ------------------------------------------------------------------- }
@@ -2472,13 +2614,6 @@ begin
   Result := Max(0, LLast - LFrom + 1);
 end;
 
-function IsRoutineTarget(const AT: TTarget): Boolean;
-begin
-  Result := (AT.Kind = tkSymbol) and ((AT.Head = 'procedure') or
-    (AT.Head = 'function') or (AT.Head = 'constructor') or
-    (AT.Head = 'destructor') or (AT.Head = 'operator') or
-    (AT.Head = 'routine'));
-end;
 
 { The text of declaration AT into ASb (SPEC 9.2.2), ATitle heading its first
   part: a routine's implementation from its header to its `end;`, a type's
@@ -2584,17 +2719,6 @@ begin
       'declared', 'implemented'), ALimit));
 end;
 
-// Are the candidates of a name the overloads of one routine - one type's
-// method or one unit's routine - rather than namesakes?
-function IsOverloadSet(const ACands: TArray<TTarget>): Boolean;
-begin
-  Result := Length(ACands) > 1;
-  for var LC in ACands do
-    if not IsRoutineTarget(LC) or not SameText(LC.Name, ACands[0].Name) or
-       not SameText(LC.DeclFile, ACands[0].DeclFile) then
-      Exit(False);
-end;
-
 // The exact text of one declaration - or, for a name whose candidates are
 // the overloads of one routine, of each of them: an agent refused there read
 // the file instead (field report FR.3), as `definition` lists them all.
@@ -2602,7 +2726,7 @@ function ToolSource(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
 var
   LCands: TArray<TTarget>;
   LPart: string;
-  LLimit, LMore, LLeft, LNext: Integer;
+  LLimit, LLeft, LNext: Integer;
   LSb: TStringBuilder;
 begin
   LPart := LowerCase(ArgStr(AArgs, 'part'));
@@ -2610,20 +2734,7 @@ begin
      (LPart <> 'both') then
     raise EToolError.Create('`part` is impl, decl or both');
   LLimit := EnsureRange(ArgInt(AArgs, 'limit', 300), 1, 5000);
-  if (ArgStr(AArgs, 'file') = '') and (ArgStr(AArgs, 'symbol') <> '') then
-  begin
-    LCands := ResolveName(AWs, ArgStr(AArgs, 'symbol'), ArgStr(AArgs, 'kind'),
-      False, 12, LMore);
-    if Length(LCands) = 0 then
-      raise EToolError.Create(NoSuchDeclaration(AWs, ArgStr(AArgs, 'symbol')));
-    // Namesakes: refused with the candidates listed, as everywhere.
-    if (LMore > 0) or ((Length(LCands) > 1) and not IsOverloadSet(LCands)) then
-      ResolveNamed(AWs, ArgStr(AArgs, 'symbol'), ArgStr(AArgs, 'kind'));
-    for var LIdx := 0 to High(LCands) do
-      MapToOthers(AWs, LCands[LIdx]);
-  end
-  else
-    LCands := [ResolveOne(AWs, AArgs)];
+  LCands := ResolveOneOrOverloads(AWs, AArgs);
   LSb := TStringBuilder.Create;
   try
     if Length(LCands) = 1 then
@@ -2878,27 +2989,41 @@ var
   LHeaders: TArray<TPasRefHit>;
   LInactive: TArray<string>;
   LVarX: TSemaXType;
+  LTargets: TArray<TTarget>;
+  LCodeRows: TArray<Integer>;
+  LTag, LCounts: string;
 begin
-  LT := ResolveOne(AWs, AArgs);
+  // The overloads of one routine are answered together, each row tagged
+  // with the one it binds to, as `callers` tells them apart.
+  LTargets := ResolveOneOrOverloads(AWs, AArgs);
+  LT := LTargets[0];
   LLimit := EnsureRange(ArgInt(AArgs, 'limit', 150), 0, 5000);
   LBindable := False;
   LSetsProp := False;
   LHeaders := nil;
+  SetLength(LCodeRows, Length(LTargets));
   LHeaderSeen := TDictionary<string, Boolean>.Create;
   LSet := THitSet.Create(AWs);
   LSb := TStringBuilder.Create;
   LEnclosing := TEnclosing.Create(AWs);
   try
+    for var LTi := 0 to High(LTargets) do
     for var LA in AWs.Analyses do
     begin
+      LT := LTargets[LTi];
       LId := LT.Ids[LA.Index];
       if LId.Mid < 0 then
         Continue;
+      LTag := '';
+      if Length(LTargets) > 1 then
+        LTag := Format('overload at %d', [LT.DeclLine]);
       case LT.Kind of
         tkSymbol:
           begin
+            var LBefore := LSet.Count;
             for var LH in LA.Nav.FindReferences(LId.Mid, LId.Sym) do
-              LSet.Add(LH);
+              LSet.Add(LH, LTag);
+            Inc(LCodeRows[LTi], LSet.Count - LBefore);
             // A class's name qualifying its own methods' implementation
             // headers is no use, but a rename must change it: counted.
             if (LT.Head = 'class') or (LT.Head = 'record') then
@@ -2945,6 +3070,7 @@ begin
             LSet.Add(LH.Hit, IfThen(LH.Active, '', 'inactive'));
       end;
     end;
+    LT := LTargets[0];
     LHits := LSet.Sorted;
     // Cut by the limit, the code rows come first: a published property set
     // on thousands of form lines filled the rows by file name, and the code
@@ -2962,7 +3088,20 @@ begin
       LForms := '; no form file sets it'
     else
       LForms := '';
-    if LT.Kind in [tkSymbol, tkUnit] then
+    if Length(LTargets) > 1 then
+    begin
+      // Each overload's own count: "is this one used" is the usual question.
+      LCounts := '';
+      for var LTi := 0 to High(LTargets) do
+        LCounts := LCounts + IfThen(LTi > 0, ', ', '') + Format('%d at %d',
+          [LCodeRows[LTi], LTargets[LTi].DeclLine]);
+      LSb.AppendLine(Format('%s (%s) - %d overloads declared in %s - %d '
+        + 'references in %d files%s; each row tagged [overload at N] by the '
+        + 'declaration line of the one it binds to (%s)', [LT.Name, LT.Head,
+        Length(LTargets), AWs.RelPath(LT.DeclFile), Length(LHits),
+        FileCount(LHits), LForms, LCounts]));
+    end
+    else if LT.Kind in [tkSymbol, tkUnit] then
       LSb.AppendLine(Format('%s (%s) declared at %s:%d - %d references in %d '
         + 'files%s', [LT.Name, LT.Head, AWs.RelPath(LT.DeclFile), LT.DeclLine,
         Length(LHits), FileCount(LHits), LForms]))
@@ -3039,8 +3178,15 @@ begin
     // No use by name is not "unused" for a routine called through what it
     // overrides, implements or is the accessor of: identity is the contract,
     // and a bare 0 reads as dead code.
-    if (Length(LHits) = LSet.FormCount) and IsRoutineTarget(LT) then
-      LSb.Append(ThroughNote(AWs, LT));
+    for var LTi := 0 to High(LTargets) do
+      if (LCodeRows[LTi] = 0) and IsRoutineTarget(LTargets[LTi]) then
+      begin
+        LForms := ThroughNote(AWs, LTargets[LTi]);
+        if (LForms <> '') and (Length(LTargets) > 1) then
+          LForms := Format('(overload at %d: %s', [LTargets[LTi].DeclLine,
+            Copy(LForms, 2, MaxInt)]);
+        LSb.Append(LForms);
+      end;
     if (LT.Kind = tkSymbol) and (LT.Head = 'property') then
       for var LA in AWs.Analyses do
       begin
@@ -3764,7 +3910,8 @@ type
     destructor Destroy; override;
     // A root: searched for its callers, or - AData - for its uses. The node
     // index; -1 when that declaration is a root already.
-    function AddRoot(const ATarget: TTarget; AData: Boolean): Integer;
+    function AddRoot(const ATarget: TTarget; AData: Boolean;
+      const AName: string = ''): Integer;
     // The walk from the roots, level by level: the rows of each into ALevels,
     // grouped by file under the routine they sit in, `limit` rows over all.
     procedure Walk(ADepth, ALimit: Integer; ALevels: TStringBuilder;
@@ -3777,7 +3924,10 @@ type
     function Through(ANode: Integer): TArray<string>;
     // A root's overrides below it - `TCircle (uShapes.pas:26)` - sorted.
     function Below(ANode: Integer): TArray<string>;
-    function Answer(const ATarget: TTarget; ADepth, ALimit: Integer): string;
+    // The callers of one routine, or of the overloads of one (ATargets'
+    // order), a row tagged with the overload it calls.
+    function Answer(const ATargets: TArray<TTarget>; ADepth,
+      ALimit: Integer): string;
     property Nodes: TList<TCallNode> read FNodes;
     property ViaOnRows: Boolean read FViaOnRows write FViaOnRows;
   end;
@@ -4654,7 +4804,8 @@ begin
   end;
 end;
 
-function TCallerWalk.AddRoot(const ATarget: TTarget; AData: Boolean): Integer;
+function TCallerWalk.AddRoot(const ATarget: TTarget; AData: Boolean;
+  const AName: string): Integer;
 var
   LNode: TCallNode;
   LKey: string;
@@ -4664,7 +4815,7 @@ begin
     Exit(-1);
   LNode := Default(TCallNode);
   LNode.T := ATarget;
-  LNode.Name := ATarget.Name;
+  LNode.Name := IfThen(AName <> '', AName, ATarget.Name);
   // Overloads: two roots of one name are told apart by the line the later
   // one is declared on, as the callers found below them are.
   for var LOther in FNodes do
@@ -4934,33 +5085,67 @@ begin
   end;
 end;
 
-function TCallerWalk.Answer(const ATarget: TTarget; ADepth,
+function TCallerWalk.Answer(const ATargets: TArray<TTarget>; ADepth,
   ALimit: Integer): string;
 var
   LSb, LLevels: TStringBuilder;
   LInfo: TCallWalkInfo;
   LThrough: TArray<string>;
+  LLines, LCounts: string;
 begin
   LSb := TStringBuilder.Create;
   LLevels := TStringBuilder.Create;
   try
-    AddRoot(ATarget, False);
+    // Overloads: every root named by its declaration line, the first too -
+    // a row's `-> Foo (line 20)` says which one it calls.
+    for var LT in ATargets do
+      AddRoot(LT, False, IfThen(Length(ATargets) > 1, Format('%s (line %d)',
+        [LT.Name, LT.DeclLine]), ''));
+    // One symbol all rows are bound to is said above them for a lone root
+    // only: the overloads' lines say each root's own.
+    if Length(ATargets) > 1 then
+      FViaOnRows := True;
     Walk(ADepth, ALimit, LLevels, LInfo);
-    LSb.Append(Format('callers of %s (%s:%d)', [ATarget.Name,
-      FWs.RelPath(ATarget.DeclFile), ATarget.DeclLine]));
+    if Length(ATargets) = 1 then
+      LSb.Append(Format('callers of %s (%s:%d)', [ATargets[0].Name,
+        FWs.RelPath(ATargets[0].DeclFile), ATargets[0].DeclLine]))
+    else
+    begin
+      LLines := '';
+      LCounts := '';
+      for var LI := 0 to High(ATargets) do
+      begin
+        LLines := LLines + IfThen(LI > 0, ', ', '') +
+          IntToStr(ATargets[LI].DeclLine);
+        LCounts := LCounts + IfThen(LI > 0, ', ', '') + Format('%d at %d',
+          [Max(FNodes[LI].Found, 0), ATargets[LI].DeclLine]);
+      end;
+      LSb.Append(Format('callers of %s - %d overloads (%s:%s; rows by '
+        + 'overload: %s)', [ATargets[0].Name, Length(ATargets),
+        FWs.RelPath(ATargets[0].DeclFile), LLines, LCounts]));
+    end;
     if LInfo.Levels[0].Calls = 0 then
       LSb.AppendLine(' - ' + NoCallsSummary(LInfo.Levels[0], False, False))
     else
       LSb.AppendLine(' - ' + LevelsSummary(LInfo, 'call', False));
-    LThrough := Through(0);
-    if LInfo.AllVia <> '' then
+    for var LI := 0 to High(ATargets) do
     begin
-      for var LText in LThrough do
-        if LText.StartsWith(LInfo.AllVia + ' (') then
-          LSb.AppendLine('all through ' + LText);
-    end
-    else if Length(LThrough) > 0 then
-      LSb.AppendLine('also through ' + String.Join(', ', LThrough));
+      LThrough := Through(LI);
+      if Length(ATargets) > 1 then
+      begin
+        if Length(LThrough) > 0 then
+          LSb.AppendLine(Format('%s also through %s', [FNodes[LI].Name,
+            String.Join(', ', LThrough)]));
+      end
+      else if LInfo.AllVia <> '' then
+      begin
+        for var LText in LThrough do
+          if LText.StartsWith(LInfo.AllVia + ' (') then
+            LSb.AppendLine('all through ' + LText);
+      end
+      else if Length(LThrough) > 0 then
+        LSb.AppendLine('also through ' + String.Join(', ', LThrough));
+    end;
     LSb.Append(LLevels.ToString);
     AppendNotes(LSb, LInfo, ADepth);
     Result := LSb.ToString.TrimRight;
@@ -5002,19 +5187,21 @@ end;
   calls sit in, with what a reference search cannot see - calls that may
   dispatch to it through a virtual method it overrides or an interface
   method it implements, a property read calling its getter, a bare
-  `inherited;` - and, with `depth`, the callers of those. }
+  `inherited;` - and, with `depth`, the callers of those. The name of an
+  overloaded routine walks from every overload. }
 function ToolCallers(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
 var
-  LT: TTarget;
+  LTargets: TArray<TTarget>;
   LWalk: TCallerWalk;
 begin
-  LT := ResolveOne(AWs, AArgs);
-  if not IsRoutineTarget(LT) then
+  LTargets := ResolveOneOrOverloads(AWs, AArgs);
+  if not IsRoutineTarget(LTargets[0]) then
     raise EToolError.CreateFmt('%s is a %s - `callers` takes a routine; '
-      + '`references` lists the uses of anything', [LT.Name, LT.Head]);
+      + '`references` lists the uses of anything', [LTargets[0].Name,
+      LTargets[0].Head]);
   LWalk := TCallerWalk.Create(AWs);
   try
-    Result := LWalk.Answer(LT, EnsureRange(ArgInt(AArgs, 'depth', 1), 1, 4),
+    Result := LWalk.Answer(LTargets, EnsureRange(ArgInt(AArgs, 'depth', 1), 1, 4),
       EnsureRange(ArgInt(AArgs, 'limit', 150), 0, 5000));
   finally
     LWalk.Free;
@@ -9696,21 +9883,25 @@ begin
       LImpact.AddDiff(LDiff);
       Log('impact: the diff read in %d ms', [LSW.ElapsedMilliseconds]);
     end;
+    // An overloaded routine's name is each of its overloads.
     if (ArgStr(AArgs, 'file') <> '') or (ArgStr(AArgs, 'symbol') <> '') then
-      LImpact.AddTarget(ResolveOne(AWs, AArgs));
+      for var LT in ResolveOneOrOverloads(AWs, AArgs) do
+        LImpact.AddTarget(LT);
     if LV is TJSONArray then
     begin
       for var LItem in TJSONArray(LV) do
         if Trim(LItem.Value) <> '' then
-          LImpact.AddTarget(ResolveNamed(AWs, Trim(LItem.Value),
-            ArgStr(AArgs, 'kind')));
+          for var LT in ResolveNamedOrOverloads(AWs, Trim(LItem.Value),
+            ArgStr(AArgs, 'kind')) do
+            LImpact.AddTarget(LT);
     end
     else if (LV <> nil) and not (LV is TJSONNull) then
       // A list written as one string: "TFoo.Bar, Baz".
       for var LName in LV.Value.Split([',', ';'], TStringSplitOptions.ExcludeEmpty) do
         if Trim(LName) <> '' then
-          LImpact.AddTarget(ResolveNamed(AWs, Trim(LName),
-            ArgStr(AArgs, 'kind')));
+          for var LT in ResolveNamedOrOverloads(AWs, Trim(LName),
+            ArgStr(AArgs, 'kind')) do
+            LImpact.AddTarget(LT);
     if LImpact.Empty then
       raise EToolError.Create('give `diff` (the output of `git diff`) or the '
         + 'declarations you will change: `symbol`, `symbols`, or `file` + '
@@ -10519,7 +10710,8 @@ end;
 const
   TARGET_PROPS =
     '"symbol":{"type":"string","description":"Symbol name: TFoo, TFoo.Bar, '
-    + 'UnitName.TFoo.Bar. Alternatively give file + line + name."},'
+    + 'UnitName.TFoo.Bar (TFoo.Bar also finds a member TFoo inherits). '
+    + 'Alternatively give file + line + name."},'
     + '"file":{"type":"string","description":"Source file, absolute or '
     + 'relative to the project group directory"},'
     + '"line":{"type":"integer","description":"1-based line in file"},'
@@ -10540,7 +10732,8 @@ const
     '{"name":"find","description":"Find declarations by name across the '
     + 'whole closure of the project group (project units first, then '
     + 'libraries and the RTL). Exact name, qualified name (TFoo.Bar, '
-    + 'Unit.TFoo) or wildcards (*Customer*). Returns file:line, the qualified '
+    + 'Unit.TFoo; TFoo.Bar finds a member TFoo inherits too) or wildcards in '
+    + 'any part (*Customer*, *.Save, *Form.Save). Returns file:line, the qualified '
     + 'name, its kind and the declaration (one written over several lines '
     + 'joined). Faster and more precise than grep for Object Pascal '
     + 'declarations. A name the index does not hold is answered with the '
@@ -10616,7 +10809,8 @@ const
     + 'the component they belong to; a rename must change those as well. '
     + 'Also takes a unit name (its uses '
     + 'clauses), and by position a compiler built-in or a conditional '
-    + 'define.",'
+    + 'define. The name of an overloaded routine lists the uses of each '
+    + 'overload, a row tagged with the one it binds to.",'
     + '"inputSchema":{"type":"object","properties":{' + TARGET_PROPS + ','
     + '"limit":{"type":"integer","description":"Max rows (default 150; '
     + '0: the counts and notes alone, no rows)"}}}},' +
@@ -10634,7 +10828,8 @@ const
     + 'caller was found for. An event handler''s bindings in the form files '
     + '(.dfm, .fmx) are rows too - `OnClick = btnSaveClick` under the '
     + 'component whose event runs it, at any depth: where a chain of calls '
-    + 'starts from the UI.",'
+    + 'starts from the UI. The name of an overloaded routine walks from each '
+    + 'overload, a row naming the one it calls.",'
     + '"inputSchema":{"type":"object","properties":{' + TARGET_PROPS + ','
     + '"depth":{"type":"integer","description":"Levels of callers (default 1, '
     + 'max 4)"},'

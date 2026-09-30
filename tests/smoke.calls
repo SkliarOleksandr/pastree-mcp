@@ -163,3 +163,16 @@ callers {"symbol":"TCellList.SetCell"}
 callees {"symbol":"SwapCells"}
 related {"relation":"assignments","symbol":"TCellList.Cells"}
 references {"symbol":"TCellList.FCells"}
+find {"query":"*.GetCount"}
+find {"query":"*Derived.Guarded"}
+find {"query":"*.NoSuchMember"}
+find {"query":"TDerived.GetCount"}
+find {"query":"TDerived.NoSuchMember"}
+source {"symbol":"TDerived.GetCount"}
+references {"symbol":"TDerived.FCount"}
+references {"symbol":"TBase.Add"}
+references {"symbol":"TQuiet.Hush"}
+callers {"symbol":"TBase.Add"}
+callers {"symbol":"TQuiet.Hush"}
+callees {"symbol":"TQuiet.Hush"}
+impact {"symbol":"TBase.Add"}
