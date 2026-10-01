@@ -746,7 +746,9 @@ gap between the answers and the truth.
    the units that could name the symbol, `status` naming the server and its
    log, and a second server given the same `--log` logging beside it
    instead of not at all.
-6. The task comparison of section 8, question 2, scaled up on tasks that
+6. (Done 2026-10-01, 10.4: 12 tasks x 3 arms; it discriminates on
+   overloads and a shadowed constant, and the tools arm skips the index
+   unless told.) The task comparison of section 8, question 2, scaled up on tasks that
    discriminate (10.4), before any new tool: the pilot's tasks were solved
    by grep as well, so it has not yet said where the tools are enough and
    where an agent falls back - which is what this list should be ordered
@@ -815,7 +817,7 @@ builds.
 | C6 size p95 | < 5k tokens | every tool but `outline` (up to 141k in one answer) | `outline` and `form` bounded, 300 rows |
 | C7 notes | every gap said | every cut said; not said: uses in branches not compiled, implementation headers left out, whose property a redeclaration answers for, what a cut left out | said |
 | C8 freshness | identical | 266 of 290 pairs | 290 of 290 |
-| C9 sufficiency | >= 80% of tasks, fewer tokens | - | pilot on 0.16.8 (10.4): 4 of 4 correct with the tools and 4 of 4 without; tokens with/without 1.04, time 0.71 - the tasks do not discriminate |
+| C9 sufficiency | >= 80% of tasks, fewer tokens | - | pilot on 0.16.8 (10.4): 4 of 4 correct with the tools and 4 of 4 without; tokens with/without 1.04, time 0.71 - the tasks do not discriminate. Scaled up on 0.23.2 (10.4), 12 tasks x 3 arms, 1 run each: correct bare 9, tools 11, hint 10 of 12 (hint 2 partial); tokens tools/bare 0.97, hint/bare 0.87 |
 
 The tools also found four latent defects of the product itself: three form
 files naming components their forms do not have, and one with text after
@@ -894,6 +896,24 @@ its root's `end` - seven property lines dcc drops from the exe.
   overloads, virtual and interface dispatch, `with`, forms inherited several
   levels deep, project membership - asked also by a bare name; one run per
   task and arm says what discriminates, not a rate.
+- **Sufficiency (C9) scaled up** (2026-10-01, pastree-mcp 0.23.2, 12 tasks
+  x 3 arms, one run each, `local/audit/findings-phase6-scaled.md`). Arms:
+  bare, tools (pastree configured, not mentioned), hint (tools plus the
+  "use the index" lines). Correct / partial / wrong: bare 9/1/2, tools
+  11/0/1, hint 10/2/0. Where grep misled: the overload of `Balance_asof`
+  (bare found 5 of 10 calls) and a shadowed constant (bare named the
+  other copy's readers); both pastree arms were right. The tools arm was
+  wrong on `PosEQ` (said no call runs the string overload; Travel.PAS:500
+  does) after a text search - it called pastree in 5 of 12 runs and not in
+  that one; the hint arm called it in all 12 (62 calls). The hint arm's two
+  partials were reasoning slips over a right index answer (a rename whose
+  Reports frame it called optional; "fails to load" for a deleted handler).
+  Cost, total tokens / seconds: bare 3.85 M / 647, tools 3.74 M / 472, hint
+  3.35 M / 419; the project-membership task alone 931 k and 242 s bare,
+  304-362 k and 30-45 s with `impact`. The three controls (dfAuto, handler
+  rename across frames, field writers) were right on every arm at the same
+  cost. One run per cell: this says which tasks discriminate and what the
+  agents do, not a rate.
 - **Found by the pilot** (on 0.16.8):
   - F6.1 (fixed in 0.20.2, PasTree 0.75.2): `related assignments` of a
     property an own class republishes scanned the closure once per link of
