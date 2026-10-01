@@ -636,7 +636,20 @@ gap between the answers and the truth.
   of one name is declared by 22 classes and reopened by 222 form files; the
   components of the main form are 7,188 lines of `.dfm`, 82k tokens to read
   with the inherited forms behind it.
-
+- **Measured again with the tools built** (0.23.1, the same 9 questions over
+  the client group; `local/bench-forms-client-0.23.1.md`). The 9 answers
+  cost 7,283 tokens in all against 1,080 before - the bindings they did not
+  have - and grep 112,062 (243,032 with the 3 lines of context that tell a
+  real hit from a namesake): 33x. The handler no code calls: `callers`
+  "none found" is now its one form binding (52 tokens against 5,120 for
+  the grep of 261 lines), `references` of a base panel 83 rows (from 2) in
+  1,452 tokens, of an inline frame 44 (from 19), `form` of the main form
+  3,743 tokens against the 82,153 that the `.dfm` chain takes to read. No
+  row of any answer is missing from what grep finds (miss 0 on all 9);
+  the first call, which reads every form file, is 0.7 s, the rest 0.15-0.3 s.
+  On the fixture the 18 questions of `testsixture.bench` cost 2,042
+  tokens against grep's 2,906 (7,069 with context); before the form rows
+  the same 18 cost 1,253.
 ### 9.6 Refactoring and new code
 
 1. **`rename_plan`** - `PlanRename` / `PlanUnitRename` as a list of edits
