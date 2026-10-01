@@ -753,20 +753,57 @@ gap between the answers and the truth.
    by grep as well, so it has not yet said where the tools are enough and
    where an agent falls back - which is what this list should be ordered
    by.
-7. `rename_plan`, `change_plan` - the notes section 10 added to
+7. Light mode (9.9): library units analyzed interface-only, the memory and
+   time of every server - PasTree first (its `docs/library-light-mode.md`),
+   this server's `--light` after; measured before it is built.
+8. `rename_plan`, `change_plan` - the notes section 10 added to
    `references` are the rename's parts, collected by hand today (9.6).
-8. `mode: count | files` (9.2) - the answers the limits cut are about widely
+9. `mode: count | files` (9.2) - the answers the limits cut are about widely
    used library members and properties set on thousands of form lines; a
    count per file first, then the lines of the files that matter.
-9. `defines` (9.6) - `references` now names the lines in branches not
+10. `defines` (9.6) - `references` now names the lines in branches not
    compiled; which define selects each is the next question.
-10. `lint` (the two `uses` rules first), `metrics`. `unused-symbol`'s
+11. `lint` (the two `uses` rules first), `metrics`. `unused-symbol`'s
    exceptions are measured: 24 of 384 sampled symbols that no code names
    are called through a base, an interface or a property, and a published
    property's uses are form lines.
 
 `type_of`, several targets per call, `overview`, `implement_plan`,
 `scope_at` and `uses_for` go in when a measured session asks for them.
+
+### 9.9 Light mode
+
+The server analyzes the whole `uses` closure completely, library bodies
+included: on the client group 2,253 of the 3,958 units of the main analysis
+are library and the process holds about 2.8 GB (`strict`: 1.6 GB and 7 s
+more). An agent asks about the project's own code; of the RTL, the VCL and
+the third-party libraries it needs the declarations, not the bodies. Several
+sessions at once start a server each, so the memory multiplies. The change
+is in PasTree first (its `docs/library-light-mode.md`, 2026-10-01: a
+host-chosen set of units parsed interface-only and never upgraded to a full
+parse, which the staged analysis already does in its first wave). What this
+server adds once PasTree has it:
+
+- **`--light <glob>`** (repeats), and a default for the installed Studio's
+  RTL and VCL sources: the units analyzed interface-only. The in-repo
+  third-party directories (`ThirdParty\...` on the client group) are own by
+  the rule of section 4 and are light only when named.
+- **Said in every answer it touches.** `status` names the light units and
+  the memory and build time saved. `callers`, `impact` and `related` say
+  that calls made from the bodies of light units into own code (an override
+  or an interface method the library runs, an event handler it assigns, a
+  class it creates through a class reference) are not seen. `source` and
+  `definition` of a light routine give the declaration and say the body is
+  not read, or upgrade that one unit on demand.
+- **Equivalence for own code** is the acceptance, measured with the audit
+  battery (10.5): the answers about own symbols equal to the full analysis
+  except for those named rows, every difference classified.
+- **Opt-in until measured.** Whether it becomes the default depends on
+  PasTree's numbers (the share of nodes in bodies, resident memory, closure
+  size) and on the battery.
+- Separate from it: one long-lived server shared by the sessions of a
+  project (a socket or HTTP transport), the other way to stop N sessions
+  holding N indexes. Not planned until light mode has been measured.
 
 ## 10. What deep testing showed
 
