@@ -182,3 +182,15 @@ callers {"symbol":"TBase.Add"}
 callers {"symbol":"TQuiet.Hush"}
 callees {"symbol":"TQuiet.Hush"}
 impact {"symbol":"TBase.Add"}
+rename_plan {"symbol":"TCircle","new_name":"TRound"}
+rename_plan {"symbol":"TfrmMain.btnSave","new_name":"btnOK"}
+rename_plan {"symbol":"TfrmMain.btnSaveClick","new_name":"SaveClicked"}
+rename_plan {"symbol":"uShapes","new_name":"uShapesNew"}
+rename_plan {"symbol":"TQuiet.Hush","new_name":"Quieten"}
+rename_plan {"file":"AppA/uMembers.pas","line":158,"name":"Hush","new_name":"Quieten"}
+rename_plan {"symbol":"TfrmMain.NeverBound","new_name":"Unbound"}
+rename_plan {"symbol":"TCircle.Radius","new_name":"Radius"}
+rename_plan {"symbol":"Integer","new_name":"Int"}
+rename_plan {"symbol":"TCircle","new_name":"begin"}
+rename_plan {"symbol":"TStringList","new_name":"TStrList"}
+rename_plan {"symbol":"TCircle"}

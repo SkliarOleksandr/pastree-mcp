@@ -156,6 +156,7 @@ Common rules:
 | `callers` | `FindReferences` per source, `MethodAt`+`FindOverrides`, `FindDescendants`, `FindMemberX`, `GotoBareInherited`, `XDescendsFrom`, `WithTargetTypeX` | `references` folded to the routines the calls sit in, and what a reference search cannot see. A call is written against a *source*: the routine; a virtual method it overrides (the chain climbed from its class, stopping at the root or a `reintroduce`); an interface method it implements - a same-named method of an interface that its class, an ancestor or a descendant lists, or that one extends, when the member that name finds from the listing class is the routine or a method it overrides (`FindImplementations` is not asked: it answers only for the interface a class lists itself); a property it is the getter (reads) or setter (writes) of. Through a virtual slot a row counts only when the receiver's static type may hold an object that runs this implementation (`LSquare.Area` bound to `TShape.Area` never runs `TCircle.Area`; a property read on a class that overrides the getter runs the override), and `inherited X` never dispatches. A bare `inherited;` names nothing: the overrides below the class - for a constructor that is not virtual, the same-named constructors of its descendants - are scanned for one, and `GotoBareInherited` says what it calls. Each reference is classified from the tree: a call, or the routine handed on - `@Foo`, `OnClick := Foo`, a procedure passed as an argument - tagged `[not a call]` and not followed. A function named without parentheses is a call unless assigned to something procedural; as an argument it is taken for a call. `depth` 1-4 follows the routines the calls sit in, own files only (a library routine is shown, not followed), each site once; `limit` (150) caps the rows over all levels, and a level past it is not searched - the answer says so (a getter read 379 times, depth 3 and no cap: 34 s, 81k tokens). Tags: `via X` for a row bound to another source - dropped from the rows and said once above them when every first-level row shares it; `-> X` on a deeper row, the routine of the level above it reaches; overloads of one name told apart by declaration line. A routine searched and found uncalled is named at the end, and a published one (or in the unnamed first section of a `TPersistent` descendant) gets the note that a `.dfm` may bind it (9.5). A destructor points to `related destructions`. The name of an overloaded routine walks from every overload at once, each root named by its declaration line - `[-> TBase.Add (line 26)]` on a row - and the header counts each one's rows (0.22.0). |
 | `callees` | the body's `RefMap`/`ExtRefMap`, `RefUse`, `PropertyRedeclPrev`, `GotoBareInherited`, `FindMemberX` over a class index (`AncestorOfX`, `ListedInterfaces`) built once per call | What a routine calls - `callers` from the other end. The body is walked from the tree - its block, its local declarations and anonymous methods, not its nested routines, which are callees of their own - and each name is taken for what it binds to: the overload the compiler chose (PasTree writes it into the maps), a property's getter or setter for a read or a write (a republished `property X;` takes its ancestor's), what a bare `inherited;` runs; a routine handed on (`OnClick := Foo`, `@Foo`) is `[not a call]`, classified as in `callers`. One row per routine reached, at its declaration line, grouped by file under its type, with the lines of its calls: `[at 19, 31]`. A virtual call made on an object - not on a type name, not `inherited X` - adds what that object may run: for its static class and every class below, the method the slot finds there, its own or the nearest ancestor's - so an override between the method's class and the object's is found (a property's accessor binds where the property is declared), not only those below. An interface call: the same over every class taking the interface on, listing it or one extending it. `[via X]` names what the call is written against. More than 10 such methods, merged over the analyses, are counted, not listed: a base class's hook called on Self has a dozen or two in a real group. Calls through a method pointer or a procedural variable are named - what they run is assigned at run time - and built-ins listed once. `depth` 1-4 follows the routines reached, own files and with a body, each once; a row below the first level names its caller, `[TFoo.Load at 40]`; `limit` (150) caps the rows over all levels. `X[I]` over a default array property runs its getter, or its setter when the brackets are what is assigned (0.21.0). Not seen: a record's operators and implicit conversions, a for-in's enumerator, a method resolution clause (`procedure IFoo.Bar = Baz`). |
 | `impact` | the walk of `callers` over several roots, `FindReferences`, `FindUnitReferences`, `FindImplementations`, each model's `UsesList`, the model `Diags` | What a change reaches, in one answer: `callers`, `related overrides` and `unit_deps` at once, and the question none of them answers - which members of the group to build and test. Given a unified diff (`git diff` output the agent passes as text - the server runs no git) or declarations (`symbol`, `symbols`, file + line + name). A diff's paths resolve against the group directory or a directory above it: git writes them from the repository root, which may hold more than the group. Its `+` and context lines must read as the file on disk does - compared with every character past ASCII dropped, since a diff that went through a console may carry those in another encoding - or the file is refused by name: a diff of another state numbers another file. A changed line of code touches the innermost declaration around its tokens: a routine as a whole (a nested routine, an anonymous method, a local are its routine's), a type, a variable, constant or property of a unit or a type; of those met on one line, one holding another is left out (the `;` after `property X ... read FX` is the class's token). A line with no token of its own (a directive) is the point between the tokens around it. A run of removed lines beside added code is read from the added lines alone - its removal point, between two members, would name the class - and a run that only removes is that point; out of a type, the members it removes are named rather than the type. Outside every declaration, the place: a uses clause, initialization, finalization, a main block, exports. Comment-only lines touch nothing (read from the diff's text, so removed lines too). A type every line of which is added is new: listed alone, its members and their implementations folded into it. A removed routine, property or type - declared on a removed line and on no added one, so a changed signature is not a removal - or a field removed from a type is named with the own-unit diagnostics still quoting its name: the calls a rename or a deletion left behind. **Members to build and test**: those whose closure holds a changed unit (a form's unit, an include's includers, a `.dproj`'s own member) - a member's closure is what its main source reaches through `uses`, read per member in its own analysis, since an analysis holds several (section 4); a file compiled into fewer members than the list is tagged with them. A unit whose interface section changed says how many units use it, their names up to 8 (the dependents' own recompile, and where to run `diagnostics`). Each declaration says the method it overrides (the chain's nearest link - what a changed signature must still match), the interface methods and properties it is also called through, its overrides and, for an interface method, its implementations - 10 each, then counted. Then the walk of `callers` from all of them at once: a declaration that is no routine is searched for its uses, a field also through the property that reads or writes it; with several roots a row names the one it reaches (`-> X`). 40 roots are searched (the walk is the time: about 125 ms a root on the client group), 100 declarations listed, `limit` (150) rows. `depth` as in `callers`. |
+| `rename_plan` | `PlanRename` (with its carried renames), `PlanUnitRename`, `RenameBlockReason` over `LibraryPaths` | The edits of a rename as `line:column` positions of the old text, grouped by file, each row with the line as it reads after the edits on it; nothing is written, the agent applies them (a line with two columns, the last first). PasTree's plan is the contract: the declaration and every resolved use (a namesake is left alone, an overloaded routine renames only the one addressed - a name that is several is refused with the candidates, as everywhere), the class name in its methods' implementation headers, the paired parameter names of a forward or implementation header, every link of a property's redeclaration chain, the form-file lines that bind it by name (tagged with the component and the property), and for a component the handlers named after it, carried along under their new names as the form designer does - an edit that is not the new name shows `(old -> new)`. A unit (its name, or its file) is its header and every `uses` item; the file name it needs is said, the file is not renamed. **Refused whole**, as PasTree does, with the reason and nothing planned: a name that is no identifier or the same, a source under the library paths or read-only, a binary or unreadable form file, a published property or enum value a form spells, a `uses` alias. An analysis that refuses refuses the plan; the shared units of a group, analyzed twice under the strict policy, are planned once (edits merged by site). Not in the plan, and said: the lines of branches the configuration does not compile that write the name (to check), the root `Name` through which other forms reach a module's components, and that a collision with a name visible at an edit is not checked - `compile` says. `limit` (2000) caps the source lines, and a cut plan says it is not the whole rename. |
 | `compile` | none: MSBuild (a `.dproj`) or dcc (a bare `.dpr`/`.dpk`) as a process of its own; `impact`'s member closures for which members; the tree for the routine of a row | The members a change reaches, built by the real compiler: those named (`member`), those compiling `file`, else those the files changed this session reach (what the freshness check of section 5 found). MSBuild over the member's `.dproj` with its platform and configuration, target `Make` - `Build` also runs AutoIncBuildNumber, which rewrites the `.dproj` of a project that increments its build number; a bare `.dpr`/`.dpk`, dcc directly with the member's paths and the registry search path. Every output - exe, dcu, bpl, dcp, hpp, obj, resources, type library - goes to the member's build directory (`--build-dir`, default `%TEMP%\pastree-mcp\<group>-<hash>\<member>-<platform>-<config>`), and pre- and post-build events are not run: the answer names them. The first build seeds the dcu directory with the developer's own `.dcu` files, from where MSBuild evaluates `DCC_DcuOutput` to (a probe: a target that does nothing, at diagnostic verbosity), so dcc recompiles what changed since, as the IDE's Compile would. The environment is rsvars.bat's plus the IDE's own variables, which the library path names. The answer: per member, built or FAILED, the time, dcc's line count and the exe; the errors, own files first, each under its file with the routine it sits in and the source line below; an F2063 (could not compile used unit) folded under the unit whose errors caused it; build errors that are not the code's (MSBuild's own, a resource or type library tool); the search path directories that do not exist when a unit was not found; then the warnings and hints of the group's own files that are new since the member's previous compile, the rest counted. New is per unit, since `Make` reports a unit's warnings only when it recompiles it: a unit recompiled has its stored warnings replaced, one not recompiled keeps them, and a unit never compiled here before counts as new only in a file changed this session. `show: warnings` lists every warning of the group's files, `all` every hint too; library units are counted only. dcc cuts a message's `file(line)` at 128 characters, and MSBuild then does not see it as an error at all: the file is found by the prefix, the line by the name the message quotes when exactly one line writes it. A form file dcc does not link has no `file(line)` either: E2161 `Error opening file "<path>"` of a text form that does not convert is put on the `.dfm`, at the line PasTree's reader - TReader's grammar, which dcc's conversion follows - stops at, with its reason, and E1026 of a missing one on the `{$R *.dfm}` of the unit linking it (0.23.1; both were rows under "(no file)", a path in the text). A build that stops at dcc's own internal error - an F2084, no error of the code beside it - is run once more, a Make over the .dcu files the first one wrote: the compiler failing, not the code, and the second usually passes; the answer is the second build's, the first one's error said on the member's line, and one that comes back twice says so and points to `rebuild: true` (FR.4: a colleague's build failed once with F2084 in a unit the change did not touch, and passed on the second). The second build deletes the `.dcu` of each unit the error names first, a stale one being the usual cause; one that stops at it too leaves a note in the build directory, and the next compile stopping at the same error (the code and the files it names - not the text, an access violation's address changes) does not build a second time and says so in one line (0.23.0: on the client group's COM server the F2084 came back on every compile, and the retry was a whole build more each time); a build that passes clears the note, `rebuild: true` always retries. The exe is named with a note that it is built to check the compile - not beside the DLLs and files the project's own output has, so run it only if it is a console test runner (an agent ran a COM server built there, and a system dialog came up). Progress notifications while it runs, when the call carries a token; the other calls are answered while it builds, and a cancelled call kills the build (section 7). `limit` (60) caps the rows. |
 | `related` | `TypeAt`+`FindDescendants`, `MethodAt`+`FindOverrides`, `InterfaceMethodAt`+`FindImplementations` / `InterfaceAt`+`FindInterfaceImplementors`, `AssignableAt`+`FindAssignments`, `ClassAt`+`FindCreations`/`FindDestructions` | The `...At` test runs at the declaration site - it normalizes (method to its declaration, alias to its type) and refuses what the relation cannot mean, which becomes an error naming what was needed. Rows are grouped by file like every answer; a descendant names its parent (`<- TParent`) below the first level, and a tagged row whose source line repeats the previous row's (an override chain is one signature) shows only its tag. An indented tree was tried first: it repeats a path per row and cost as much as grep on a 250-class hierarchy. |
 | `outline` | `PasModuleOutline` | Sections, uses, includes, types with members, routines with signatures, each with its line. `owner` and `section` filter; `members: false` keeps only types and bodies. A routine's or property's parameter list and result are rebuilt from the tree, whole: PasTree's `Detail` is an editor's hint cut at 80 characters, and a cut mid-name followed by the result type - `AInterfa...: TPasTree` - reads as one more parameter. The same text and the same 160-character cut at a parameter boundary as a declaration row; on the client group a 22,000-line form's outline grew 1.2%. `limit` (300 rows) bounds it: over it, the types' members are left out first and the answer says how many (`owner` gives one type's back), then the rows are cut and counted - the client group's largest shared unit was 11,202 rows, about 141k tokens, in one answer, and 400 rows of it without members still 7k. |
@@ -652,7 +653,7 @@ gap between the answers and the truth.
   the same 18 cost 1,253.
 ### 9.6 Refactoring and new code
 
-1. **`rename_plan`** - `PlanRename` / `PlanUnitRename` as a list of edits
+1. **`rename_plan`** (done, 0.24.0, section 3) - `PlanRename` / `PlanUnitRename` as a list of edits
    (file, line, column, old, new) the agent applies itself. Section 10 found
    what a rename made from `references` rows has to collect by hand today,
    each said in a note of its own: the form lines that bind a handler or set
@@ -754,9 +755,9 @@ gap between the answers and the truth.
    where an agent falls back - which is what this list should be ordered
    by.
 7. Light mode (9.9): library units analyzed interface-only, the memory and
-   time of every server - PasTree first (its `docs/library-light-mode.md`),
+   time of every server - PasTree first (9.9.1),
    this server's `--light` after; measured before it is built.
-8. `rename_plan`, `change_plan` - the notes section 10 added to
+8. `rename_plan` (done, 0.24.0), `change_plan` - the notes section 10 added to
    `references` are the rename's parts, collected by hand today (9.6).
 9. `mode: count | files` (9.2) - the answers the limits cut are about widely
    used library members and properties set on thousands of form lines; a
@@ -779,7 +780,7 @@ are library and the process holds about 2.8 GB (`strict`: 1.6 GB and 7 s
 more). An agent asks about the project's own code; of the RTL, the VCL and
 the third-party libraries it needs the declarations, not the bodies. Several
 sessions at once start a server each, so the memory multiplies. The change
-is in PasTree first (its `docs/library-light-mode.md`, 2026-10-01: a
+is in PasTree first (design in 9.9.1, 2026-10-01: a
 host-chosen set of units parsed interface-only and never upgraded to a full
 parse, which the staged analysis already does in its first wave). What this
 server adds once PasTree has it:
@@ -804,6 +805,179 @@ server adds once PasTree has it:
 - Separate from it: one long-lived server shared by the sessions of a
   project (a socket or HTTP transport), the other way to stop N sessions
   holding N indexes. Not planned until light mode has been measured.
+
+#### 9.9.1 The PasTree side (proposal, 2026-10-01, nothing built)
+
+Written first as a PasTree design note, kept here; the change itself is made in PasTree.
+Whoever builds it starts with "Measure first" and lets the numbers decide whether the rest is worth doing.
+
+
+##### The problem
+
+An agent working on a project asks about the project's own code: callers,
+overrides, forms, what a change reaches. Almost never about the inside of the
+RTL, the VCL or a third-party library; of those it needs the **declarations**
+(types, members, ancestors, overloads, signatures) and nothing from the
+bodies. PasTree analyzes every unit of the uses closure completely, bodies
+included, and pastree-mcp keeps all of it:
+
+- client group (`AVImark.groupproj`, 9 projects): analysis 0 holds 3,958
+  units, 1,705 of them own, so 2,253 library units are fully analyzed; the
+  server holds about 2.8 GB; building the three analyses takes 9.9 s + 7.0 s
+  + 4.2 s. The `strict` policy costs 1.6 GB and 7 s more.
+- an agent session starts its own server process; several sessions at once
+  (worktrees, parallel tasks) multiply the memory. Subagents of one session
+  share the parent's server, so the multiplication is across sessions.
+
+`DemoteText` already frees the text layer of library units after a build
+(pastree-mcp SPEC section 6), and MEMORY-AUDIT 6.4-4 stage 1
+(`ReleaseRunMaps`) frees per-run maps. What stays is the semantic model of
+every library routine body: nodes, resolved references, expression types,
+cross-reference tables. That is the part nobody asks for.
+
+##### What exists to build on
+
+- `TPasParser.ParseFile(..., AInterfaceOnly)` parses a unit up to the end of
+  its interface section (`ParseDeclSections`, `PasTree.Parser.pas` around
+  3994: "In interface-only mode we stop here"). `PasTree.Ast.Check` invariant
+  **I7** states the interface-only parse is a prefix of the full one.
+- `AnalyzeStaged` does exactly this in wave 1 (`msIntfReady`: "enough for
+  navigation INTO it") and then upgrades every module in wave 2
+  (`msFullReady`, "revealing implementation-only dependencies"), then the
+  cross passes (`msCrossReady`). The interface wave is documented as "a
+  transient early-usability optimization": the final state equals
+  `AnalyzeProject`. **Light mode is: for chosen units, stop at wave 1.**
+- `.dcu` units (`PasTree.Dcu.Source`) are already interface-only text fed to
+  the ordinary pipeline, so nothing downstream distinguishes them from an
+  interface-only `.pas`.
+- `Demoted` models and `EnsureHydrated` already model "this unit's text is not
+  here, bring it back when a query needs it".
+
+##### The mode
+
+**Light units**: a set of units (by file path, chosen by the host) that are
+parsed interface-only and never upgraded to a full parse. Every other unit
+(the host's own units) is analyzed exactly as today.
+
+For a light unit:
+
+| | stays | goes |
+| --- | --- | --- |
+| parse | uses (interface), types, constants, variables, routine headers, class and interface members, properties, attributes, generic declarations, GUIDs | implementation section: bodies, local types, implementation `uses`, initialization and finalization |
+| semantic | type resolution of the declarations, ancestors, overload sets, member lookup, inherited members, default properties, enum values | expression typing and reference binding inside bodies, cross passes over bodies (`CrossResolve`, `CheckCalls`, `BindTypesX`, `CrossType` on those nodes) |
+| closure | the interface `uses` closure | units reachable only through a light unit's implementation `uses` (a library unit used by another library's body) |
+
+Own units are unchanged, with these named consequences (the whole list; an
+answer outside it is a defect):
+
+1. **Calls made from a library body into own code are not seen.** The RTL or
+   VCL calling an own override, an interface implementation, a published
+   method through RTTI, an event handler assigned inside the library, a class
+   created through a class reference inside a library routine. `callers`,
+   `impact` and `related creations/overrides` lose those rows. (Calls from own
+   code, including through a library's virtual or interface method into an
+   own implementation, are found as before - the declarations carry that.)
+2. **The body of a library routine is not available**: `source` and
+   `definition` of one return the declaration only, unless the host asks to
+   upgrade that one unit (below).
+3. **Library units used only by library bodies are not loaded.** Smaller
+   closure; but `unit_deps` and project membership of a *library* unit may
+   differ. For own units nothing changes.
+4. **Inline routines, generic method bodies**: see "Risks".
+
+Not affected: own units' diagnostics (name resolution of own code against
+library declarations), form files, `compile` (dcc does its own work),
+freshness of own files.
+
+##### What is "library"
+
+Not decided by PasTree: the **host passes a predicate** (or a path set). In
+pastree-mcp "library" today means outside the project root and search paths'
+own roots (SPEC 4). That is not enough for the client group: its third-party
+sources (`ThirdParty\DevExpress`, `ThirdParty\RaveReport`, ...) live **inside
+the repository**, so they count as own. Light mode needs an explicit list
+(`--light <glob>` repeated) besides "everything outside the root", and a way
+to say "RTL and VCL of the installed Studio" (the search-path directories
+under `$(BDS)\source`).
+
+##### API sketch
+
+- `TPasSemaProject`: a property or an `AnalyzeStaged` parameter
+  `LightUnit: TFunc<string, Boolean>` (file path -> True when light).
+- Wave 2 skips a light module: its status stays `msIntfReady` for good. Every
+  place that tests `FStatus >= msFullReady` (Project.pas 16992, 17350, 17643,
+  17693-17737, 17792) must be read once to decide, per place, whether an
+  interface-ready module is acceptable (diagnostics scoping, E2003 gating,
+  cross passes) - each is a silent wrong answer if it is not.
+- `UpgradeToFull(mid)`: full-parse one light unit on demand (for `source` of a
+  library routine), cheap for a single unit, and it must not drag its
+  implementation `uses` into the closure unless asked.
+- `Light` is visible in the model (so a consumer can say "interface only" in an
+  answer), and `AnalyzeModuleOnly` / incremental reanalysis never touch light
+  units (they are not watched).
+
+##### Measure first
+
+Before any of the above, three numbers, from the large group:
+
+1. **Share of the work that is bodies**: node counts per library unit,
+   interface-only vs full (the I7 check already builds both; total over the
+   closure), and per-wave time of `AnalyzeStaged`. If bodies are under about
+   half of the library nodes, stop.
+2. **Resident memory** after a build with wave 2 and the cross passes skipped
+   for library units (a throwaway hack is enough), against today's, for the
+   shared and the strict policy. The wanted ratio is what decides default vs
+   opt-in.
+3. **Closure size**: units loaded with and without implementation `uses` of
+   library units.
+
+Split every number three ways: RTL/VCL (installed Studio), in-repo
+third-party, own.
+
+##### Acceptance
+
+- **Own-unit equivalence.** On the fixture groups and on the client group:
+  diagnostics of every own unit, `references`/`callers`/`callees`/`impact`
+  for the sampled symbols (pastree-mcp's battery: 2,592 answers over 384
+  symbols, `tests\audit.ps1`), identical to the full analysis except for the
+  consequences 1-3 above; every difference is classified, none unexplained.
+- A fixture library whose body calls an own virtual method, an own interface
+  method and an event handler: full mode finds the caller rows, light mode
+  does not and says so (the pin that consequence 1 is *known*).
+- Light units' declarations resolve the same: `members`, `definition`, overload
+  choice for a call in own code that targets a library routine (the classes of
+  defect the 20,000-call audit found were all in overload and default-property
+  resolution - re-run those pins).
+- Peak memory and build time on the large group, before and after, in the
+  commit message.
+
+##### Risks
+
+- **Generic and inline bodies.** `docs/coverage.md` notes overlay generic
+  bodies as a stage-E gap, and inherited members "named from the generic's
+  own method bodies" were once a false-positive source (Project.pas 5094).
+  Check that typing own code through `TList<T>`, `TDictionary<K,V>`,
+  `TEnumerable<T>` needs nothing from the library's bodies.
+- **Constants and types declared in the implementation** of a library unit
+  are invisible to everyone else, so cutting them is safe; **initialization
+  sections** register classes (`RegisterClass`, `RegisterComponents`) -
+  nothing here follows registration.
+- **`$I` includes in an implementation** are skipped; one in the interface
+  stays.
+- **`status` / diagnostics gating**: a unit that is interface-only must not be
+  reported as "clean" for want of analysis - the failure mode the `.dcu`
+  fallback was built to avoid (F1027).
+- The hosts: pastree-lsp edits files and wants completion inside the open
+  unit, which is own, so it is unaffected; but its go-to-definition into a
+  library body would need `UpgradeToFull`.
+
+##### Beyond this section
+
+Light mode makes each server smaller. It does not stop N sessions from
+starting N servers. That is a pastree-mcp question (one long-lived server per
+project shared by sessions, over a socket or HTTP; the index is one per
+project but each client sees the working tree on disk) and not PasTree's;
+noted here only so the two are not mistaken for one another.
 
 ## 10. What deep testing showed
 

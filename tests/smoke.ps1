@@ -384,12 +384,29 @@ Check 'unit_deps' (Block $b 'unit_deps') @('uShapes is used by 3 units', 'AppB\u
 Check 'diagnostics' (Block $b 'diagnostics') @('no diagnostics')
 Check 'ambiguous' (Block $b 'references {"symbol":"Area"}') @('is ambiguous - 5 declarations', 'IShape.Area', 'TBigCircle.Area')
 Check 'unknown' (Block $b 'definition {"symbol":"NoSuchThing"}') @('no declaration named `NoSuchThing`', 'a local or a parameter is addressed by `file` + `line` + `name`')
+# rename_plan: a class (its name in the implementation headers), a component
+# with its handlers carried along and the form lines, a handler, a unit, then
+# the empty case (a declaration nothing uses), an overload, and the refusals.
+Check 'rename_plan class' (Block $b 'rename_plan {"symbol":"TCircle"') @('to TRound - 6 edits in 3 files', "Shared\uShapes.pas`n  21:3  [declaration]  TRound = class(TShape)`n  47:13  constructor TRound.Create", '  53:10  function TRound.Area: Double;', '  11:22  TBigCircle = class(TRound)')
+Check 'rename_plan component' (Block $b 'rename_plan {"symbol":"TfrmMain.btnSave"') @('to btnOK - 11 edits in 4 files, 5 of them in form files', '  4:13  [btnSave]  inherited btnOK: TButton', '  14:15 (btnSaveClick -> btnOKClick)  [chkConfirm.OnClick]  OnClick = btnOKClick', '  45:20 (btnSaveClick -> btnOKClick)  procedure TfrmMain.btnOKClick', '(carried along, as the form designer renames them - their edits are in the rows above: btnSaveClick -> btnOKClick)')
+Check 'rename_plan handler' (Block $b 'rename_plan {"symbol":"TfrmMain.btnSaveClick"') @('to SaveClicked - 5 edits in 3 files, 3 of them in form files', '  39:15  [btnSave.OnClick]  OnClick = SaveClicked', '  20:15  [declaration]  procedure SaveClicked(Sender: TObject);') @('carried along')
+Check 'rename_plan unit' (Block $b 'rename_plan {"symbol":"uShapes"') @('to uShapesNew - 4 edits in 4 files', "AppB\AppB.dpr`n  8:3  uShapesNew in '..\Shared\uShapes.pas',", '  1:6  [declaration]  unit uShapesNew;', '(the unit''s file must be called uShapesNew.pas for it to compile')
+Check 'rename_plan overloads refused' (Block $b 'rename_plan {"symbol":"TQuiet.Hush"') @('`TQuiet.Hush` names 2 overloads of one routine - pass `file` + `line` + `name`')
+Check 'rename_plan one overload' (Block $b 'rename_plan {"file":"AppA/uMembers.pas"') @('to Quieten - ', '[declaration]  procedure Quieten(const S: string); overload;') @('procedure Quieten(A: Integer)')
+Check 'rename_plan nothing uses it' (Block $b 'rename_plan {"symbol":"TfrmMain.NeverBound"') @('to Unbound - 2 edits in 1 files', '  23:15  [declaration]  procedure Unbound(Sender: TObject);')
+Check 'rename_plan same name' (Block $b 'rename_plan {"symbol":"TCircle.Radius"') @('refused: The new name is the same as the old one. - nothing is planned')
+Check 'rename_plan reserved word' (Block $b 'rename_plan {"symbol":"TCircle","new_name":"begin"') @('"begin" is not a valid identifier. - nothing is planned')
+Check 'rename_plan library' (Block $b 'rename_plan {"symbol":"TStringList"') @('is a library source (RTL/VCL or third-party) - its identifiers cannot be renamed from here. - nothing is planned')
+Check 'rename_plan no name' (Block $b 'rename_plan {"symbol":"TCircle"}') @('give `new_name`')
 
 # ---- 2. strict policy ---------------------------------------------------------
 Write-Host '--- CLI, strict policy'
 $b = Run-Cli @('--groups', 'strict')
 Check 'strict status' (Block $b 'status') @('analysis 0:', 'analysis 1:')
 Check 'strict references unit' (Block $b 'references {"symbol":"uShapes"}') @('3 references in 3 files')
+# The shared unit is in both analyses: its edits are counted once.
+Check 'strict rename_plan' (Block $b 'rename_plan {"symbol":"TCircle","new_name":"TRound"') @('to TRound - 6 edits in 3 files')
+Check 'strict rename_plan unit' (Block $b 'rename_plan {"symbol":"uShapes"') @('to uShapesNew - 4 edits in 4 files')
 Check 'strict descendants' (Block $b 'related {"relation":"descendants"') @('descendants of TShape (Shared\uShapes.pas:15): 3', 'TBigCircle <- TCircle')
 Check 'strict overrides' (Block $b 'related {"relation":"overrides"') @('overrides of TShape.Area (Shared\uShapes.pas:17): 4')
 # Rows of both analyses in one walk: RunA is project A's, the rest project B's.

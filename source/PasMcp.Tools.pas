@@ -3407,6 +3407,236 @@ begin
   end;
 end;
 
+{ ---- rename_plan ------------------------------------------------------------- }
+
+// PasTree's PlanRename / PlanUnitRename in every analysis that holds the
+// symbol, merged by site: a unit two projects share is analyzed twice and its
+// edits are the same edits. One analysis refusing refuses the plan - the
+// refusals are all-or-nothing in PasTree for the same reason (a partly
+// applied rename is a build break), and a group is no different.
+function ToolRenamePlan(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
+var
+  LT: TTarget;
+  LNew, LErr, LFileName, LForms, LRowTags, LCols, LPreview, LFile: string;
+  LEdits: TList<TPasRenameEdit>;
+  LCarried: TList<TPasCarriedRename>;
+  LSeen: TDictionary<string, Boolean>;
+  LOne: TArray<TPasRenameEdit>;
+  LOneCarried: TArray<TPasCarriedRename>;
+  LOk: Boolean;
+  LId: TSymId;
+  LSb: TStringBuilder;
+  LLimit, LCompiled, LRows, LFileCount, LFormEdits, LShown, LRowLine: Integer;
+  LInactive: TArray<string>;
+  LDeclMids: TArray<Integer>;
+  LVarX: TSemaXType;
+  LArr: TArray<TPasRenameEdit>;
+
+  procedure Flush;
+  begin
+    if LCols = '' then
+      Exit;
+    if LRowTags <> '' then
+      LSb.AppendLine(Format('  %d:%s  [%s]  %s', [LRowLine, LCols, LRowTags,
+        LPreview]))
+    else
+      LSb.AppendLine(Format('  %d:%s  %s', [LRowLine, LCols, LPreview]));
+    LCols := '';
+  end;
+
+begin
+  LNew := ArgStr(AArgs, 'new_name');
+  if LNew = '' then
+    raise EToolError.Create('give `new_name`: what the symbol (or unit) is '
+      + 'to be called');
+  LT := ResolveOne(AWs, AArgs);
+  if LT.Kind in [tkBuiltin, tkDefine] then
+    raise EToolError.Create(Format('`%s` is %s: its name is the compiler''s, '
+      + 'not something this project can rename', [LT.Name,
+      IfThen(LT.Kind = tkBuiltin, 'a compiler builtin', 'a conditional '
+      + 'symbol')]));
+  LLimit := EnsureRange(ArgInt(AArgs, 'limit', 2000), 0, 50000);
+  LEdits := TList<TPasRenameEdit>.Create;
+  LCarried := TList<TPasCarriedRename>.Create;
+  LSeen := TDictionary<string, Boolean>.Create;
+  LSb := TStringBuilder.Create;
+  try
+    LCompiled := 0;
+    LFileName := '';
+    for var LA in AWs.Analyses do
+    begin
+      LId := LT.Ids[LA.Index];
+      if LId.Mid < 0 then
+        Continue;
+      LOneCarried := nil;
+      if LT.Kind = tkUnit then
+        LOk := LA.Nav.PlanUnitRename(LId.Mid, LNew, LOne, LFileName, LErr)
+      else
+        LOk := LA.Nav.PlanRename(LId.Mid, LId.Sym, LNew, LOne, LOneCarried,
+          LErr);
+      if not LOk then
+        raise EToolError.Create(Format('rename of %s to %s refused%s: %s - '
+          + 'nothing is planned',
+          [LT.Name, LNew, IfThen(AWs.Analyses.Count > 1,
+          ' (analysis ' + IntToStr(LA.Index) + ')', ''), LErr]));
+      for var LE in LOne do
+        if LSeen.TryAdd(Format('%s:%d:%d', [LowerCase(LE.FilePath), LE.Line,
+           LE.Col]), True) then
+        begin
+          if SameText(TPath.GetExtension(LE.FilePath), '.dcu') then
+            Inc(LCompiled)
+          else
+            LEdits.Add(LE);
+        end;
+      for var LC in LOneCarried do
+        if LSeen.TryAdd('carried:' + LowerCase(LC.OldName), True) then
+          LCarried.Add(LC);
+    end;
+    LArr := LEdits.ToArray;
+    TArray.Sort<TPasRenameEdit>(LArr, TComparer<TPasRenameEdit>.Construct(
+      function(const L, R: TPasRenameEdit): Integer
+      begin
+        Result := CompareText(L.FilePath, R.FilePath);
+        if Result = 0 then
+          Result := L.Line - R.Line;
+        if Result = 0 then
+          Result := L.Col - R.Col;
+      end));
+    LFormEdits := 0;
+    LFileCount := 0;
+    LFile := '';
+    for var LE in LArr do
+    begin
+      if LE.FormKind <> fskNone then
+        Inc(LFormEdits);
+      if not SameText(LE.FilePath, LFile) then
+      begin
+        LFile := LE.FilePath;
+        Inc(LFileCount);
+      end;
+    end;
+    LForms := '';
+    if LFormEdits > 0 then
+      LForms := Format(', %d of them in form files', [LFormEdits]);
+    LSb.AppendLine(Format('rename %s (%s) declared at %s:%d to %s - %d edits '
+      + 'in %d files%s', [LT.Name, LT.Head, AWs.RelPath(LT.DeclFile),
+      LT.DeclLine, LNew, Length(LArr), LFileCount, LForms]));
+    if Length(LArr) > 0 then
+      LSb.AppendLine('(line:column of the old text, then the line as it '
+        + 'reads after the edits; on a line with two columns apply the last '
+        + 'first)');
+    LFile := '';
+    LCols := '';
+    LRows := 0;
+    LShown := 0;
+    LRowLine := 0;
+    LRowTags := '';
+    LPreview := '';
+    for var LI := 0 to High(LArr) do
+    begin
+      var LE := LArr[LI];
+      var LNewLine := not SameText(LE.FilePath, LFile) or (LE.Line <> LRowLine);
+      if LNewLine then
+      begin
+        Flush;
+        if LRows >= LLimit then
+          Break;
+        Inc(LRows);
+        if not SameText(LE.FilePath, LFile) then
+        begin
+          LFile := LE.FilePath;
+          LSb.AppendLine(AWs.RelPath(LFile));
+        end;
+        LRowLine := LE.Line;
+        LRowTags := '';
+        LPreview := CleanLine(LE.Snippet);
+      end;
+      if LE.IsDecl and (Pos('declaration', LRowTags) = 0) then
+        LRowTags := LRowTags + IfThen(LRowTags <> '', ', ', '') + 'declaration';
+      if LE.FormKind <> fskNone then
+      begin
+        var LForm := IfThen(LE.FormObject <> '', LE.FormObject, '(form)');
+        if LE.FormProp <> '' then
+          LForm := LForm + '.' + LE.FormProp;
+        if Pos(LForm, LRowTags) = 0 then
+          LRowTags := LRowTags + IfThen(LRowTags <> '', ', ', '') + LForm;
+      end;
+      var LCol := IntToStr(LE.Col);
+      // A rename carried along, or a unit's bare leaf, is not the new name.
+      if not SameText(LE.NewText, LNew) then
+        LCol := Format('%s (%s -> %s)', [LCol, LE.OldText, LE.NewText]);
+      LCols := LCols + IfThen(LCols <> '', ', ', '') + LCol;
+      Inc(LShown);
+    end;
+    Flush;
+    if LShown < Length(LArr) then
+      LSb.AppendLine(Format('... %d more edits (raise `limit` - a plan cut '
+        + 'here is not the whole rename)', [Length(LArr) - LShown]));
+    if LCarried.Count > 0 then
+    begin
+      LForms := '';
+      for var LC in LCarried do
+        LForms := LForms + IfThen(LForms <> '', ', ', '') + LC.OldName
+          + ' -> ' + LC.NewName;
+      LSb.AppendLine(Format('(carried along, as the form designer renames '
+        + 'them - their edits are in the rows above: %s)', [LForms]));
+    end;
+    if LFileName <> '' then
+      LSb.AppendLine(Format('(the unit''s file must be called %s for it to '
+        + 'compile - rename it, this plan does not touch files%s)',
+        [LFileName, IfThen(FileExists(ChangeFileExt(LT.DeclFile, '.dfm')),
+        '; the form file beside it follows it', '')]));
+    if LCompiled > 0 then
+      LSb.AppendLine(Format('(+%d in compiled units without source, not '
+        + 'planned)', [LCompiled]));
+    if LT.Kind = tkSymbol then
+    begin
+      LDeclMids := nil;
+      for var LOneId in LT.Ids do
+        LDeclMids := LDeclMids + [LOneId.Mid];
+      LInactive := InactiveMentions(AWs, LowerCase(Copy(LT.Name,
+        LastDelimiter('.', LT.Name) + 1, MaxInt)), LDeclMids);
+      if Length(LInactive) > 0 then
+        LSb.AppendLine(Format('(lines to check - in branches this '
+          + 'configuration does not compile the name is written on %s more, '
+          + 'none resolved, so not in the plan: %s%s)',
+          [Plural(Length(LInactive), 'line'), String.Join(', ',
+          Copy(LInactive, 0, 8)), IfThen(Length(LInactive) > 8, ', ...',
+          '')]));
+      // A module's class or its variable: other forms reach its components
+      // through its root's Name, which this rename leaves.
+      if (LT.Head = 'class') or (LT.Head = 'var') then
+        for var LA in AWs.Analyses do
+        begin
+          LId := LT.Ids[LA.Index];
+          if LId.Mid < 0 then
+            Continue;
+          LForms := '';
+          if LT.Head = 'class' then
+            LForms := ModuleNameNote(AWs, LA, LId.Mid, LId.Sym)
+          else
+          begin
+            LVarX := LA.Proj.CanonTypeX(LA.Proj.DeclTypeX(LId.Mid, LId.Sym));
+            if XValid(LVarX) then
+              LForms := ModuleNameNote(AWs, LA, LVarX.UnitId, LVarX.Sym);
+          end;
+          if LForms <> '' then
+            LSb.AppendLine(LForms);
+          Break;
+        end;
+      LSb.AppendLine('(not checked: whether the new name collides with a '
+        + 'name visible at an edit - `compile` or `diagnostics` after the '
+        + 'edits says)');
+    end;
+    Result := LSb.ToString.TrimRight;
+  finally
+    LSb.Free;
+    LSeen.Free;
+    LCarried.Free;
+    LEdits.Free;
+  end;
+end;
+
 function ToolRelated(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
 const
   OVK: array[TPasOverrideKind] of string = ('introduces', 'override',
@@ -11177,6 +11407,30 @@ const
     + '"limit":{"type":"integer","description":"Max rows over all levels '
     + '(default 150; 0: the counts and notes alone, no rows)"}}}},' +
 
+    '{"name":"rename_plan","description":"Every edit a rename needs, as '
+    + 'line:column positions to apply yourself - nothing is written: the '
+    + 'declaration, every use by resolved identity (a namesake is left '
+    + 'alone, an overloaded routine renames the overload given), a class''s '
+    + 'name in its methods'' implementation headers, the paired parameter '
+    + 'names of a forward or implementation header, every link of a '
+    + 'property''s redeclaration chain, and the form-file lines (.dfm, .fmx) '
+    + 'that bind a handler or component by name or set a property to it - a '
+    + 'component''s own handlers (Button1Click) are carried along under '
+    + 'their new names, as the form designer does. A unit (pass the unit '
+    + 'name or its file) is renamed in its header and every `uses` item, '
+    + 'and the file name it needs is said. Refused whole, with the reason, '
+    + 'for what cannot be renamed safely: a library source, a read-only '
+    + 'file, a binary or unreadable form file, a published property or '
+    + 'enum value a form spells, a `uses` alias. Lines in branches the '
+    + 'configuration does not compile are listed to check, not planned. '
+    + 'Name collisions are not checked - run `compile` after the edits.",'
+    + '"inputSchema":{"type":"object","properties":{' + TARGET_PROPS + ','
+    + '"new_name":{"type":"string","description":"The new name, without '
+    + 'qualifiers (a unit may be dotted: Acme.Utils)"},'
+    + '"limit":{"type":"integer","description":"Max source lines in the '
+    + 'plan (default 2000; a cut plan is not the whole rename)"}},'
+    + '"required":["new_name"]}},' +
+
     '{"name":"impact","description":"What a change reaches - after editing, '
     + 'pass the output of `git diff` as `diff`; before, the declarations you '
     + 'will change. Answers which projects of the group compile the changed '
@@ -11336,7 +11590,8 @@ begin
     + 'numbers, `form` a form''s components and which method each event '
     + 'runs (instead of reading the .dfm and its ancestors''), `unit_deps` '
     + 'its uses graph, `diagnostics` checks name '
-    + 'resolution after edits. Their rows name the routine or type they sit '
+    + 'resolution after edits, `rename_plan` the edits of a rename - code '
+    + 'and form lines - to apply yourself. Their rows name the routine or type they sit '
     + 'in, which usually answers the question without opening the file. '
     + 'A header counts every row, cut or not: `limit: 0` asks whether and '
     + 'how many, without the rows. '
@@ -11397,6 +11652,8 @@ begin
       Result := ToolCallers(AWs, AArgs)
     else if AName = 'callees' then
       Result := ToolCallees(AWs, AArgs)
+    else if AName = 'rename_plan' then
+      Result := ToolRenamePlan(AWs, AArgs)
     else if AName = 'impact' then
       Result := ToolImpact(AWs, AArgs)
     else if AName = 'compile' then
