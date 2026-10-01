@@ -46,7 +46,11 @@ Common rules:
   generic parameters ignored) - or `file` + `line` + `name` (the identifier
   written on that line; `column` only when it occurs twice). An ambiguous name
   is an error that LISTS the candidates with file:line, so the next call can
-  pick one; `kind` narrows (`class`, `function`, `property`...). The
+  pick one; `kind` narrows (`class`, `function`, `property`...). A unit is
+  its name - a dotted one too: `PasMcp.Log` names the unit before it is read
+  as `PasMcp` + `Log` relaxed (which found the routines Log of that unit and
+  left the unit unreachable by name, 0.24.1) - or `kind: unit` (wildcards
+  too), or its `file` alone. The
   overloads of one routine are no ambiguity for `source`, `references`,
   `callers` and `impact`, which answer for each (0.22.0); a tool taking one
   routine (`callees`, `related`) refuses them with the advice that works,

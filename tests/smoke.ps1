@@ -93,7 +93,7 @@ Check 'definition inactive' (Block $b 'definition {"file":"AppB/uBoxes.pas","lin
 Check 'find joined cut' (Block $b 'find {"query":"TWideBox.Many"}') @('AppB\uBoxes.pas:74  TWideBox.Many (procedure)  procedure Many(const AAlphaName, ABetaName, AGammaName: string; ADeltaCount, AEpsilonCount, AZetaCount: Integer; const AEtaText, AThetaText, ...); virtual;')
 # A name no declaration matches: what the index is, and where the name is
 # written outside it - in a unit no project uses - or that it is nowhere.
-Check 'find outside the index' (Block $b 'find {"query":"OrphanRoutine"}') @('no declaration matches `OrphanRoutine` among the ', ' units indexed - what the 3 projects of Fixture.groupproj compile: 17 of their own, ', "``OrphanRoutine`` is written in 1 file(s) that no indexed project uses - no tool here sees them:`n  AppB\uOrphan.pas:8  procedure OrphanRoutine;")
+Check 'find outside the index' (Block $b 'find {"query":"OrphanRoutine"}') @('no declaration matches `OrphanRoutine` among the ', ' units indexed - what the 3 projects of Fixture.groupproj compile: 18 of their own, ', "``OrphanRoutine`` is written in 1 file(s) that no indexed project uses - no tool here sees them:`n  AppB\uOrphan.pas:8  procedure OrphanRoutine;")
 Check 'find nowhere' (Block $b 'find {"query":"NothingAnywhere"}') @('no declaration matches `NothingAnywhere` among the ', 'no Pascal file outside them writes `NothingAnywhere` either (1 searched, under the group directory')
 Check 'definition' (Block $b 'definition {"symbol":"TCircle.Area"') @('declared at Shared\uShapes.pas:26', 'implemented at Shared\uShapes.pas:53', 'Result := Pi * FRadius * FRadius;')
 Check 'source' (Block $b 'source {"symbol":"TCircle.Area"}') @('TCircle.Area (function) implemented at Shared\uShapes.pas:53-56', "53  function TCircle.Area: Double;`n54  begin", "56  end;`n") @('declared at')
@@ -398,6 +398,17 @@ Check 'rename_plan same name' (Block $b 'rename_plan {"symbol":"TCircle.Radius"'
 Check 'rename_plan reserved word' (Block $b 'rename_plan {"symbol":"TCircle","new_name":"begin"') @('"begin" is not a valid identifier. - nothing is planned')
 Check 'rename_plan library' (Block $b 'rename_plan {"symbol":"TStringList"') @('is a library source (RTL/VCL or third-party) - its identifiers cannot be renamed from here. - nothing is planned')
 Check 'rename_plan no name' (Block $b 'rename_plan {"symbol":"TCircle"}') @('give `new_name`')
+# A dotted unit whose last segment names a routine it exports (AppB\Lib.Notes):
+# the bare call is the routine's (PasTree 0.85.1), the dotted name the unit's
+# (not Unit.Member read as a subsequence), `kind: unit` lists units - the empty
+# case included - and a file alone is its unit.
+Check 'references dotted unit leaf' (Block $b 'references {"symbol":"Lib.Notes.Notes"}') @('Notes (procedure) declared at AppB\Lib.Notes.pas:9 - 1 references in 1 files', "AppB\AppB.dpr`n  14  Notes('done');")
+Check 'find dotted unit' (Block $b 'find {"query":"Lib.Notes"}') @('AppB\Lib.Notes.pas:1  Lib.Notes (unit)  unit Lib.Notes;') @('(procedure)')
+Check 'find kind unit' (Block $b 'find {"query":"*Notes","kind":"unit"}') @('AppB\Lib.Notes.pas:1  Lib.Notes (unit)') @('(procedure)')
+Check 'find kind unit none' (Block $b 'find {"query":"NoSuchUnit","kind":"unit"}') @('no declaration of kind unit matches `NoSuchUnit`')
+Check 'rename_plan unit by file' (Block $b 'rename_plan {"file":"AppB/Lib.Notes.pas"') @('rename Lib.Notes (unit) declared at AppB\Lib.Notes.pas:1 to Lib.Memo - 2 edits in 2 files', "AppB\AppB.dpr`n  10:", '  1:6  [declaration]  unit Lib.Memo;')
+# A unit's `uses` rows are code rows: the cut note counted them as form lines.
+Check 'references unit count only' (Block $b 'references {"symbol":"uShapes","limit":0}') @('3 references in 3 files', '... 3 more (raise `limit`)') @('form lines')
 
 # ---- 2. strict policy ---------------------------------------------------------
 Write-Host '--- CLI, strict policy'

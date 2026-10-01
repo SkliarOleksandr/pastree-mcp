@@ -194,3 +194,9 @@ rename_plan {"symbol":"Integer","new_name":"Int"}
 rename_plan {"symbol":"TCircle","new_name":"begin"}
 rename_plan {"symbol":"TStringList","new_name":"TStrList"}
 rename_plan {"symbol":"TCircle"}
+references {"symbol":"Lib.Notes.Notes"}
+find {"query":"Lib.Notes"}
+find {"query":"*Notes","kind":"unit"}
+find {"query":"NoSuchUnit","kind":"unit"}
+rename_plan {"file":"AppB/Lib.Notes.pas","new_name":"Lib.Memo"}
+references {"symbol":"uShapes","limit":0}

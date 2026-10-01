@@ -21,7 +21,7 @@ exactly the uses the compiler would bind, one line each.
   just edited - and the answer names them, so an edit made by someone else
   shows.
 - **Built for an agent.** Symbols are addressed by name (`TFoo.Bar`) or by file,
-  line and identifier - no column counting. Answers are compact text:
+  line and identifier - no column counting; a unit by its name or its file. Answers are compact text:
   relative paths, grouped by file and by the routine each row sits in,
   capped.
 

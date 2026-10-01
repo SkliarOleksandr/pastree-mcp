@@ -829,8 +829,22 @@ begin
   LCol := ArgInt(AArgs, 'column', 0);
   if not TFile.Exists(LFile) then
     raise EToolError.Create('no such file: ' + LFile);
+  // A file alone is its unit (rename_plan's "a unit, its name or its file"):
+  // a dotted unit name is also read as Unit.Member, and the file says which.
+  if (LLine <= 0) and (LName = '') and (LCol <= 0) then
+    for var LA in AWs.Analyses do
+    begin
+      LMid := LA.Nav.ModelIdOf(LFile);
+      if LMid >= 0 then
+      begin
+        FillUnitTarget(AWs, LA, LMid, Result);
+        MapToOthers(AWs, Result);
+        Exit;
+      end;
+    end;
   if LLine <= 0 then
-    raise EToolError.Create('`line` is required with `file`');
+    raise EToolError.Create('`line` is required with `file` (a file alone '
+      + 'names its unit, and this one is no unit the index holds)');
   if LCol <= 0 then
   begin
     if LName = '' then
@@ -994,6 +1008,69 @@ begin
   end;
 end;
 
+// The units whose name is AQuery (a wildcard pattern too), own first, at most
+// ALimit; AMore counts the rest. A unit analyzed in several analyses is one
+// target with each one's id.
+function ResolveUnits(AWs: TMcpWorkspace; const AQuery: string;
+  AOwnOnly: Boolean; ALimit: Integer; out AMore: Integer): TArray<TTarget>;
+var
+  LPattern, LFile: string;
+  LWild: Boolean;
+  LFiles: TList<string>;
+  LFirst: TDictionary<string, Integer>;
+  LT: TTarget;
+begin
+  Result := nil;
+  AMore := 0;
+  LPattern := LowerCase(AQuery);
+  LWild := IsWildPattern(LPattern);
+  LFiles := TList<string>.Create;
+  // file (lower case) -> analysis index that holds it first
+  LFirst := TDictionary<string, Integer>.Create;
+  try
+    for var LA in AWs.Analyses do
+      for var LMid := 0 to LA.Proj.ModelCount - 1 do
+      begin
+        LFile := LA.Proj.ModelFile(LMid);
+        if AOwnOnly and not AWs.IsOwnFile(LFile) then
+          Continue;
+        if LWild then
+        begin
+          if not WildMatch(LPattern, LowerCase(UnitNameOfFile(LFile))) then
+            Continue;
+        end
+        else if not SameText(UnitNameOfFile(LFile), AQuery) then
+          Continue;
+        if LFirst.TryAdd(LowerCase(LFile), LA.Index) then
+          LFiles.Add(LFile);
+      end;
+    LFiles.Sort(TComparer<string>.Construct(
+      function(const L, R: string): Integer
+      begin
+        Result := Ord(AWs.IsOwnFile(R)) - Ord(AWs.IsOwnFile(L));
+        if Result = 0 then
+          Result := CompareText(L, R);
+      end));
+    for LFile in LFiles do
+    begin
+      if Length(Result) >= ALimit then
+      begin
+        Inc(AMore);
+        Continue;
+      end;
+      var LA := AWs.Analyses[LFirst[LowerCase(LFile)]];
+      LT := Default(TTarget);
+      LT.Ids := NewIds(AWs);
+      FillUnitTarget(AWs, LA, LA.Nav.ModelIdOf(LFile), LT);
+      MapToOthers(AWs, LT);
+      Result := Result + [LT];
+    end;
+  finally
+    LFirst.Free;
+    LFiles.Free;
+  end;
+end;
+
 // Every declaration matching AQuery ('Bar', 'TFoo.Bar', 'Unit.TFoo.Bar',
 // wildcards in any segment - `*.Bar`, `*Foo.Bar`), own units first, at most
 // ALimit distinct declaration sites. AMore counts raw matches beyond them.
@@ -1020,6 +1097,8 @@ var
   LOk: Boolean;
 begin
   AMore := 0;
+  if SameText(AKind, 'unit') then
+    Exit(ResolveUnits(AWs, AQuery, AOwnOnly, ALimit, AMore));
   LParts := AQuery.Split(['.']);
   if Length(LParts) = 0 then
     raise EToolError.Create('empty symbol name');
@@ -1045,6 +1124,20 @@ begin
       // it - `TOuter.Member` for TOuter.TInner.Member, as an agent writes it.
       if LRelaxed and ((LRaw.Count > 0) or (Length(LQuals) = 0)) then
         Break;
+      // A dotted unit's name before the subsequence reading: `PasMcp.Log`
+      // read relaxed is the routine Log of unit PasMcp.Log, and the unit,
+      // which the name spells exactly, was then out of reach (looked up
+      // below only when nothing matched).
+      if LRelaxed and not LWild and not LWildQuals and (AKind = '') then
+      begin
+        var LUnitMore: Integer;
+        Result := ResolveUnits(AWs, AQuery, AOwnOnly, ALimit, LUnitMore);
+        if Length(Result) > 0 then
+        begin
+          AMore := LUnitMore;
+          Exit;
+        end;
+      end;
       for LA in AWs.Analyses do
         for var LMid := 0 to LA.Proj.ModelCount - 1 do
         begin
@@ -1615,6 +1708,9 @@ begin
     Inc(FCompiled);
     Exit;
   end;
+  // Default first: Form is no managed field, so a code row left it whatever
+  // the stack held, and a unit's `uses` rows were counted as form lines cut.
+  LH := Default(THit);
   LH.FilePath := AHit.FilePath;
   LH.Line := AHit.Line;
   LH.Col := AHit.Col;
@@ -11270,7 +11366,7 @@ const
     + 'when name occurs twice on the line"},'
     + '"kind":{"type":"string","description":"Narrow a name: type, class, '
     + 'record, interface, routine, procedure, function, constructor, var, '
-    + 'const, field, property, enum (a value)"}';
+    + 'const, field, property, enum (a value), unit"}';
 
   TOOLS_JSON = '[' +
     '{"name":"status","description":"What is loaded: project group members, '
@@ -11292,7 +11388,7 @@ const
     + 'wildcard pattern"},'
     + '"kind":{"type":"string","description":"type, class, record, '
     + 'interface, routine, procedure, function, constructor, var, const, '
-    + 'field, property, enum (a value)"},'
+    + 'field, property, enum (a value), unit"},'
     + '"scope":{"type":"string","enum":["all","project"],"description":'
     + '"project = only the group''s own units (default all)"},'
     + '"limit":{"type":"integer","description":"Max rows (default 30; '
