@@ -2249,6 +2249,77 @@ begin
   end;
 end;
 
+// Does a row's file match an `in` filter: a wildcard over the path relative
+// to the group (or the file name alone), else a piece of that path - a
+// directory, a file name, `/` or `\`.
+function InFilterMatches(AWs: TMcpWorkspace; const AFile,
+  AFilter: string): Boolean;
+var
+  LRel, LPat: string;
+begin
+  LRel := LowerCase(AWs.RelPath(AFile));
+  LPat := LowerCase(AFilter.Replace('/', '\'));
+  if IsWildPattern(LPat) then
+    Result := WildMatch(LPat, LRel) or WildMatch(LPat, ExtractFileName(LRel))
+  else
+    Result := Pos(LPat, LRel) > 0;
+end;
+
+{ `mode: files` - a row per file with its count, under its directory: what a
+  widely used symbol's rows cost read as a map, the lines of the files that
+  matter asked for next with `in`.
+    client\
+      Accthist.PAS  3
+      Accthist.dfm  12
+  AHits sorted by file. Returns the files listed; ALimit caps them. }
+function AppendFileCounts(AWs: TMcpWorkspace; ASb: TStringBuilder;
+  const AHits: TArray<THit>; ALimit: Integer): Integer;
+var
+  LFile, LDir, LLastDir: string;
+  LCount, LFiles, LShown: Integer;
+
+  procedure Flush;
+  begin
+    if LFile = '' then
+      Exit;
+    Inc(LFiles);
+    if LShown >= ALimit then
+      Exit;
+    LDir := ExtractFilePath(AWs.RelPath(LFile));
+    if not SameText(LDir, LLastDir) then
+    begin
+      if LDir <> '' then
+        ASb.AppendLine(LDir);
+      LLastDir := LDir;
+    end;
+    ASb.AppendLine(Format('%s%s  %d', [IfThen(LDir <> '', '  ', ''),
+      ExtractFileName(LFile), LCount]));
+    Inc(LShown);
+  end;
+
+begin
+  LFile := '';
+  LLastDir := #0;
+  LCount := 0;
+  LFiles := 0;
+  LShown := 0;
+  for var LH in AHits do
+  begin
+    if not SameText(LH.FilePath, LFile) then
+    begin
+      Flush;
+      LFile := LH.FilePath;
+      LCount := 0;
+    end;
+    Inc(LCount);
+  end;
+  Flush;
+  if LFiles > LShown then
+    ASb.AppendLine(Format('... %d more files (raise `limit`)',
+      [LFiles - LShown]));
+  Result := LShown;
+end;
+
 { ---- tools ------------------------------------------------------------------ }
 
 function ToolStatus(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
@@ -3286,13 +3357,25 @@ var
   LVarX: TSemaXType;
   LTargets: TArray<TTarget>;
   LCodeRows: TArray<Integer>;
-  LTag, LCounts: string;
+  LTag, LCounts, LMode, LIn: string;
+  LAll: TArray<THit>;
+  LKept: Integer;
 begin
+  LMode := LowerCase(ArgStr(AArgs, 'mode'));
+  if LMode = '' then
+    LMode := 'lines';
+  if (LMode <> 'lines') and (LMode <> 'files') and (LMode <> 'count') then
+    raise EToolError.CreateFmt('`mode` is lines (the default), files (a '
+      + 'count per file) or count (the counts alone) - not `%s`',
+      [ArgStr(AArgs, 'mode')]);
+  LIn := Trim(ArgStr(AArgs, 'in'));
   // The overloads of one routine are answered together, each row tagged
   // with the one it binds to, as `callers` tells them apart.
   LTargets := ResolveOneOrOverloads(AWs, AArgs);
   LT := LTargets[0];
   LLimit := EnsureRange(ArgInt(AArgs, 'limit', 150), 0, 5000);
+  if LMode = 'count' then
+    LLimit := 0;
   LBindable := False;
   LSetsProp := False;
   LHeaders := nil;
@@ -3366,12 +3449,30 @@ begin
       end;
     end;
     LT := LTargets[0];
-    LHits := LSet.Sorted;
+    // The header counts every row; `in` narrows the ones listed.
+    LAll := LSet.Sorted;
+    LHits := LAll;
+    if LIn <> '' then
+    begin
+      // A new array: LHits := LAll shares it, and the header counts LAll.
+      LHits := nil;
+      SetLength(LHits, Length(LAll));
+      LKept := 0;
+      for var LI := 0 to High(LAll) do
+        if InFilterMatches(AWs, LAll[LI].FilePath, LIn) then
+        begin
+          LHits[LKept] := LAll[LI];
+          Inc(LKept);
+        end;
+      SetLength(LHits, LKept);
+    end;
     // Cut by the limit, the code rows come first: a published property set
     // on thousands of form lines filled the rows by file name, and the code
     // rows a rename changes (`property TabOrder;` redeclarations) fell past
     // the cut unsaid.
-    if (Length(LHits) > LLimit) and (LSet.FormCount > 0) then
+    // So with the files: TabOrder's 6,052 form lines fill most of its 867.
+    if (LSet.FormCount > 0) and (((LMode = 'lines') and (Length(LHits) >
+       LLimit)) or ((LMode = 'files') and (FileCount(LHits) > LLimit))) then
       LHits := CodeRowsFirst(LHits);
     // A published field or method the forms could bind: say they were read,
     // and what they hold - "no form file names it" is itself the answer.
@@ -3393,21 +3494,29 @@ begin
       LSb.AppendLine(Format('%s (%s) - %d overloads declared in %s - %d '
         + 'references in %d files%s; each row tagged [overload at N] by the '
         + 'declaration line of the one it binds to (%s)', [LT.Name, LT.Head,
-        Length(LTargets), AWs.RelPath(LT.DeclFile), Length(LHits),
-        FileCount(LHits), LForms, LCounts]));
+        Length(LTargets), AWs.RelPath(LT.DeclFile), Length(LAll),
+        FileCount(LAll), LForms, LCounts]));
     end
     else if LT.Kind in [tkSymbol, tkUnit] then
       LSb.AppendLine(Format('%s (%s) declared at %s:%d - %d references in %d '
         + 'files%s', [LT.Name, LT.Head, AWs.RelPath(LT.DeclFile), LT.DeclLine,
-        Length(LHits), FileCount(LHits), LForms]))
+        Length(LAll), FileCount(LAll), LForms]))
     else
       LSb.AppendLine(Format('%s (%s) - %d references in %d files', [LT.Name,
-        LT.Head, Length(LHits), FileCount(LHits)]));
+        LT.Head, Length(LAll), FileCount(LAll)]));
+    if LIn <> '' then
+      LSb.AppendLine(Format('(in `%s`: %s)', [LIn,
+        IfThen(Length(LHits) = 0, 'none of them', Format('%s in %s listed, the rest left out',
+        [Plural(Length(LHits), 'reference'), Plural(FileCount(LHits),
+        'file')]))]));
     LFormCut := 0;
-    for var LI := AppendHitsByFile(AWs, LSb, LHits, LLimit, False,
-      LEnclosing) to High(LHits) do
-      if LHits[LI].Form then
-        Inc(LFormCut);
+    if LMode = 'files' then
+      AppendFileCounts(AWs, LSb, LHits, LLimit)
+    else
+      for var LI := AppendHitsByFile(AWs, LSb, LHits, LLimit, False,
+        LEnclosing) to High(LHits) do
+        if LHits[LI].Form then
+          Inc(LFormCut);
     if LFormCut > 0 then
       LSb.AppendLine(Format('(cut: code rows come first - %d of the rows '
         + 'left out are form lines)', [LFormCut]));
@@ -12159,10 +12268,19 @@ const
     + 'Also takes a unit name (its uses '
     + 'clauses), and by position a compiler built-in or a conditional '
     + 'define. The name of an overloaded routine lists the uses of each '
-    + 'overload, a row tagged with the one it binds to.",'
+    + 'overload, a row tagged with the one it binds to. A widely used '
+    + 'symbol: `mode: files` first - a count per file - then the lines of '
+    + 'the files that matter with `in`.",'
     + '"inputSchema":{"type":"object","properties":{' + TARGET_PROPS + ','
-    + '"limit":{"type":"integer","description":"Max rows (default 150; '
-    + '0: the counts and notes alone, no rows)"}}}},' +
+    + '"mode":{"type":"string","enum":["lines","files","count"],'
+    + '"description":"lines (default): every use with its line; files: a '
+    + 'row per file with its count; count: the counts and notes alone"},'
+    + '"in":{"type":"string","description":"List only the rows in files '
+    + 'whose path relative to the group contains this (a directory, a file '
+    + 'name) or matches it as a wildcard (*.dfm, client\\*Edit*); the header '
+    + 'still counts all"},'
+    + '"limit":{"type":"integer","description":"Max rows - files, in mode '
+    + 'files (default 150; 0: the counts and notes alone, no rows)"}}}},' +
 
     '{"name":"callers","description":"Who calls a routine: each call grouped '
     + 'by file under the routine it sits in, with the source line - a call '

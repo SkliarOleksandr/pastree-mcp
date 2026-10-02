@@ -439,6 +439,18 @@ Check 'change_plan count only' (Block $b 'change_plan {"symbol":"TShape.Area","l
 # The interface method's side of a resolution clause maps nothing: callers took
 # the interface itself for a source, and its heritage line for a call.
 Check 'callers resolution clause' (Block $b 'callers {"symbol":"TCountBox.BoxCount"') @('callers of TCountBox.BoxCount (AppB\uBoxes.pas:112) - 1 call in 1 routine', 'also through IBoxCount.Count (interface)') @('IBoxCount (interface)', '110  ')
+# references `mode` and `in`: a count per file under its directory, the code
+# files first when the limit cuts; the rows of the files matching `in`, the
+# header counting all; none matching; the counts alone; a bad mode; nothing.
+Check 'references files' (Block $b 'references {"symbol":"TfrmMain.btnSave","mode":"files"}') @('5 references in 4 files, 2 of them in form files', "AppF\`n  uChildForm.dfm  1`n  uMainForm.dfm  1`n  uMainForm.pas  2`n  uPlainForm.pas  1")
+Check 'references in' (Block $b 'references {"symbol":"TfrmMain.btnSave","in":".dfm"}') @('5 references in 4 files', '(in `.dfm`: 2 references in 2 files listed, the rest left out)', "AppF\uMainForm.dfm`n  31  object btnSave: TButton") @('uPlainForm.pas')
+# The header over every row: the filter once wrote over the array it counts.
+Check 'references in header' (Block $b 'references {"symbol":"TfrmMain.btnSave","in":".pas"}') @('5 references in 4 files, 2 of them in form files', '(in `.pas`: 3 references in 2 files listed, the rest left out)')
+Check 'references in none' (Block $b 'references {"symbol":"TShape.Area","in":"*.dpr"}') @('1 references in 1 files', '(in `*.dpr`: none of them)') @('uAppA')
+Check 'references files cut' (Block $b 'references {"symbol":"TfrmMain.btnSave","mode":"files","limit":1}') @("AppF\`n  uMainForm.pas  2", '... 3 more files (raise `limit`)') @('.dfm  1')
+Check 'references count' (Block $b 'references {"symbol":"TShape.Area","mode":"count"}') @('1 references in 1 files', '... 1 more (raise `limit`)') @('RunA')
+Check 'references bad mode' (Block $b 'references {"symbol":"TShape.Area","mode":"bogus"}') @('`mode` is lines (the default), files (a count per file) or count (the counts alone) - not `bogus`')
+Check 'references files none' (Block $b 'references {"symbol":"NeverCalled","mode":"files"}') @('0 references in 0 files')
 
 # ---- 2. strict policy ---------------------------------------------------------
 Write-Host '--- CLI, strict policy'

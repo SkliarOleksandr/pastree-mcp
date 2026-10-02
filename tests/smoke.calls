@@ -218,3 +218,11 @@ change_plan {"symbol":"TCircle"}
 change_plan {"symbol":"TStringList.Add"}
 change_plan {"symbol":"TShape.Area","limit":0}
 callers {"symbol":"TCountBox.BoxCount"}
+references {"symbol":"TfrmMain.btnSave","mode":"files"}
+references {"symbol":"TfrmMain.btnSave","in":".dfm"}
+references {"symbol":"TShape.Area","in":"*.dpr"}
+references {"symbol":"TfrmMain.btnSave","mode":"files","limit":1}
+references {"symbol":"TShape.Area","mode":"count"}
+references {"symbol":"TShape.Area","mode":"bogus"}
+references {"symbol":"NeverCalled","mode":"files"}
+references {"symbol":"TfrmMain.btnSave","in":".pas"}
