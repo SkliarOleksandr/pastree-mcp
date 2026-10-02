@@ -121,3 +121,26 @@ call form {"file":"AppF\\uChildForm.pas"}
 also outline {"file":"AppF\\uChildForm.pas", "owner":"TfrmChild"}
 read AppF\uChildForm.dfm
 read AppF\uMainForm.dfm
+
+== change-area | TShape.Area is to take a parameter: which lines must change with it?
+call change_plan {"symbol":"TShape.Area"}
+also definition {"symbol":"TShape.Area"}
+also related {"symbol":"TShape.Area", "relation":"overrides"}
+also related {"symbol":"IShape.Area", "relation":"implementations"}
+also callers {"symbol":"TShape.Area"}
+also callers {"symbol":"TCircle.Area"}
+also callers {"symbol":"TSquare.Area"}
+also callers {"symbol":"TBigCircle.Area"}
+grep \bArea\b
+
+== change-handler | Can TfrmMain.btnSaveClick take a second parameter?
+call change_plan {"symbol":"TfrmMain.btnSaveClick"}
+also definition {"symbol":"TfrmMain.btnSaveClick"}
+also callers {"symbol":"TfrmMain.btnSaveClick"}
+grep-dfm \bbtnSaveClick\b
+
+== change-getter | TShapeBox.GetItem is to take an index: what else changes?
+call change_plan {"symbol":"TShapeBox.GetItem"}
+also definition {"symbol":"TShapeBox.GetItem"}
+also callers {"symbol":"TShapeBox.GetItem"}
+grep \b(GetItem|Item)\b

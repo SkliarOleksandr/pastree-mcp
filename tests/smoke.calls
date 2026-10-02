@@ -204,3 +204,17 @@ references {"symbol":"uShapes","limit":0}
 rename_plan {"symbol":"IShape.Area","new_name":"Surface"}
 rename_plan {"symbol":"TBigBox.Changed","new_name":"Modified"}
 rename_plan {"symbol":"TShape.Describe","new_name":"Explain"}
+change_plan {"symbol":"TShape.Area"}
+change_plan {"symbol":"TShapeBox.GetItem"}
+change_plan {"symbol":"TShapeBox.BoxClick"}
+change_plan {"symbol":"TBigBox.Changed"}
+change_plan {"symbol":"TfrmMain.btnSaveClick"}
+change_plan {"symbol":"TBase.Add"}
+change_plan {"file":"AppA/uMembers.pas","line":25,"name":"Add","limit":5}
+change_plan {"symbol":"NeverCalled"}
+change_plan {"symbol":"TCountBox.BoxCount"}
+change_plan {"symbol":"TCopyBox.AssignTo"}
+change_plan {"symbol":"TCircle"}
+change_plan {"symbol":"TStringList.Add"}
+change_plan {"symbol":"TShape.Area","limit":0}
+callers {"symbol":"TCountBox.BoxCount"}

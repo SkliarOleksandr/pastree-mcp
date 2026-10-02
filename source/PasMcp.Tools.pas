@@ -2154,10 +2154,13 @@ end;
 //   uMain.dfm
 //     btnSave
 //       40  OnClick = btnSaveClick
+// AEveryText: a tagged row shows its line even where the row before showed the
+// same one (a signature: the same text in another file is still a line to
+// edit).
 // Returns the index of the first hit the limit left out, Length when none.
 function AppendHitsByFile(AWs: TMcpWorkspace; ASb: TStringBuilder;
   const AHits: TArray<THit>; ALimit: Integer; ATagOnly: Boolean = False;
-  AEnclosing: TEnclosing = nil): Integer;
+  AEnclosing: TEnclosing = nil; AEveryText: Boolean = False): Integer;
 var
   LFile, LLine, LPrev, LWhere, LLastWhere, LIndent: string;
   LShown, LSame, LRowLine: Integer;
@@ -2215,7 +2218,7 @@ begin
     else if LH.Tag <> '' then
     begin
       LLine := IfThen(LH.Joined <> '', LH.Joined, CleanLine(LH.Snippet));
-      if LLine = LPrev then
+      if (LLine = LPrev) and not AEveryText then
         ASb.AppendLine(Format('%s%d  [%s]', [LIndent, LH.Line, LH.Tag]))
       else
         ASb.AppendLine(Format('%s%d  [%s]  %s', [LIndent, LH.Line, LH.Tag,
@@ -4096,6 +4099,14 @@ type
     Pending: Integer;      // routines of the last depth, not searched
   end;
 
+  // A symbol met among the references of a root and searched as one more
+  // source - a property it is the accessor of, an interface method a
+  // resolution clause maps to it - in the analysis of index Analysis.
+  TMetSource = record
+    Analysis: Integer;
+    Src: TCallSource;
+  end;
+
   TCallRow = record
     Hit: THit;
     Caller: string;        // declaration site of the routine it sits in
@@ -4513,6 +4524,12 @@ type
     FCurrent: Integer;      // the node being searched
     FTagRoots: Boolean;     // several roots: a first-level row names its own
     FViaOnRows: Boolean;    // no header says "all through X" for the rows
+    // change_plan: the roots are one family - a VMT slot, the interface
+    // methods it implements, their implementations - so each is searched for
+    // itself, all in one pass over the closure, and no row names its root.
+    FFamily: Boolean;
+    FHideBindings: Boolean;
+    FMet: TList<TMetSource>;
     procedure NoteThrough(const ASource: TCallSource);
     procedure NoteBelow(const AText: string);
     function Listed(ALists: TObjectDictionary<Integer, TStringList>;
@@ -4529,10 +4546,12 @@ type
       const AJoined: string = '');
     procedure SearchRefs(AA: TMcpAnalysis; const ANode: TCallNode;
       ASources: TList<TCallSource>; const AClass: TSemaXType;
-      AReturns, AVirtual: Boolean);
+      AReturns, AVirtual: Boolean; const ABatch: TArray<TPasExtRef> = nil);
     procedure SearchBareInherited(AA: TMcpAnalysis; const ANode: TCallNode;
       ADMid, ADSym: Integer);
     procedure SearchFormBindings(AA: TMcpAnalysis; const ANode: TCallNode);
+    procedure SearchOwnBareInherited(AA: TMcpAnalysis; ANode: Integer);
+    procedure SearchFamily(AA: TMcpAnalysis);
     procedure Search(AA: TMcpAnalysis; const ANode: TCallNode);
     procedure SearchUses(AA: TMcpAnalysis; const ANode: TCallNode);
   public
@@ -4560,6 +4579,13 @@ type
       ALimit: Integer): string;
     property Nodes: TList<TCallNode> read FNodes;
     property ViaOnRows: Boolean read FViaOnRows write FViaOnRows;
+    property Family: Boolean read FFamily write FFamily;
+    // Form bindings counted, not listed (change_plan says them by file).
+    property HideBindings: Boolean read FHideBindings write FHideBindings;
+    // The rows of the last level searched; the sources met at the roots.
+    property Rows: TList<TCallRow> read FRows;
+    property Met: TList<TMetSource> read FMet;
+    property Compiled: Integer read FCompiled;
   end;
 
 // '3 calls in 3 routines; depth 2: 2 in 2' - the levels of a walk, each with
@@ -4645,10 +4671,12 @@ begin
   FListings := TDictionary<string, TArray<TIfaceListing>>.Create;
   FIfaceNames := TDictionary<string, Boolean>.Create;
   FIfaceScanned := TDictionary<Integer, Boolean>.Create;
+  FMet := TList<TMetSource>.Create;
 end;
 
 destructor TCallerWalk.Destroy;
 begin
+  FMet.Free;
   FIfaceScanned.Free;
   FIfaceNames.Free;
   FListings.Free;
@@ -4953,10 +4981,12 @@ begin
 end;
 
 // The references of every source, the sources growing as accessors and
-// resolution clauses turn up among them.
+// resolution clauses turn up among them. ABatch: the first source's
+// references are those of every symbol in it, found in one pass (the
+// methods of a family, each a csSelf of its own).
 procedure TCallerWalk.SearchRefs(AA: TMcpAnalysis; const ANode: TCallNode;
   ASources: TList<TCallSource>; const AClass: TSemaXType;
-  AReturns, AVirtual: Boolean);
+  AReturns, AVirtual: Boolean; const ABatch: TArray<TPasExtRef>);
 var
   LS, LNew: TCallSource;
   LIdx, LMid, LUp, LChild, LNamed, LFileId, LLine, LCol: Integer;
@@ -4965,13 +4995,28 @@ var
   LNodeOk, LKnown: Boolean;
   LUse: TRefUse;
   LNote, LCaller, LName: string;
+  LHits: TArray<TPasRefHit>;
+  LBatch: TList<TPasRefHit>;
+  LMet: TMetSource;
 begin
   LIdx := 0;
   while LIdx < ASources.Count do
   begin
     LS := ASources[LIdx];
     Inc(LIdx);
-    for var LH in AA.Nav.FindReferences(LS.Mid, LS.Sym) do
+    if (LIdx = 1) and (Length(ABatch) > 0) then
+    begin
+      LBatch := TList<TPasRefHit>.Create;
+      try
+        AA.Nav.CollectReferencesOfAll(ABatch, LBatch);
+        LHits := LBatch.ToArray;
+      finally
+        LBatch.Free;
+      end;
+    end
+    else
+      LHits := AA.Nav.FindReferences(LS.Mid, LS.Sym);
+    for var LH in LHits do
     begin
       LM := nil;
       LMid := AA.Nav.ModelIdOf(LH.FilePath);
@@ -5011,6 +5056,16 @@ begin
             LNamed := NIL_NODE;
             if LUse = ruMaps then
             begin
+              // Only the routine's side maps: a hit on the interface
+              // method's segment (searched as a source of its own) would take
+              // the interface before it for one more, and its heritage line
+              // for a call.
+              LChild := LM.Tree.Nodes[LIdent.Node].NextSibling;
+              while (LChild <> NIL_NODE) and
+                    (LM.Tree.Nodes[LChild].Kind <> nkIdent) do
+                LChild := LM.Tree.Nodes[LChild].NextSibling;
+              if LChild <> NIL_NODE then
+                Continue;
               LChild := LM.Tree.Nodes[LM.Tree.Nodes[LIdent.Node].Parent].
                 FirstChild;
               while (LChild <> NIL_NODE) and (LChild <> LIdent.Node) do
@@ -5051,7 +5106,12 @@ begin
             LNew.Name := QualifiedName(AA.Proj.Model(LNew.Mid), LNew.Sym);
             ASources.Add(LNew);
             if ANode.Level = 0 then
+            begin
               NoteThrough(LNew);
+              LMet.Analysis := AA.Index;
+              LMet.Src := LNew;
+              FMet.Add(LMet);
+            end;
             Continue;
           end;
       end;
@@ -5180,6 +5240,98 @@ begin
       LRow.Note := cUnsureTag;
     FRows.Add(LRow);
   end;
+end;
+
+function RoutineImpl(AA: TMcpAnalysis; AMid, ASym: Integer; out AImplMid,
+  ARoutine: Integer): Boolean; forward;
+
+// A family root's own bare `inherited;` calls (change_plan): each that runs
+// another root is a row under that root. Each body is read once -
+// SearchBareInherited reads every override's body for every root, which over
+// a slot of a few hundred methods is that many squared.
+procedure TCallerWalk.SearchOwnBareInherited(AA: TMcpAnalysis;
+  ANode: Integer);
+var
+  LImplMid, LRoutine, LFileId, LLine, LCol, LTo: Integer;
+  LM: TPasSemaModel;
+  LNavT: TPasNavTarget;
+  LRow: TPasRefHit;
+  LCaller: string;
+  LId: TSymId;
+begin
+  LId := FNodes[ANode].T.Ids[AA.Index];
+  if (LId.Mid < 0) or (LId.Sym < 0) or
+     not RoutineImpl(AA, LId.Mid, LId.Sym, LImplMid, LRoutine) then
+    Exit;
+  LM := AA.Proj.Model(LImplMid);
+  LCaller := '';
+  for var LVis := LM.Tree.NodeLeftmostVis(LRoutine) to
+      LM.Tree.Nodes[LRoutine].LastToken - 1 do
+    if (LM.Tree.Source.VisibleToken(LVis).Kind = tkInherited) and
+       (LM.Tree.Source.VisibleToken(LVis + 1).Kind <> tkIdentifier) and
+       VisPos(LM, LVis, LFileId, LLine, LCol) and (LFileId = 0) and
+       AA.Nav.GotoBareInherited(LImplMid, LLine, LCol, LNavT) and
+       FNodeOf.TryGetValue(SiteKey(LNavT.FilePath, LNavT.Line, LNavT.Col),
+       LTo) and (LTo >= 0) and (FNodes[LTo].Level = 0) then
+    begin
+      if LCaller = '' then
+        LCaller := CallerOfSym(AA, LId.Mid, LId.Sym);
+      LRow := Default(TPasRefHit);
+      LRow.FilePath := LM.Tree.Source.FileNames[0];
+      LRow.Line := LLine;
+      LRow.Col := LCol;
+      LRow.Snippet := LM.Tree.Source.Files[0].LineText(LLine);
+      AddRow(LRow, FNodes[LTo], '', 'bare inherited', LCaller, True);
+    end;
+end;
+
+// The roots of a family (change_plan), in one analysis: their references in
+// one pass, each a use of the root it binds to - a call written against any
+// of them is one the change rewrites, so no virtual or interface source is
+// climbed to - then each root's bare inherited and form bindings.
+procedure TCallerWalk.SearchFamily(AA: TMcpAnalysis);
+var
+  LBatch: TArray<TPasExtRef>;
+  LRef: TPasExtRef;
+  LSources: TList<TCallSource>;
+  LSrc: TCallSource;
+  LFirst: Integer;
+begin
+  LBatch := nil;
+  LFirst := -1;
+  for var LI := 0 to FNodes.Count - 1 do
+    if (FNodes[LI].Level = 0) and (FNodes[LI].T.Ids[AA.Index].Mid >= 0) then
+    begin
+      LRef.UnitId := FNodes[LI].T.Ids[AA.Index].Mid;
+      LRef.Sym := FNodes[LI].T.Ids[AA.Index].Sym;
+      LBatch := LBatch + [LRef];
+      if LFirst < 0 then
+        LFirst := LI;
+    end;
+  if LFirst < 0 then
+    Exit;
+  LSources := TList<TCallSource>.Create;
+  try
+    LSrc := Default(TCallSource);
+    LSrc.Mid := LBatch[0].UnitId;
+    LSrc.Sym := LBatch[0].Sym;
+    LSrc.Kind := csSelf;
+    LSrc.Name := FNodes[LFirst].T.Name;
+    LSources.Add(LSrc);
+    FCurrent := LFirst;
+    SearchRefs(AA, FNodes[LFirst], LSources, Default(TSemaXType),
+      AA.Proj.Model(LSrc.Mid).RoutineHead(LSrc.Sym) in [rhFunction,
+      rhConstructor], False, LBatch);
+  finally
+    LSources.Free;
+  end;
+  for var LI := 0 to FNodes.Count - 1 do
+    if (FNodes[LI].Level = 0) and (FNodes[LI].T.Ids[AA.Index].Mid >= 0) then
+    begin
+      FCurrent := LI;
+      SearchOwnBareInherited(AA, LI);
+      SearchFormBindings(AA, FNodes[LI]);
+    end;
 end;
 
 // The rows of one routine of the walk, in one analysis.
@@ -5468,7 +5620,7 @@ var
   LFrontier, LNext: TList<Integer>;
   LRows: TArray<TCallRow>;
   LHits: TArray<THit>;
-  LLevel, LShown: Integer;
+  LLevel, LShown, LKept: Integer;
   LCount: TCallLevel;
   LWho, LVias: TDictionary<string, Boolean>;
   LT: TTarget;
@@ -5476,7 +5628,7 @@ var
 begin
   AInfo := Default(TCallWalkInfo);
   AInfo.CountOnly := ALimit = 0;
-  FTagRoots := FNodes.Count > 1;
+  FTagRoots := (FNodes.Count > 1) and not FFamily;
   LFrontier := TList<Integer>.Create;
   LNext := TList<Integer>.Create;
   LWho := TDictionary<string, Boolean>.Create;
@@ -5488,6 +5640,12 @@ begin
     for LLevel := 1 to ADepth do
     begin
       FRows.Clear;
+      if FFamily and (LLevel = 1) then
+      begin
+        for var LA in FWs.Analyses do
+          SearchFamily(LA);
+        LFrontier.Clear;
+      end;
       for var LIdx in LFrontier do
       begin
         var LBefore := FReached;
@@ -5553,9 +5711,11 @@ begin
       if LLevel > 1 then
         ALevels.AppendLine(Format('depth %d - callers of those:', [LLevel]));
       SetLength(LHits, Length(LRows));
+      LKept := 0;
       for var LI := 0 to High(LRows) do
       begin
-        LHits[LI] := LRows[LI].Hit;
+        if FHideBindings and LRows[LI].Binding then
+          Continue;
         LTag := '';
         if LRows[LI].Callee <> '' then
           LTag := '-> ' + LRows[LI].Callee;
@@ -5563,8 +5723,11 @@ begin
           LTag := Trim(LTag + ' via ' + LRows[LI].Via);
         if LRows[LI].Note <> '' then
           LTag := IfThen(LTag = '', '', LTag + ', ') + LRows[LI].Note;
-        LHits[LI].Tag := LTag;
+        LHits[LKept] := LRows[LI].Hit;
+        LHits[LKept].Tag := LTag;
+        Inc(LKept);
       end;
+      SetLength(LHits, LKept);
       if (Length(LHits) = 0) and (LLevel > 1) then
         ALevels.AppendLine('  none');
       AppendHitsByFile(FWs, ALevels, LHits, Max(ALimit - LShown, 0), False,
@@ -5835,6 +5998,405 @@ begin
       EnsureRange(ArgInt(AArgs, 'limit', 150), 0, 5000));
   finally
     LWalk.Free;
+  end;
+end;
+
+{ ---- change_plan ------------------------------------------------------------ }
+
+// A routine's implementation header as a row: the line it starts on, the
+// lines it is written over joined (JoinedDecl).
+function ImplHeadHit(AWs: TMcpWorkspace; LM: TPasSemaModel;
+  ARoutine: Integer; out AHit: THit): Boolean;
+var
+  LFileId, LCol, LChild: Integer;
+  LText: string;
+begin
+  AHit := Default(THit);
+  Result := VisPos(LM, LM.Tree.NodeLeftmostVis(ARoutine), LFileId,
+    AHit.Line, LCol);
+  if not Result then
+    Exit;
+  AHit.FilePath := LM.Tree.Source.FileNames[LFileId];
+  AHit.Col := LCol;
+  AHit.Own := AWs.IsOwnFile(AHit.FilePath);
+  LText := '';
+  LChild := LM.Tree.Nodes[ARoutine].FirstChild;
+  while (LChild <> NIL_NODE) and (LM.Tree.Nodes[LChild].Kind <> nkIdent) do
+    LChild := LM.Tree.Nodes[LChild].NextSibling;
+  if LChild <> NIL_NODE then
+    LText := JoinedDecl(LM, LChild);
+  if LText <> '' then
+    AHit.Snippet := CutDecl(LText)
+  else
+    AHit.Snippet := LM.Tree.Source.Files[LFileId].LineText(AHit.Line);
+end;
+
+{ Everything a change of a routine's parameters or result must touch
+  (SPEC 9.6 item 2), in one answer: the routines tied to it by the parameter
+  list - its VMT slot, the interface methods it implements and their other
+  implementations, a hiding namesake reaching it by a bare `inherited;`
+  (PasTree's RenameFamily, the ties a rename takes along) - each with its
+  declaration and implementation header; the properties it is an accessor
+  of; and every call of any of them, with the routine it sits in. What no
+  edit list can say is said: a handler a form binds, a routine handed on to
+  a procedural type, the overloads a call may fall to, a signature a library
+  fixes. Before, `definition`, `related overrides`, `related
+  implementations` and `callers` of each, merged by hand. }
+function ToolChangePlan(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
+var
+  LT, LM: TTarget;
+  LFamily: TList<TTarget>;
+  LWhy: TStringList;
+  LKeys: TDictionary<string, Boolean>;
+  LSigs: TList<THit>;
+  LFixed, LOverloads, LNotes, LBound: TStringList;
+  LMembers: TArray<TPasRenameFamilyMember>;
+  LFamErr, LErr, LName, LTypeName, LCounts: string;
+  LId: TSymId;
+  LWalk: TCallerWalk;
+  LLevels, LSb: TStringBuilder;
+  LInfo: TCallWalkInfo;
+  LLimit, LDm, LTMid, LTSym, LFiles, LExported, LSym, LImplRows: Integer;
+  LArr: TArray<THit>;
+  LFileSet: TDictionary<string, Boolean>;
+  LInactive: TArray<string>;
+  LDeclMids: TArray<Integer>;
+  LModel: TPasSemaModel;
+  LHit: TPasRefHit;
+
+  // The declaration of AT and, where it has one elsewhere, its
+  // implementation header.
+  procedure AddSignature(const AT: TTarget; const ATag: string);
+  var
+    LH: THit;
+    LImplMid, LRoutine: Integer;
+  begin
+    LH := Default(THit);
+    LH.FilePath := AT.DeclFile;
+    LH.Line := AT.DeclLine;
+    LH.Col := AT.DeclCol;
+    LH.Snippet := AT.Snippet;
+    LH.Tag := ATag;
+    LH.Own := AT.Own;
+    LSigs.Add(LH);
+    for var LA in AWs.Analyses do
+    begin
+      if AT.Ids[LA.Index].Mid < 0 then
+        Continue;
+      if RoutineImpl(LA, AT.Ids[LA.Index].Mid, AT.Ids[LA.Index].Sym, LImplMid,
+         LRoutine) and ImplHeadHit(AWs, LA.Proj.Model(LImplMid), LRoutine,
+         LH) and not (SameText(LH.FilePath, AT.DeclFile) and
+         (LH.Line = AT.DeclLine)) then
+      begin
+        LSigs.Add(LH);
+        Inc(LImplRows);
+      end;
+      Break;
+    end;
+  end;
+
+  function TypeTag(const AT: TTarget; const AWhat: string): string;
+  begin
+    Result := AWhat;
+    if LastDelimiter('.', AT.Name) > 0 then
+      Result := Copy(AT.Name, 1, LastDelimiter('.', AT.Name) - 1) + ', ' +
+        AWhat;
+  end;
+
+begin
+  LT := ResolveOne(AWs, AArgs);
+  if not IsRoutineTarget(LT) then
+    raise EToolError.CreateFmt('%s is a %s - `change_plan` takes a routine '
+      + '(what a change of its parameters or result must touch); '
+      + '`references` lists the uses of anything, `rename_plan` renames it',
+      [LT.Name, LT.Head]);
+  if not LT.Own then
+    raise EToolError.CreateFmt('%s is declared in a library (%s) - its '
+      + 'signature is not this project''s to change; `callers` lists who '
+      + 'calls it', [LT.Name, AWs.RelPath(LT.DeclFile)]);
+  LLimit := EnsureRange(ArgInt(AArgs, 'limit', 500), 0, 50000);
+  LImplRows := 0;
+  LFamily := TList<TTarget>.Create;
+  LWhy := TStringList.Create;
+  LKeys := TDictionary<string, Boolean>.Create;
+  LSigs := TList<THit>.Create;
+  LFixed := TStringList.Create;
+  LOverloads := TStringList.Create;
+  LNotes := TStringList.Create;
+  LFileSet := TDictionary<string, Boolean>.Create;
+  LWalk := TCallerWalk.Create(AWs);
+  LLevels := TStringBuilder.Create;
+  LSb := TStringBuilder.Create;
+  try
+    // The family, merged by site over the analyses. A refusal anywhere is
+    // the walk of `callers` for the routine alone, said below.
+    LKeys.Add(SiteKey(LT.DeclFile, LT.DeclLine, LT.DeclCol), True);
+    LFamErr := '';
+    for var LA in AWs.Analyses do
+    begin
+      LId := LT.Ids[LA.Index];
+      if LId.Mid < 0 then
+        Continue;
+      if not LA.Nav.RenameFamily(LId.Mid, LId.Sym, LMembers, LErr) then
+      begin
+        LFamErr := LErr;
+        LFamily.Clear;
+        LWhy.Clear;
+        Break;
+      end;
+      for var LF in LMembers do
+      begin
+        LM := Default(TTarget);
+        LM.Ids := NewIds(AWs);
+        if not FillSymbolTarget(AWs, LA, LF.UnitId, LF.Sym, LM) or
+           not LKeys.TryAdd(SiteKey(LM.DeclFile, LM.DeclLine, LM.DeclCol),
+           True) then
+          Continue;
+        // A library's method fixes the signature: listed, not planned.
+        if not LM.Own then
+        begin
+          LFixed.Add(Format('%s (%s:%d)', [LM.Name, AWs.RelPath(LM.DeclFile),
+            LM.DeclLine]));
+          Continue;
+        end;
+        MapToOthers(AWs, LM);
+        LFamily.Add(LM);
+        LWhy.Add(RENAME_FAMILY_WHY[LF.Why]);
+      end;
+    end;
+
+    AddSignature(LT, TypeTag(LT, 'this one'));
+    for var LI := 0 to LFamily.Count - 1 do
+      AddSignature(LFamily[LI], TypeTag(LFamily[LI], LWhy[LI]));
+
+    LWalk.ViaOnRows := True;
+    LWalk.HideBindings := True;
+    LWalk.AddRoot(LT, False);
+    if LFamErr = '' then
+    begin
+      LWalk.Family := True;
+      for var LF in LFamily do
+        LWalk.AddRoot(LF, False);
+    end;
+    LWalk.Walk(1, LLimit, LLevels, LInfo);
+
+    // The properties it is an accessor of, an interface method a resolution
+    // clause maps to it: their declarations carry the same parameter list.
+    for var LMet in LWalk.Met do
+    begin
+      LM := Default(TTarget);
+      LM.Ids := NewIds(AWs);
+      if not FillSymbolTarget(AWs, AWs.Analyses[LMet.Analysis], LMet.Src.Mid,
+         LMet.Src.Sym, LM) or not LM.Own or not LKeys.TryAdd(SiteKey(
+         LM.DeclFile, LM.DeclLine, LM.DeclCol), True) then
+        Continue;
+      case LMet.Src.Kind of
+        csRead: LName := 'property - its getter';
+        csWrite: LName := 'property - its setter';
+      else
+        LName := 'interface method - a resolution clause maps it here';
+      end;
+      LArr := [Default(THit)];
+      LArr[0].FilePath := LM.DeclFile;
+      LArr[0].Line := LM.DeclLine;
+      LArr[0].Col := LM.DeclCol;
+      LArr[0].Snippet := LM.Snippet;
+      LArr[0].Tag := LM.Name + ', ' + LName;
+      LArr[0].Own := True;
+      LSigs.Add(LArr[0]);
+    end;
+
+    LArr := LSigs.ToArray;
+    TArray.Sort<THit>(LArr, TComparer<THit>.Construct(
+      function(const L, R: THit): Integer
+      begin
+        Result := Ord(R.Own) - Ord(L.Own);
+        if Result = 0 then
+          Result := CompareText(L.FilePath, R.FilePath);
+        if Result = 0 then
+          Result := L.Line - R.Line;
+      end));
+    for var LH in LArr do
+      LFileSet.AddOrSetValue(LowerCase(LH.FilePath), True);
+    LFiles := LFileSet.Count;
+
+    LCounts := Format('%s in %s', [Plural(LInfo.Levels[0].Calls, 'call'),
+      Plural(LInfo.Levels[0].Routines, 'routine')]);
+    if LInfo.Levels[0].Calls = 0 then
+      LCounts := 'no calls';
+    if LInfo.Levels[0].Bindings > 0 then
+      LCounts := LCounts + ', ' + Plural(LInfo.Levels[0].Bindings,
+        'form binding');
+    if LInfo.Levels[0].Others > 0 then
+      LCounts := LCounts + Format(', %s handing it on',
+        [Plural(LInfo.Levels[0].Others, 'reference')]);
+    LSb.AppendLine(Format('change_plan of %s (%s:%d) - the signature on %s '
+      + 'in %s%s; %s', [LT.Name, AWs.RelPath(LT.DeclFile), LT.DeclLine,
+      Plural(Length(LArr), 'line'), Plural(LFiles, 'file'),
+      IfThen(LFamily.Count > 0, Format(', %s tied to it',
+      [Plural(LFamily.Count, 'other routine')]), ''), LCounts]));
+    // The errors a line left behind gives, those of the ties there are.
+    LName := '';
+    if LImplRows > 0 then
+      LName := 'E2037 at an implementation header';
+    if LWhy.IndexOf(RENAME_FAMILY_WHY[rfwVirtual]) >= 0 then
+      LName := LName + IfThen(LName <> '', ', ', '') + 'E2137 at an override';
+    if LWhy.IndexOf(RENAME_FAMILY_WHY[rfwInterface]) >= 0 then
+      LName := LName + IfThen(LName <> '', ', ', '') + 'E2291 at a class '
+        + 'implementing the interface method';
+    LSb.AppendLine('signature - these lines change together' + IfThen(LName
+      <> '', ' (one left behind: ' + LName + ')', '') + ':');
+    AppendHitsByFile(AWs, LSb, LArr, IfThen(LLimit = 0, 0, MaxInt), False,
+      nil, True);
+    LSb.AppendLine('calls - written for the old parameters:');
+    if (LInfo.Levels[0].Calls = 0) and (LInfo.Levels[0].Others = 0) then
+      LSb.AppendLine('  none found' + IfThen(LInfo.Levels[0].Bindings > 0,
+        ' in code', ''))
+    else
+      LSb.Append(LLevels.ToString);
+
+    // What the rows cannot say.
+    if LFixed.Count > 0 then
+      LNotes.Add(Format('fixed by a library - its signature cannot change '
+        + 'here, and this one must keep matching it: %s', [String.Join(', ',
+        Copy(LFixed.ToStringArray, 0, 3)) + IfThen(LFixed.Count > 3,
+        Format(' and %d more', [LFixed.Count - 3]), '')]));
+    if LFamErr <> '' then
+    begin
+      // A slot a library introduced, or an overloaded name among the ties.
+      LName := '';
+      for var LA in AWs.Analyses do
+      begin
+        LId := LT.Ids[LA.Index];
+        if LId.Mid < 0 then
+          Continue;
+        LDm := LA.Nav.ModelIdOf(LT.DeclFile);
+        if (LDm >= 0) and LA.Nav.MethodAt(LDm, LT.DeclLine, LT.DeclCol, LTMid,
+           LTSym, LTypeName) then
+          for var LO in LA.Nav.FindOverrides(LTMid, LTSym) do
+            if (LO.Kind = pokRoot) and ((LO.Hit.FilePath = '') or
+               not AWs.IsOwnFile(LO.Hit.FilePath)) then
+              LName := Format('%s.%s', [LO.TypeName, LTypeName]) +
+                IfThen(LO.Hit.FilePath <> '', Format(' (%s:%d)',
+                [AWs.RelPath(LO.Hit.FilePath), LO.Hit.Line]), '');
+        Break;
+      end;
+      if LName <> '' then
+        LNotes.Add(Format('its virtual method is %s, a library''s: the '
+          + 'signature is fixed there - changed here, this one no longer '
+          + 'overrides it; a new signature is a new method (an overload, or '
+          + 'a `reintroduce`). The calls are those `callers` finds', [LName]))
+      else
+        LNotes.Add('an overloaded name takes part in its ties: the overrides, '
+          + 'interface methods and bare inherited calls of an overload pair '
+          + 'by parameter list, not followed here - `related overrides` and '
+          + '`related implementations` list them by name; the calls are '
+          + 'those `callers` finds, through the virtual and interface '
+          + 'methods it implements');
+    end;
+    if LInfo.Levels[0].Others > 0 then
+      LNotes.Add(Format('%s %s it on without calling it - the `not a call` '
+        + 'rows: the procedural type each is assigned or passed to (an event, '
+        + 'a callback parameter) must take the new parameters too, or the '
+        + 'line stops compiling', [Plural(LInfo.Levels[0].Others,
+        'reference'), IfThen(LInfo.Levels[0].Others = 1, 'hands', 'hand')]));
+    if LInfo.Levels[0].Bindings > 0 then
+    begin
+      // Where, by file: the lines need no edit, the answer is not to change
+      // the signature at all.
+      LBound := TStringList.Create;
+      try
+        for var LR in LWalk.Rows do
+        begin
+          if not LR.Binding then
+            Continue;
+          LName := AWs.RelPath(LR.Hit.FilePath);
+          LSym := LBound.IndexOfName(LName);
+          if LSym < 0 then
+            LBound.Add(LName + '=' + IntToStr(LR.Hit.Line))
+          else if Length(LBound.ValueFromIndex[LSym].Split([','])) < 6 then
+            LBound.ValueFromIndex[LSym] := LBound.ValueFromIndex[LSym] + ','
+              + IntToStr(LR.Hit.Line)
+          else if not LBound.ValueFromIndex[LSym].EndsWith('...') then
+            LBound.ValueFromIndex[LSym] := LBound.ValueFromIndex[LSym] + ',...';
+        end;
+        LCounts := '';
+        for var LI := 0 to Min(LBound.Count, 5) - 1 do
+          LCounts := LCounts + IfThen(LI > 0, '; ', '') + LBound.Names[LI] +
+            ':' + LBound.ValueFromIndex[LI].Replace(',', ', ');
+        if LBound.Count > 5 then
+          LCounts := LCounts + Format('; %d more files', [LBound.Count - 5]);
+      finally
+        LBound.Free;
+      end;
+      LNotes.Add(Format('%s %s it to an event (%s): the event calls it with '
+        + 'that event type''s parameters, and the compiler does not read a '
+        + 'form file - a changed signature builds and is called wrong at run '
+        + 'time. Keep this handler''s signature and move what changes into a '
+        + 'method it calls', [Plural(LInfo.Levels[0].Bindings, 'form line'),
+        IfThen(LInfo.Levels[0].Bindings = 1, 'binds', 'bind'), LCounts]));
+    end;
+    LExported := 0;
+    for var LR in LWalk.Rows do
+      if LR.Note = 'exported' then
+        Inc(LExported);
+    if LExported > 0 then
+      LNotes.Add('exported: code outside the group calls it by name, with '
+        + 'the old parameters');
+    // The overloads of its name in its scope: a call whose arguments fit
+    // another after the change binds to it, without an error.
+    for var LA in AWs.Analyses do
+    begin
+      LId := LT.Ids[LA.Index];
+      if LId.Mid < 0 then
+        Continue;
+      LModel := LA.Proj.Model(LId.Mid);
+      LSym := LModel.FindLocal(LModel.Symbols[LId.Sym].Scope,
+        LModel.Symbols[LId.Sym].NameLower);
+      while LSym <> NIL_SYM do
+      begin
+        if (LSym <> LId.Sym) and (LModel.Symbols[LSym].Kind = skRoutine) and
+           LA.Nav.DeclHit(LId.Mid, LSym, LHit) then
+          LOverloads.Add(Format('%s:%d', [AWs.RelPath(LHit.FilePath),
+            LHit.Line]));
+        LSym := LModel.Symbols[LSym].NextOverload;
+      end;
+      Break;
+    end;
+    if LOverloads.Count > 0 then
+      LNotes.Add(Format('%s is overloaded - also at %s: after the change a '
+        + 'call whose arguments fit another overload binds to it without an '
+        + 'error; read the calls against each', [LT.Name, String.Join(', ',
+        LOverloads.ToStringArray)]));
+    if LWalk.Compiled > 0 then
+      LNotes.Add(Format('+%d in compiled units without source, not shown',
+        [LWalk.Compiled]));
+    LDeclMids := nil;
+    for var LOneId in LT.Ids do
+      LDeclMids := LDeclMids + [LOneId.Mid];
+    LInactive := InactiveMentions(AWs, LowerCase(Copy(LT.Name,
+      LastDelimiter('.', LT.Name) + 1, MaxInt)), LDeclMids);
+    if Length(LInactive) > 0 then
+      LNotes.Add(Format('lines to check - in branches this configuration '
+        + 'does not compile the name is written on %s more, none resolved, '
+        + 'so not above: %s%s', [Plural(Length(LInactive), 'line'),
+        String.Join(', ', Copy(LInactive, 0, 8)), IfThen(Length(LInactive) >
+        8, ', ...', '')]));
+    for var LNote in LNotes do
+      LSb.AppendLine('(' + LNote + ')');
+    Result := LSb.ToString.TrimRight;
+  finally
+    LSb.Free;
+    LLevels.Free;
+    LWalk.Free;
+    LFileSet.Free;
+    LNotes.Free;
+    LOverloads.Free;
+    LFixed.Free;
+    LSigs.Free;
+    LKeys.Free;
+    LWhy.Free;
+    LFamily.Free;
   end;
 end;
 
@@ -11665,6 +12227,24 @@ const
     + 'plan (default 2000; a cut plan is not the whole rename)"}},'
     + '"required":["new_name"]}},' +
 
+    '{"name":"change_plan","description":"What a change of a routine''s '
+    + 'parameters or result must touch, in one answer - before editing a '
+    + 'signature. The signature lines that change together: its declaration '
+    + 'and implementation header, the methods of its virtual slot (the one '
+    + 'it overrides, its overrides), the interface methods it implements and '
+    + 'their other implementations, a descendant''s namesake reaching it by '
+    + 'a bare `inherited;`, the property it is the getter or setter of; '
+    + 'then every call of any of them, grouped by the routine it sits in, '
+    + 'the call''s arguments joined over its lines. Said where no edit '
+    + 'shows it: a handler a form file binds (the event calls it with its '
+    + 'own parameters, and nothing checks that at compile time), the routine '
+    + 'handed on to an event or a callback, the overloads a call may fall '
+    + 'to after the change, a signature fixed by a library''s method it '
+    + 'overrides or implements. Run `compile` after the edits.",'
+    + '"inputSchema":{"type":"object","properties":{' + TARGET_PROPS + ','
+    + '"limit":{"type":"integer","description":"Max call rows (default 500; '
+    + '0 = the counts alone)"}}}},' +
+
     '{"name":"impact","description":"What a change reaches - after editing, '
     + 'pass the output of `git diff` as `diff`; before, the declarations you '
     + 'will change. Answers which projects of the group compile the changed '
@@ -11825,7 +12405,10 @@ begin
     + 'runs (instead of reading the .dfm and its ancestors''), `unit_deps` '
     + 'its uses graph, `diagnostics` checks name '
     + 'resolution after edits, `rename_plan` the edits of a rename - code '
-    + 'and form lines - to apply yourself. Their rows name the routine or type they sit '
+    + 'and form lines - to apply yourself, `change_plan` what a change of a '
+    + 'routine''s parameters or result must touch - its overrides, the '
+    + 'interface methods it implements and their implementations, each '
+    + 'header, and every call. Their rows name the routine or type they sit '
     + 'in, which usually answers the question without opening the file. '
     + 'A header counts every row, cut or not: `limit: 0` asks whether and '
     + 'how many, without the rows. '
@@ -11888,6 +12471,8 @@ begin
       Result := ToolCallees(AWs, AArgs)
     else if AName = 'rename_plan' then
       Result := ToolRenamePlan(AWs, AArgs)
+    else if AName = 'change_plan' then
+      Result := ToolChangePlan(AWs, AArgs)
     else if AName = 'impact' then
       Result := ToolImpact(AWs, AArgs)
     else if AName = 'compile' then

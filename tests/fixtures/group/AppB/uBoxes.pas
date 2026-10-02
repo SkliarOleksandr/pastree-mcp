@@ -123,4 +123,17 @@ begin
   {$ENDIF}
 end;
 
+// An override of a library's virtual method: `change_plan` of it says the
+// signature is fixed there.
+type
+  TCopyBox = class(TPersistent)
+  protected
+    procedure AssignTo(Dest: TPersistent); override;
+  end;
+
+procedure TCopyBox.AssignTo(Dest: TPersistent);
+begin
+  inherited AssignTo(Dest);
+end;
+
 end.

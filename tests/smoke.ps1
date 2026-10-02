@@ -419,6 +419,26 @@ Check 'references unit count only' (Block $b 'references {"symbol":"uShapes","li
 Check 'rename_plan family interface' (Block $b 'rename_plan {"symbol":"IShape.Area"') @('to Surface - 11 edits in 3 files', "AppB\uAppB.pas`n  13:14  function Surface: Double; override;", '  22:27  Result := 2 * inherited Surface;', '  17:14  function Surface: Double; virtual; abstract;', '  64:18  function TSquare.Surface: Double;', 'TShape.Area (the same interface method)', 'TBigCircle.Area (the same virtual method)')
 Check 'rename_plan family override' (Block $b 'rename_plan {"symbol":"TBigBox.Changed"') @('to Modified - ', 'procedure Modified; virtual;', 'procedure TBigBox.Modified;', 'TShapeBox.Changed (the same virtual method)')
 Check 'rename_plan family none' (Block $b 'rename_plan {"symbol":"TShape.Describe"') @('to Explain - 3 edits in 2 files') @('taken along')
+# change_plan: a virtual method's slot with the interface method it implements,
+# each header, every call of any of them; a getter's property; a handler handed
+# on and one a form binds; a bare inherited; an overload; nothing calling it; a
+# resolution clause; a slot a library introduced; the refusals and the counts.
+Check 'change_plan family' (Block $b 'change_plan {"symbol":"TShape.Area"}') @('change_plan of TShape.Area (Shared\uShapes.pas:17) - the signature on 8 lines in 2 files, 4 other routines tied to it; 3 calls in 3 routines', '(one left behind: E2037 at an implementation header, E2137 at an override, E2291 at a class implementing the interface method):', "AppB\uAppB.pas`n  13  [TBigCircle, the same virtual method]  function Area: Double; override;`n  20  function TBigCircle.Area: Double;", '  12  [IShape, the same interface method]  function Area: Double;', '  17  [TShape, this one]  function Area: Double; virtual; abstract;', '  64  function TSquare.Area: Double;', "calls - written for the old parameters:`nAppA\uAppA.pas`n  RunA`n    22  Writeln(LShape.Describe, ' ', LShape.Area:0:2);", "  TBigCircle.Area`n    22  Result := 2 * inherited Area;", "  TotalArea`n    75  Result := Result + LShape.Area;") @('via ', '->')
+Check 'change_plan getter' (Block $b 'change_plan {"symbol":"TShapeBox.GetItem"') @('the signature on 3 lines in 1 file; 1 call in 1 routine', '  23  [TShapeBox.Item, property - its getter]  property Item: TObject read GetItem write SetItem;', '  35  function TShapeBox.GetItem: TObject;', '    53  [via TShapeBox.Item]  if Item <> nil then') @('E2137')
+Check 'change_plan handed on' (Block $b 'change_plan {"symbol":"TShapeBox.BoxClick"') @('no calls, 1 reference handing it on', '    43  [not a call]  FOnChange := BoxClick;', '(1 reference hands it on without calling it')
+Check 'change_plan bare inherited' (Block $b 'change_plan {"symbol":"TBigBox.Changed"') @('1 other routine tied to it; 2 calls in 2 routines', '  20  [TShapeBox, the same virtual method]  procedure Changed; virtual;', '  47  procedure TShapeBox.Changed;', "  TBigBox.Changed`n    59  [bare inherited]  inherited;") @('E2291')
+Check 'change_plan form binding' (Block $b 'change_plan {"symbol":"TfrmMain.btnSaveClick"') @('no calls, 3 form bindings', "calls - written for the old parameters:`n  none found in code", '(3 form lines bind it to an event (AppF\uChildForm.dfm:14, 25; AppF\uMainForm.dfm:39): the event calls it with that event type''s parameters') @('OnClick')
+Check 'change_plan overloads refused' (Block $b 'change_plan {"symbol":"TBase.Add"') @('`TBase.Add` names 2 overloads of one routine - pass `file` + `line` + `name`')
+Check 'change_plan one overload' (Block $b 'change_plan {"file":"AppA/uMembers.pas"') @('change_plan of TBase.Add (AppA\uMembers.pas:25)', '  75  procedure TBase.Add(AValue: Integer);', "  TBase.Add`n    82  Add(Length(AText));", '(TBase.Add is overloaded - also at AppA\uMembers.pas:26: after the change a call whose arguments fit another overload binds to it') @('TRunner.Run')
+Check 'change_plan no calls' (Block $b 'change_plan {"symbol":"NeverCalled"') @('the signature on 2 lines in 1 file; no calls', "  62  procedure NeverCalled;`ncalls - written for the old parameters:`n  none found")
+Check 'change_plan resolution clause' (Block $b 'change_plan {"symbol":"TCountBox.BoxCount"') @('the signature on 3 lines in 1 file; 1 call in 1 routine', '  108  [IBoxCount.Count, interface method - a resolution clause maps it here]  function Count: Integer;', '(lines to check - in branches this configuration does not compile the name is written on 1 line more, none resolved, so not above: AppB\uBoxes.pas:122)') @('110  ', '107  ')
+Check 'change_plan library slot' (Block $b 'change_plan {"symbol":"TCopyBox.AssignTo"') @('  131  [TCopyBox, this one]  procedure AssignTo(Dest: TPersistent); override;', '  134  procedure TCopyBox.AssignTo(Dest: TPersistent);', '(its virtual method is TPersistent.AssignTo (', 'a library''s: the signature is fixed there - changed here, this one no longer overrides it')
+Check 'change_plan not a routine' (Block $b 'change_plan {"symbol":"TCircle"') @('TCircle is a class - `change_plan` takes a routine')
+Check 'change_plan library routine' (Block $b 'change_plan {"symbol":"TStringList.Add"') @('is declared in a library (', 'its signature is not this project''s to change')
+Check 'change_plan count only' (Block $b 'change_plan {"symbol":"TShape.Area","limit":0') @('the signature on 8 lines in 2 files, 4 other routines tied to it; 3 calls in 3 routines', '... 8 more (raise `limit`)', '... 3 more (raise `limit`)') @('  17  ')
+# The interface method's side of a resolution clause maps nothing: callers took
+# the interface itself for a source, and its heritage line for a call.
+Check 'callers resolution clause' (Block $b 'callers {"symbol":"TCountBox.BoxCount"') @('callers of TCountBox.BoxCount (AppB\uBoxes.pas:112) - 1 call in 1 routine', 'also through IBoxCount.Count (interface)') @('IBoxCount (interface)', '110  ')
 
 # ---- 2. strict policy ---------------------------------------------------------
 Write-Host '--- CLI, strict policy'
@@ -428,6 +448,7 @@ Check 'strict references unit' (Block $b 'references {"symbol":"uShapes"}') @('3
 # The shared unit is in both analyses: its edits are counted once.
 Check 'strict rename_plan' (Block $b 'rename_plan {"symbol":"TCircle","new_name":"TRound"') @('to TRound - 6 edits in 3 files')
 Check 'strict rename_plan unit' (Block $b 'rename_plan {"symbol":"uShapes"') @('to uShapesNew - 5 edits in 4 files')
+Check 'strict change_plan' (Block $b 'change_plan {"symbol":"TShape.Area"}') @('the signature on 8 lines in 2 files, 4 other routines tied to it; 3 calls in 3 routines')
 Check 'strict descendants' (Block $b 'related {"relation":"descendants"') @('descendants of TShape (Shared\uShapes.pas:15): 3', 'TBigCircle <- TCircle')
 Check 'strict overrides' (Block $b 'related {"relation":"overrides"') @('overrides of TShape.Area (Shared\uShapes.pas:17): 4')
 # Rows of both analyses in one walk: RunA is project A's, the rest project B's.
@@ -644,7 +665,7 @@ try {
     $stdin.WriteLine('{"jsonrpc":"2.0","method":"notifications/initialized"}')
     $r = Rpc 2 'tools/list' '{}'
     $names = ($r.result.tools | ForEach-Object { $_.name }) -join ','
-    Check 'tools/list' $names @('status', 'find', 'definition', 'source', 'members', 'references', 'callers', 'callees', 'impact', 'compile', 'related', 'outline', 'diagnostics', 'unit_deps')
+    Check 'tools/list' $names @('status', 'find', 'definition', 'source', 'members', 'references', 'callers', 'callees', 'impact', 'compile', 'related', 'outline', 'diagnostics', 'unit_deps', 'rename_plan', 'change_plan')
     $r = Rpc 3 'tools/call' '{"name":"related","arguments":{"relation":"creations","symbol":"TCircle"}}'
     Check 'call before edit' (ToolText $r) @('creations of TCircle', ': 1')
     if ($r.result.isError) { Write-Host 'FAIL call before edit reported isError'; $script:failures++ }
