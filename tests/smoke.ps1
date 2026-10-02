@@ -409,6 +409,12 @@ Check 'find kind unit none' (Block $b 'find {"query":"NoSuchUnit","kind":"unit"}
 Check 'rename_plan unit by file' (Block $b 'rename_plan {"file":"AppB/Lib.Notes.pas"') @('rename Lib.Notes (unit) declared at AppB\Lib.Notes.pas:1 to Lib.Memo - 2 edits in 2 files', "AppB\AppB.dpr`n  10:", '  1:6  [declaration]  unit Lib.Memo;')
 # A unit's `uses` rows are code rows: the cut note counted them as form lines.
 Check 'references unit count only' (Block $b 'references {"symbol":"uShapes","limit":0}') @('3 references in 3 files', '... 3 more (raise `limit`)') @('form lines')
+# A method's family (PasTree 0.86.0): an interface method takes the class that
+# implements it and that method's overrides; an override takes the virtual it
+# overrides; a method tied to nothing takes nothing.
+Check 'rename_plan family interface' (Block $b 'rename_plan {"symbol":"IShape.Area"') @('to Surface - 11 edits in 3 files', "AppB\uAppB.pas`n  13:14  function Surface: Double; override;", '  22:27  Result := 2 * inherited Surface;', '  17:14  function Surface: Double; virtual; abstract;', '  64:18  function TSquare.Surface: Double;', 'TShape.Area (the same interface method)', 'TBigCircle.Area (the same virtual method)')
+Check 'rename_plan family override' (Block $b 'rename_plan {"symbol":"TBigBox.Changed"') @('to Modified - ', 'procedure Modified; virtual;', 'procedure TBigBox.Modified;', 'TShapeBox.Changed (the same virtual method)')
+Check 'rename_plan family none' (Block $b 'rename_plan {"symbol":"TShape.Describe"') @('to Explain - 3 edits in 2 files') @('taken along')
 
 # ---- 2. strict policy ---------------------------------------------------------
 Write-Host '--- CLI, strict policy'

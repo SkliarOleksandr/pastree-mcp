@@ -3519,6 +3519,8 @@ var
   LSeen: TDictionary<string, Boolean>;
   LOne: TArray<TPasRenameEdit>;
   LOneCarried: TArray<TPasCarriedRename>;
+  LOneFamily: TArray<TPasRenameFamilyMember>;
+  LFamily: TList<TPasRenameFamilyMember>;
   LOk: Boolean;
   LId: TSymId;
   LSb: TStringBuilder;
@@ -3554,6 +3556,7 @@ begin
   LLimit := EnsureRange(ArgInt(AArgs, 'limit', 2000), 0, 50000);
   LEdits := TList<TPasRenameEdit>.Create;
   LCarried := TList<TPasCarriedRename>.Create;
+  LFamily := TList<TPasRenameFamilyMember>.Create;
   LSeen := TDictionary<string, Boolean>.Create;
   LSb := TStringBuilder.Create;
   try
@@ -3565,11 +3568,16 @@ begin
       if LId.Mid < 0 then
         Continue;
       LOneCarried := nil;
+      LOneFamily := nil;
       if LT.Kind = tkUnit then
         LOk := LA.Nav.PlanUnitRename(LId.Mid, LNew, LOne, LFileName, LErr)
       else
         LOk := LA.Nav.PlanRename(LId.Mid, LId.Sym, LNew, LOne, LOneCarried,
-          LErr);
+          LOneFamily, LErr);
+      for var LF in LOneFamily do
+        if LSeen.TryAdd('family:' + LowerCase(LF.TypeName + '.' + LF.Name),
+           True) then
+          LFamily.Add(LF);
       if not LOk then
         raise EToolError.Create(Format('rename of %s to %s refused%s: %s - '
           + 'nothing is planned',
@@ -3677,6 +3685,20 @@ begin
       LSb.AppendLine(Format('(carried along, as the form designer renames '
         + 'them - their edits are in the rows above: %s)', [LForms]));
     end;
+    // The methods tied to it by name, renamed with it (PasTree's
+    // RenameFamily): one alone is E2137 at an override, E2291 at an
+    // implementing class, or - a bare inherited - a call that compiles and
+    // stops reaching it.
+    if LFamily.Count > 0 then
+    begin
+      LForms := '';
+      for var LF in LFamily do
+        LForms := LForms + IfThen(LForms <> '', ', ', '') + Format('%s.%s (%s)',
+          [LF.TypeName, LF.Name, RENAME_FAMILY_WHY[LF.Why]]);
+      LSb.AppendLine(Format('(taken along under the new name - renamed alone, '
+        + 'each would break the build or, through a bare inherited, silently '
+        + 'stop a call; their edits are in the rows above: %s)', [LForms]));
+    end;
     if LFileName <> '' then
       LSb.AppendLine(Format('(the unit''s file must be called %s for it to '
         + 'compile - rename it, this plan does not touch files%s)',
@@ -3729,6 +3751,7 @@ begin
     LSb.Free;
     LSeen.Free;
     LCarried.Free;
+    LFamily.Free;
     LEdits.Free;
   end;
 end;
