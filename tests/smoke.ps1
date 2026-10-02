@@ -551,10 +551,15 @@ function Run-F2084([int]$Fail, [int]$Compiles = 1) {
 $out = Run-F2084 1
 Check 'compile internal error once' $out @('compile AppB (Win32): built in', "built twice: the first build (", "stopped at dcc's internal error F2084 Internal Error: TEST1 (PASTREE_MCP_TEST_F2084) in AppB\AppB.dpr - the compiler failing, not the code; the second passed", 'first build here', 'no errors, warnings or hints') @('errors -', 'FAILED')
 $out = Run-F2084 2
-Check 'compile internal error twice' $out @('compile AppB (Win32): FAILED in', "built twice, both stopped at dcc's internal error (first: F2084", '`rebuild: true` compiles every unit afresh', 'errors - 1:', 'F2084 Internal Error: TEST1') @('the second passed')
-# Both builds stopped at it: the next compile stopping at the same one builds once.
+Check 'compile internal error twice' $out @("compile AppB (Win32): FAILED in", ", 1 error - dcc's internal error, not the code: ``rebuild: true``", "built twice, both stopped at dcc's internal error (first: F2084", '`rebuild: true` compiles every unit afresh', 'errors - 1:', 'F2084 Internal Error: TEST1') @('the second passed')
+# Both builds stopped at it: the next compile stopping at the same one rebuilds
+# (a Make did not get past it; on the client group's COM server a rebuild did).
 $out = Run-F2084 3 2
-Check 'compile internal error known' $out @("built twice, both stopped at dcc's internal error", "stopped at dcc's internal error F2084 Internal Error: TEST1 (PASTREE_MCP_TEST_F2084) in AppB\AppB.dpr, as the compile at ", 'not built twice this time') @('the second passed')
+Check 'compile internal error known' $out @("built twice, both stopped at dcc's internal error", "stopped at dcc's internal error F2084 Internal Error: TEST1 (PASTREE_MCP_TEST_F2084) in AppB\AppB.dpr, which a Make did not get past at ", 'so the second was a rebuild, every unit afresh, and it passed') @('not built again')
+# The rebuild stops at it too: the compiler fails on this code, and the compile
+# after that builds once, the rebuild hint gone from its status line.
+$out = Run-F2084 5 3
+Check 'compile internal error defect' $out @("built twice, the second a rebuild (a Make did not get past it at ", "- the compiler fails on this code: worked around in the unit it names; the next compile stopping at it builds once", ", 1 error - dcc's internal error, not the code, a rebuild too", "as a compile at ", ' did in a Make and a rebuild - not built again') @('and it passed')
 
 # ---- a form file dcc does not link ------------------------------------------------------
 # dcc names no file(line) for either: E2161 when a text form file does not

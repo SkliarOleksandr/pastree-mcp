@@ -11117,23 +11117,55 @@ var
       LAgain := False;
       for var LMsg in R.Messages do
         LAgain := LAgain or SameText(LMsg.Code, 'F2084');
-      if R.KnownSince > 0 then
+      // On the status line itself: the line below it was read past once,
+      // and "FAILED, 1 error" sent an agent to look for the error.
+      if not R.Ok and LAgain then
+        Result := Result + ' - dcc''s internal error, not the code' + IfThen(
+          R.KnownDefect or R.SecondRebuilt or R.Rebuilt, ', a rebuild too',
+          ': `rebuild: true`');
+      if R.KnownDefect then
         Result := Result + sLineBreak + AIndent + Format('stopped at dcc''s '
-          + 'internal error %s, as the compile at %s did in both its builds - '
-          + 'not built twice this time: `rebuild: true` compiles every unit '
-          + 'afresh', [LInternal, FormatDateTime('hh:nn', R.KnownSince)])
+          + 'internal error %s, as a compile at %s did in a Make and a '
+          + 'rebuild - not built again: the compiler fails on this code, '
+          + 'worked around in the unit it names (`rebuild: true` tries once '
+          + 'more)', [LInternal, FormatDateTime('hh:nn', R.KnownSince)])
+      else if R.SecondRebuilt and R.Ok then
+        Result := Result + sLineBreak + AIndent + Format('built twice: the '
+          + 'first build (%s) stopped at dcc''s internal error %s, which a '
+          + 'Make did not get past at %s - so the second was a rebuild, every '
+          + 'unit afresh, and it passed', [Seconds(R.FirstMs), LInternal,
+          FormatDateTime('hh:nn', R.KnownSince)])
+      else if R.SecondRebuilt and LAgain then
+        Result := Result + sLineBreak + AIndent + Format('built twice, the '
+          + 'second a rebuild (a Make did not get past it at %s), both '
+          + 'stopped at dcc''s internal error (first: %s) - the compiler '
+          + 'fails on this code: worked around in the unit it names; the next '
+          + 'compile stopping at it builds once', [FormatDateTime('hh:nn',
+          R.KnownSince), LInternal])
+      else if R.SecondRebuilt then
+        Result := Result + sLineBreak + AIndent + Format('built twice: the '
+          + 'first build (%s) stopped at dcc''s internal error %s; the '
+          + 'second, a rebuild, got past it - its errors are below',
+          [Seconds(R.FirstMs), LInternal])
       else if R.Ok then
         Result := Result + sLineBreak + AIndent + Format('built twice: the '
           + 'first build (%s) stopped at dcc''s internal error %s - the '
           + 'compiler failing, not the code; the second passed',
           [Seconds(R.FirstMs), LInternal])
+      else if LAgain and R.Rebuilt then
+        Result := Result + sLineBreak + AIndent + Format('built twice, the '
+          + 'first a rebuild, both stopped at dcc''s internal error (first: '
+          + '%s) - the compiler fails on this code: worked around in the unit '
+          + 'it names; the next compile stopping at it builds once',
+          [LInternal])
       else if LAgain then
         Result := Result + sLineBreak + AIndent + Format('built twice, both '
           + 'stopped at dcc''s internal error (first: %s) - the compiler '
           + 'failing on this code, not an error in it: `rebuild: true` '
           + 'compiles every unit afresh, which clears one that stale .dcu '
-          + 'files cause; one that stays is a compiler defect, worked around '
-          + 'in the unit it names', [LInternal])
+          + 'files cause, and the next compile stopping at it rebuilds by '
+          + 'itself; one that stays is a compiler defect, worked around in '
+          + 'the unit it names', [LInternal])
       else
         Result := Result + sLineBreak + AIndent + Format('built twice: the '
           + 'first build (%s) stopped at dcc''s internal error %s; the '

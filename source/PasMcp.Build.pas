@@ -48,9 +48,10 @@ unit PasMcp.Build;
     those of the units the error names - usually passes (field report
     FR.4). The answer is the second build's, with the first one's error
     said beside it. When the second stops at it too, the build directory
-    keeps a note, and the next compile stopping at the same error does not
-    build twice: on the client group's COM server it came back on every
-    compile, and the retry was a whole build more each time.
+    keeps a note, and the next compile stopping at the same error rebuilds
+    instead: on the client group's COM server the Make retry came back on
+    every compile, a whole build more each time, and a rebuild passed. When
+    the rebuild stops at it as well, no build of it is retried.
 
   What is new (CompareWithBaseline): with Make, dcc reports a unit's warnings
   only when it recompiles it, so the comparison is per unit. A unit this
@@ -142,9 +143,15 @@ type
     // The .dcu files the second build deleted first: those of the units the
     // internal error names.
     DroppedDcus: TArray<string>;
-    // Not built twice: the previous compile here stopped at the same internal
-    // error in both builds, at this time. InternalErrors is this build's.
+    // A compile here stopped at the same internal error in both its builds,
+    // at this time: so the second build was a rebuild (SecondRebuilt), or -
+    // KnownDefect, a rebuild stopped at it too - there was no second build
+    // (InternalErrors is then this build's).
     KnownSince: TDateTime;
+    SecondRebuilt: Boolean;
+    KnownDefect: Boolean;
+    Rebuilt: Boolean;      // the compile asked for a rebuild
+
   end;
 
 var
@@ -1244,33 +1251,46 @@ begin
 end;
 
 // INTERNAL_FILE in a member's build directory: the key of an internal error
-// both builds of a compile stopped at, and when. The next compile that stops
-// at it does not build a second time - on the client group's COM server the
-// retry never got past it, and cost a whole build on every `compile`.
-function ReadKnownInternal(const ADir, AKey: string): TDateTime;
+// both builds of a compile stopped at, when, and whether one of them was a
+// rebuild. The next compile that stops at it does not retry with a Make, which
+// on the client group's COM server never got past it and cost a whole build
+// on every `compile`: it rebuilds, which did - the agent called `rebuild:
+// true` on the hint anyway, a round trip later. When a rebuild stopped at it
+// too, the compiler fails on this code, and no build of it is retried.
+const
+  REBUILT_TOO = 'rebuild';
+
+function ReadKnownInternal(const ADir, AKey: string;
+  out ARebuildToo: Boolean): TDateTime;
 var
   LLines: TArray<string>;
 begin
   Result := 0;
+  ARebuildToo := False;
   try
     if not TFile.Exists(TPath.Combine(ADir, INTERNAL_FILE)) then
       Exit;
     LLines := TFile.ReadAllLines(TPath.Combine(ADir, INTERNAL_FILE));
     if (Length(LLines) >= 2) and (LLines[0] = AKey) then
+    begin
       Result := StrToFloatDef(LLines[1], 0, TFormatSettings.Invariant);
+      ARebuildToo := (Length(LLines) >= 3) and (LLines[2] = REBUILT_TOO);
+    end;
   except
     Result := 0;
   end;
 end;
 
-procedure WriteKnownInternal(const ADir, AKey: string);
+procedure WriteKnownInternal(const ADir, AKey: string;
+  ARebuildToo: Boolean = False);
 begin
   try
     if AKey = '' then
       TFile.Delete(TPath.Combine(ADir, INTERNAL_FILE))
     else
       TFile.WriteAllLines(TPath.Combine(ADir, INTERNAL_FILE), [AKey,
-        FloatToStr(Now, TFormatSettings.Invariant)]);
+        FloatToStr(Now, TFormatSettings.Invariant), IfThen(ARebuildToo,
+        REBUILT_TOO, '')]);
   except
     // a note for the next compile is never worth failing this one
   end;
@@ -1283,8 +1303,11 @@ var
   LSame: Boolean;
   LKey, LAgainKey: string;
   LDrop: TArray<string>;
+  LKnown: TDateTime;
+  LRebuildToo, LSecondRebuild: Boolean;
 begin
   Result := BuildOnce(ASpec, ARebuild, AProgress, ACancel);
+  Result.Rebuilt := ARebuild;
   if IsCancelled(ACancel) then
     Exit;
   if not StoppedAtInternalError(Result) then
@@ -1294,40 +1317,58 @@ begin
     Exit;
   end;
   LDrop := InternalErrorUnits(Result, LKey);
+  LKnown := 0;
+  LSecondRebuild := False;
   if not ARebuild then
   begin
-    Result.KnownSince := ReadKnownInternal(ASpec.Dir, LKey);
-    if Result.KnownSince > 0 then
+    LKnown := ReadKnownInternal(ASpec.Dir, LKey, LRebuildToo);
+    if (LKnown > 0) and LRebuildToo then
     begin
-      Log('compile %s: dcc stopped at the internal error (F2084) the previous '
-        + 'compile stopped at twice - not building again', [ASpec.Member.Name]);
+      Log('compile %s: dcc stopped at the internal error (F2084) a Make and a '
+        + 'rebuild stopped at before - not building again',
+        [ASpec.Member.Name]);
+      Result.KnownSince := LKnown;
+      Result.KnownDefect := True;
       for var LMsg in Result.Messages do
         if SameText(LMsg.Code, 'F2084') then
           Result.InternalErrors := Result.InternalErrors + [LMsg];
       Exit;
     end;
+    LSecondRebuild := LKnown > 0;
   end;
   LFirst := Result;
-  Log('compile %s: dcc stopped at an internal error (F2084) - building again%s',
-    [ASpec.Member.Name, IfThen(Length(LDrop) > 0, ' without ' +
-    string.Join(', ', LDrop), '')]);
+  if LSecondRebuild then
+    Log('compile %s: dcc stopped at the internal error (F2084) a Make did not '
+      + 'get past before - rebuilding', [ASpec.Member.Name])
+  else
+    Log('compile %s: dcc stopped at an internal error (F2084) - building '
+      + 'again%s', [ASpec.Member.Name, IfThen(Length(LDrop) > 0, ' without ' +
+      string.Join(', ', LDrop), '')]);
   if Assigned(AProgress) then
-    AProgress('dcc stopped at an internal error (F2084) - building ' +
-      ASpec.Member.Name + ' again');
-  // A Make over what the first one compiled, never a rebuild: its .dcu
-  // files are what gets it past the unit dcc failed on - all but those of
-  // the units the error names, which a stale one of may be the cause.
-  Result := BuildOnce(ASpec, False, AProgress, ACancel, LDrop);
+    AProgress('dcc stopped at an internal error (F2084) - ' + IfThen(
+      LSecondRebuild, 'rebuilding ', 'building ') + ASpec.Member.Name +
+      IfThen(LSecondRebuild, '', ' again'));
+  // A Make over what the first one compiled: its .dcu files are what gets
+  // it past the unit dcc failed on - all but those of the units the error
+  // names, which a stale one of may be the cause. A rebuild when a Make did
+  // not get past this error before.
+  if LSecondRebuild then
+    Result := BuildOnce(ASpec, True, AProgress, ACancel)
+  else
+    Result := BuildOnce(ASpec, False, AProgress, ACancel, LDrop);
   if not Result.Ran then
     Exit(LFirst);
   if not IsCancelled(ACancel) then
     if StoppedAtInternalError(Result) then
     begin
       InternalErrorUnits(Result, LAgainKey);
-      WriteKnownInternal(ASpec.Dir, LAgainKey);
+      WriteKnownInternal(ASpec.Dir, LAgainKey, LSecondRebuild or ARebuild);
     end
     else if Result.Ok then
       WriteKnownInternal(ASpec.Dir, '');
+  Result.SecondRebuilt := LSecondRebuild;
+  Result.KnownSince := LKnown;
+  Result.Rebuilt := ARebuild;
   for var LMsg in LFirst.Messages do
     if SameText(LMsg.Code, 'F2084') then
       Result.InternalErrors := Result.InternalErrors + [LMsg];
