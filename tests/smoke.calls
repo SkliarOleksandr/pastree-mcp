@@ -199,6 +199,7 @@ find {"query":"Lib.Notes"}
 find {"query":"*Notes","kind":"unit"}
 find {"query":"NoSuchUnit","kind":"unit"}
 rename_plan {"file":"AppB/Lib.Notes.pas","new_name":"Lib.Memo"}
+rename_plan {"symbol":"uMembers","new_name":"uMembership"}
 references {"symbol":"uShapes","limit":0}
 rename_plan {"symbol":"IShape.Area","new_name":"Surface"}
 rename_plan {"symbol":"TBigBox.Changed","new_name":"Modified"}

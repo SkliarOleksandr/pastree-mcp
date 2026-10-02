@@ -3505,6 +3505,80 @@ end;
 
 { ---- rename_plan ------------------------------------------------------------- }
 
+// A unit rename's lines in the group's .dproj files: each member's
+// `<DCCReference Include="...">` naming the unit's file gets the new file name,
+// its directory kept. PlanUnitRename plans the `in '...'` path of the .dpr;
+// the .dproj is the project manager's copy of the same list - left alone it
+// names a file the rename removed, and this server (MSBuild, the IDE) reads
+// the unit list from it. False with AError when a .dproj may not be written.
+function DprojRenameEdits(AWs: TMcpWorkspace; const AUnitFile,
+  ANewFile: string; out AEdits: TArray<TPasRenameEdit>;
+  out AError: string): Boolean;
+const
+  ATTR = 'Include="';
+var
+  LSeen: TDictionary<string, Boolean>;
+  LLines: TArray<string>;
+  LDir, LInc, LOldFile: string;
+  LAt, LEnd: Integer;
+  LEdit: TPasRenameEdit;
+begin
+  Result := True;
+  AEdits := nil;
+  AError := '';
+  LOldFile := TPath.GetFileName(AUnitFile);
+  LSeen := TDictionary<string, Boolean>.Create;
+  try
+    for var LM in AWs.Members do
+    begin
+      if not SameText(TPath.GetExtension(LM.ProjectFile), '.dproj') or
+         not LSeen.TryAdd(LowerCase(LM.ProjectFile), True) or
+         not FileExists(LM.ProjectFile) then
+        Continue;
+      LLines := TFile.ReadAllLines(LM.ProjectFile);
+      LDir := TPath.GetDirectoryName(LM.ProjectFile);
+      for var LI := 0 to High(LLines) do
+      begin
+        if Pos('<DCCReference', LLines[LI]) = 0 then
+          Continue;
+        LAt := Pos(ATTR, LLines[LI]);
+        if LAt = 0 then
+          Continue;
+        Inc(LAt, Length(ATTR));
+        LEnd := Pos('"', LLines[LI], LAt);
+        if LEnd = 0 then
+          Continue;
+        LInc := Copy(LLines[LI], LAt, LEnd - LAt);
+        if not SameText(TPath.GetFileName(LInc), LOldFile) or
+           not SameText(ExpandFileName(TPath.Combine(LDir, LInc)),
+           ExpandFileName(AUnitFile)) then
+          Continue;
+        if AWs.Analyses.Count > 0 then
+          AError := AWs.Analyses[0].Nav.RenameBlockReason(LM.ProjectFile);
+        if AError <> '' then
+        begin
+          AEdits := nil;
+          Exit(False);
+        end;
+        LEdit := Default(TPasRenameEdit);
+        LEdit.FilePath := LM.ProjectFile;
+        LEdit.Line := LI + 1;
+        LEdit.Col := LEnd - Length(LOldFile);
+        LEdit.Len := Length(LOldFile);
+        LEdit.OldText := Copy(LLines[LI], LEdit.Col, LEdit.Len);
+        LEdit.NewText := ANewFile;
+        LEdit.Snippet := Copy(LLines[LI], 1, LEdit.Col - 1) + ANewFile
+          + Copy(LLines[LI], LEnd, MaxInt);
+        LEdit.HiFrom := LEdit.Col - 1;
+        LEdit.HiTo := LEdit.HiFrom + Length(ANewFile);
+        AEdits := AEdits + [LEdit];
+      end;
+    end;
+  finally
+    LSeen.Free;
+  end;
+end;
+
 // PasTree's PlanRename / PlanUnitRename in every analysis that holds the
 // symbol, merged by site: a unit two projects share is analyzed twice and its
 // edits are the same edits. One analysis refusing refuses the plan - the
@@ -3595,6 +3669,13 @@ begin
       for var LC in LOneCarried do
         if LSeen.TryAdd('carried:' + LowerCase(LC.OldName), True) then
           LCarried.Add(LC);
+    end;
+    if (LT.Kind = tkUnit) and (LFileName <> '') then
+    begin
+      if not DprojRenameEdits(AWs, LT.DeclFile, LFileName, LOne, LErr) then
+        raise EToolError.Create(Format('rename of %s to %s refused: %s - '
+          + 'nothing is planned', [LT.Name, LNew, LErr]));
+      LEdits.AddRange(LOne);
     end;
     LArr := LEdits.ToArray;
     TArray.Sort<TPasRenameEdit>(LArr, TComparer<TPasRenameEdit>.Construct(
@@ -3701,7 +3782,8 @@ begin
     end;
     if LFileName <> '' then
       LSb.AppendLine(Format('(the unit''s file must be called %s for it to '
-        + 'compile - rename it, this plan does not touch files%s)',
+        + 'compile - rename it, this plan does not touch files; an `in` '
+        + 'path or .dproj entry naming it is in the rows above%s)',
         [LFileName, IfThen(FileExists(ChangeFileExt(LT.DeclFile, '.dfm')),
         '; the form file beside it follows it', '')]));
     if LCompiled > 0 then
@@ -11537,7 +11619,8 @@ const
     + 'component''s own handlers (Button1Click) are carried along under '
     + 'their new names, as the form designer does. A unit (pass the unit '
     + 'name or its file) is renamed in its header and every `uses` item, '
-    + 'and the file name it needs is said. Refused whole, with the reason, '
+    + 'the file name it needs is said, and the `in` paths and .dproj '
+    + 'entries naming its file are edits. Refused whole, with the reason, '
     + 'for what cannot be renamed safely: a library source, a read-only '
     + 'file, a binary or unreadable form file, a published property or '
     + 'enum value a form spells, a `uses` alias. Lines in branches the '

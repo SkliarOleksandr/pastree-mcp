@@ -390,7 +390,11 @@ Check 'unknown' (Block $b 'definition {"symbol":"NoSuchThing"}') @('no declarati
 Check 'rename_plan class' (Block $b 'rename_plan {"symbol":"TCircle"') @('to TRound - 6 edits in 3 files', "Shared\uShapes.pas`n  21:3  [declaration]  TRound = class(TShape)`n  47:13  constructor TRound.Create", '  53:10  function TRound.Area: Double;', '  11:22  TBigCircle = class(TRound)')
 Check 'rename_plan component' (Block $b 'rename_plan {"symbol":"TfrmMain.btnSave"') @('to btnOK - 11 edits in 4 files, 5 of them in form files', '  4:13  [btnSave]  inherited btnOK: TButton', '  14:15 (btnSaveClick -> btnOKClick)  [chkConfirm.OnClick]  OnClick = btnOKClick', '  45:20 (btnSaveClick -> btnOKClick)  procedure TfrmMain.btnOKClick', '(carried along, as the form designer renames them - their edits are in the rows above: btnSaveClick -> btnOKClick)')
 Check 'rename_plan handler' (Block $b 'rename_plan {"symbol":"TfrmMain.btnSaveClick"') @('to SaveClicked - 5 edits in 3 files, 3 of them in form files', '  39:15  [btnSave.OnClick]  OnClick = SaveClicked', '  20:15  [declaration]  procedure SaveClicked(Sender: TObject);') @('carried along')
-Check 'rename_plan unit' (Block $b 'rename_plan {"symbol":"uShapes"') @('to uShapesNew - 4 edits in 4 files', "AppB\AppB.dpr`n  8:3  uShapesNew in '..\Shared\uShapes.pas',", '  1:6  [declaration]  unit uShapesNew;', '(the unit''s file must be called uShapesNew.pas for it to compile')
+# A unit's `in '...'` path is an edit of its file name, the directory kept
+# (PasTree 0.87.0), and so is a member's .dproj entry (uMembers): left, each
+# names a file the rename removed - F2613, and an index of a missing unit.
+Check 'rename_plan unit' (Block $b 'rename_plan {"symbol":"uShapes"') @('to uShapesNew - 5 edits in 4 files', "AppB\AppB.dpr`n  8:3, 25 (uShapes.pas -> uShapesNew.pas)  uShapesNew in '..\Shared\uShapesNew.pas',", '  1:6  [declaration]  unit uShapesNew;', '(the unit''s file must be called uShapesNew.pas for it to compile')
+Check 'rename_plan unit dproj' (Block $b 'rename_plan {"symbol":"uMembers"') @('to uMembership - 4 edits in 3 files', "AppA\AppA.dpr`n  7:3, 16 (uMembers.pas -> uMembership.pas)  uMembership in 'uMembership.pas';", "AppA\AppA.dproj`n  14:32 (uMembers.pas -> uMembership.pas)  <DCCReference Include=`"uMembership.pas`"/>")
 Check 'rename_plan overloads refused' (Block $b 'rename_plan {"symbol":"TQuiet.Hush"') @('`TQuiet.Hush` names 2 overloads of one routine - pass `file` + `line` + `name`')
 Check 'rename_plan one overload' (Block $b 'rename_plan {"file":"AppA/uMembers.pas"') @('to Quieten - ', '[declaration]  procedure Quieten(const S: string); overload;') @('procedure Quieten(A: Integer)')
 Check 'rename_plan nothing uses it' (Block $b 'rename_plan {"symbol":"TfrmMain.NeverBound"') @('to Unbound - 2 edits in 1 files', '  23:15  [declaration]  procedure Unbound(Sender: TObject);')
@@ -406,7 +410,7 @@ Check 'references dotted unit leaf' (Block $b 'references {"symbol":"Lib.Notes.N
 Check 'find dotted unit' (Block $b 'find {"query":"Lib.Notes"}') @('AppB\Lib.Notes.pas:1  Lib.Notes (unit)  unit Lib.Notes;') @('(procedure)')
 Check 'find kind unit' (Block $b 'find {"query":"*Notes","kind":"unit"}') @('AppB\Lib.Notes.pas:1  Lib.Notes (unit)') @('(procedure)')
 Check 'find kind unit none' (Block $b 'find {"query":"NoSuchUnit","kind":"unit"}') @('no declaration of kind unit matches `NoSuchUnit`')
-Check 'rename_plan unit by file' (Block $b 'rename_plan {"file":"AppB/Lib.Notes.pas"') @('rename Lib.Notes (unit) declared at AppB\Lib.Notes.pas:1 to Lib.Memo - 2 edits in 2 files', "AppB\AppB.dpr`n  10:", '  1:6  [declaration]  unit Lib.Memo;')
+Check 'rename_plan unit by file' (Block $b 'rename_plan {"file":"AppB/Lib.Notes.pas"') @('rename Lib.Notes (unit) declared at AppB\Lib.Notes.pas:1 to Lib.Memo - 3 edits in 2 files', "AppB\AppB.dpr`n  10:81, 95 (Lib.Notes.pas -> Lib.Memo.pas)  ",'  1:6  [declaration]  unit Lib.Memo;')
 # A unit's `uses` rows are code rows: the cut note counted them as form lines.
 Check 'references unit count only' (Block $b 'references {"symbol":"uShapes","limit":0}') @('3 references in 3 files', '... 3 more (raise `limit`)') @('form lines')
 # A method's family (PasTree 0.86.0): an interface method takes the class that
@@ -423,7 +427,7 @@ Check 'strict status' (Block $b 'status') @('analysis 0:', 'analysis 1:')
 Check 'strict references unit' (Block $b 'references {"symbol":"uShapes"}') @('3 references in 3 files')
 # The shared unit is in both analyses: its edits are counted once.
 Check 'strict rename_plan' (Block $b 'rename_plan {"symbol":"TCircle","new_name":"TRound"') @('to TRound - 6 edits in 3 files')
-Check 'strict rename_plan unit' (Block $b 'rename_plan {"symbol":"uShapes"') @('to uShapesNew - 4 edits in 4 files')
+Check 'strict rename_plan unit' (Block $b 'rename_plan {"symbol":"uShapes"') @('to uShapesNew - 5 edits in 4 files')
 Check 'strict descendants' (Block $b 'related {"relation":"descendants"') @('descendants of TShape (Shared\uShapes.pas:15): 3', 'TBigCircle <- TCircle')
 Check 'strict overrides' (Block $b 'related {"relation":"overrides"') @('overrides of TShape.Area (Shared\uShapes.pas:17): 4')
 # Rows of both analyses in one walk: RunA is project A's, the rest project B's.
