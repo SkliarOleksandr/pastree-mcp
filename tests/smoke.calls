@@ -161,6 +161,8 @@ form {"symbol":"TfrmChild","limit":0}
 outline {"file":"Shared/uShapes.pas","limit":0}
 impact {"symbol":"TCircle.Area","limit":0}
 diagnostics {"file":"AppB/uGenLists.pas"}
+diagnostics {"file":"AppB/AppB.dpr"}
+definition {"symbol":"FallbackName"}
 definition {"file":"AppB/uGenLists.pas","line":69,"name":"Code"}
 references {"symbol":"ICoded.Code"}
 references {"symbol":"TCellList.Cells"}

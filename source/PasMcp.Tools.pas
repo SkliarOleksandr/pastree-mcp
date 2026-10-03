@@ -4044,7 +4044,7 @@ function DefineStateText(AWs: TMcpWorkspace; AA: TMcpAnalysis;
   const ABase: TBaseDefines; const AName: string; out AByUnit: Boolean): string;
 var
   LRef: Integer;
-  LElse, LOthers, LSharing, LParts: TArray<string>;
+  LElse, LOthers, LSharing, LPlatforms, LParts: TArray<string>;
 begin
   AByUnit := False;
   if ADefs.TryGetValue(AName, LRef) then
@@ -4084,6 +4084,17 @@ begin
   if Length(LOthers) > 0 then
     LParts := LParts + [Format('the project of %s defines it, analyzed apart',
       [String.Join(', ', LOthers)])];
+  // Another platform's predefine (CPUX86 read in the Win64 analysis): the
+  // group's Win32 members compile the line the other way.
+  LPlatforms := nil;
+  for var LOther in AWs.Analyses do
+    if (LOther <> AA) and (LOther.Proj <> nil) and
+       BaseDefinesOf(LOther).HasPlatform(AName) and
+       not MatchText(PlatformName(LOther.Platform), LPlatforms) then
+      LPlatforms := LPlatforms + [PlatformName(LOther.Platform)];
+  if Length(LPlatforms) > 0 then
+    LParts := LParts + [Format('predefined for %s, analyzed apart',
+      [String.Join(', ', LPlatforms)])];
   if Length(LElse) > 0 then
     LParts := LParts + [Format('its $DEFINE at %s%s does not reach here',
       [String.Join(', ', Copy(LElse, 0, 3)), IfThen(Length(LElse) > 3, ', ...',

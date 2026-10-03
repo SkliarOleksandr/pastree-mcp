@@ -93,7 +93,7 @@ Check 'definition inactive' (Block $b 'definition {"file":"AppB/uBoxes.pas","lin
 Check 'find joined cut' (Block $b 'find {"query":"TWideBox.Many"}') @('AppB\uBoxes.pas:74  TWideBox.Many (procedure)  procedure Many(const AAlphaName, ABetaName, AGammaName: string; ADeltaCount, AEpsilonCount, AZetaCount: Integer; const AEtaText, AThetaText, ...); virtual;')
 # A name no declaration matches: what the index is, and where the name is
 # written outside it - in a unit no project uses - or that it is nowhere.
-Check 'find outside the index' (Block $b 'find {"query":"OrphanRoutine"}') @('no declaration matches `OrphanRoutine` among the ', ' units indexed - what the 3 projects of Fixture.groupproj compile: 19 of their own, ', "``OrphanRoutine`` is written in 1 file(s) that no indexed project uses - no tool here sees them:`n  AppB\uOrphan.pas:8  procedure OrphanRoutine;")
+Check 'find outside the index' (Block $b 'find {"query":"OrphanRoutine"}') @('no declaration matches `OrphanRoutine` among the ', ' units indexed - what the 3 projects of Fixture.groupproj compile: 20 of their own, ', "``OrphanRoutine`` is written in 1 file(s) that no indexed project uses - no tool here sees them:`n  AppB\uOrphan.pas:8  procedure OrphanRoutine;")
 Check 'find nowhere' (Block $b 'find {"query":"NothingAnywhere"}') @('no declaration matches `NothingAnywhere` among the ', 'no Pascal file outside them writes `NothingAnywhere` either (1 searched, under the group directory')
 Check 'definition' (Block $b 'definition {"symbol":"TCircle.Area"') @('declared at Shared\uShapes.pas:26', 'implemented at Shared\uShapes.pas:53', 'Result := Pi * FRadius * FRadius;')
 Check 'source' (Block $b 'source {"symbol":"TCircle.Area"}') @('TCircle.Area (function) implemented at Shared\uShapes.pas:53-56', "53  function TCircle.Area: Double;`n54  begin", "56  end;`n") @('declared at')
@@ -337,6 +337,11 @@ Check 'impact count only' (Block $b 'impact {"symbol":"TCircle.Area","limit":0}'
 # written bare (FR.2): no false E2003, the member bound, every spelling.
 Check 'diagnostics generic ancestor call' (Block $b 'diagnostics {"file":"AppB/uGenLists.pas"}') @('no diagnostics in AppB\uGenLists.pas')
 Check 'definition generic ancestor call' (Block $b 'definition {"file":"AppB/uGenLists.pas","line":69,"name":"Code"}') @('ICoded.Code (property) declared at AppB\uGenLists.pas:18')
+# A unit named `in` a file that does not exist (AppB.dpr: uFallback in
+# 'Gone\uFallback.pas'): dcc compiles the one beside the program; the index
+# was pinned to the missing file and said F1027 (PasTree 0.91.1).
+Check 'diagnostics missing in-path' (Block $b 'diagnostics {"file":"AppB/AppB.dpr"}') @('no diagnostics in AppB\AppB.dpr') @('F1027')
+Check 'definition missing in-path' (Block $b 'definition {"symbol":"FallbackName"}') @('FallbackName (function) declared at AppB\uFallback.pas:8')
 Check 'references generic ancestor call' (Block $b 'references {"symbol":"ICoded.Code"}') @('8 references in 1 files', '    69  Result := GetRecord(0).Code;', '    107  Result := GetRecord(0).Code;')
 # `AList[0]` uses a default array property with no name written: a row
 # tagged [X[I]] at each, a read calls its getter and a write its setter, and

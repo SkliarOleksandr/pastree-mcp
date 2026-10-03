@@ -738,9 +738,11 @@ gap between the answers and the truth.
    analysis without its defines) carry the note naming the member. The one
    false text it found is fixed: a symbol only a member sharing the
    analysis defines was said to be defined by nothing in the group. 16
-   pairs had no answer - the server's `.dpr` names a unit `in` a file that
-   does not exist and dcc takes the one on the search path, which the
-   index does not (a `uses` resolution matter, not this tool's).
+   pairs had no answer - the server's `.dpr` and `.dproj` name a unit `in`
+   a file that does not exist and dcc takes the one on the search path;
+   the index pinned the missing file and said F1027 in every importer.
+   Fixed in 0.27.1 (PasTree 0.91.1 drops such a pin, the group reader no
+   longer pins it or splits an analysis over it).
 
 ### 9.7 Checks and metrics
 

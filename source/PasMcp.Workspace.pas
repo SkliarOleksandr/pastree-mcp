@@ -731,6 +731,8 @@ begin
         LFits := True;
         for var LF in FMembers[LIdx].Files do
         begin
+          if not TFile.Exists(LF) then
+            Continue;   // not pinned, see below
           LUnit := LowerCase(TPath.GetFileNameWithoutExtension(LF));
           if LCand.Pins.TryGetValue(LUnit, LHave) and not SameText(LHave, LF)
           then
@@ -768,9 +770,19 @@ begin
       FMembers[LIdx].Analysis := LA.Index;
       LA.Roots := LA.Roots + [FMembers[LIdx].MainSource];
       AddUnique(LA.Namespaces, FMembers[LIdx].Namespaces);
+      // A listed file that does not exist is not pinned: dcc compiles the unit
+      // the search path finds (the client group's server lists one in its
+      // .dpr and .dproj and builds), and a pin to it made every importer
+      // F1027 - and split the analysis over a "second location" that is not
+      // there. PasTree drops such a pin too (0.91.1); left out here, it does
+      // not decide which analysis a member joins.
       for var LF in FMembers[LIdx].Files do
-        LA.Pins.AddOrSetValue(LowerCase(TPath.GetFileNameWithoutExtension(LF)),
-          LF);
+        if TFile.Exists(LF) then
+          LA.Pins.AddOrSetValue(LowerCase(TPath.GetFileNameWithoutExtension(LF)),
+            LF)
+        else
+          Log('  %s lists %s, which does not exist - the unit is looked up on '
+            + 'the search path, as dcc does', [FMembers[LIdx].Name, LF]);
     end;
 
     // Search paths: every member's directory, then every member's own paths
