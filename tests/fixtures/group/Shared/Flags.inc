@@ -1,0 +1,7 @@
+// Included by uFlags: a unit's own conditional symbols.
+{$DEFINE FIXTURE_LOCAL}
+{$DEFINE FIXTURE_GONE}
+{$UNDEF FIXTURE_GONE}
+{$IFDEF FIXTURE_NEVER}
+{$DEFINE FIXTURE_OFF}
+{$ENDIF}

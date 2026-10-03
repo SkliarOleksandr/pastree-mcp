@@ -50,6 +50,7 @@ or **16 s / 4.3 GB** under the exact one. Typical calls take 60-500 ms.
 | `form` | The component tree of one form, merged with its ancestors' form files: each component's class, the method each event runs, the components it names - and a handler or a component a line names that does not exist; of a form class with no form file of its own, the ancestor's it loads |
 | `diagnostics` | PasTree's semantic errors for a file or the whole group, from the files on disk now, each naming its routine |
 | `unit_deps` | What a unit uses (resolved to files) and what uses it |
+| `defines` | Conditional compilation as the analyzed configuration compiles it: for `file` + `line`, whether the line is compiled and each `{$IFDEF}` around it with whether its branch is taken and why (the unit `$DEFINE` at file:line, the project, the platform, or nothing); for `file` alone, its lines not compiled; for `name`, where a symbol is defined and every directive naming it. A member of the group analyzed with another's defines is said - built as that project, the line goes the other way |
 
 Every tool that lists rows takes `limit`; its header counts every row, cut
 or not, and `limit: 0` answers whether and how many with no rows - "is it

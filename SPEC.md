@@ -167,6 +167,7 @@ Common rules:
 | `outline` | `PasModuleOutline` | Sections, uses, includes, types with members, routines with signatures, each with its line. `owner` and `section` filter; `members: false` keeps only types and bodies. A routine's or property's parameter list and result are rebuilt from the tree, whole: PasTree's `Detail` is an editor's hint cut at 80 characters, and a cut mid-name followed by the result type - `AInterfa...: TPasTree` - reads as one more parameter. The same text and the same 160-character cut at a parameter boundary as a declaration row; on the client group a 22,000-line form's outline grew 1.2%. `limit` (300 rows) bounds it: over it, the types' members are left out first and the answer says how many (`owner` gives one type's back), then the rows are cut and counted - the client group's largest shared unit was 11,202 rows, about 141k tokens, in one answer, and 400 rows of it without members still 7k. |
 | `diagnostics` | model `Diags` | Own units by default. Each unit reports from ONE analysis - its owner (section 4) - so a unit analyzed under two configurations does not report twice. Over the limit, a per-file count comes first. |
 | `unit_deps` | `UsesList`, `NodeSite`, `FindUnitReferences` | Uses resolved to files, implementation-section ones marked; used-by merged across analyses. |
+| `defines` | the preprocessor's `DefineRefs`, `Skipped` regions and `IncludeRefs`, the raw token stream, `BaseDefineNames`, `FindDefineReferences` | Conditional compilation as the analyzed configuration compiles it. **`file` + `line`**: whether the line is compiled; each `{$IF}`/`{$IFDEF}`/`{$IFNDEF}`/`{$IFOPT}` block around it, outermost first (through the `$I` an include file was read through), with the branch the line is in (`its {$ELSE} at 20`), taken, not taken or not reached, and why - for each name the block tests, the unit `$DEFINE` or `$UNDEF` in effect at the directive (file:line), the project's defines, the platform's predefined set, or nothing, and then a project of another analysis defining it and the `$DEFINE` of it that does not reach there; then the symbols in effect at the line (the units' own by the file of their `$DEFINE`, the project's, the platform's, those a `$UNDEF` cancelled). A branch is taken by what the preprocessor did, never re-evaluated: the first token in it outside a nested block is in a skipped region or not, or, for a branch of directives only, a name in one of them was live. **`file` alone**: its lines not compiled, the outermost branch of each nest by line range, with the same why. **`name`**: per analysis whether the project or the platform defines it, the `$DEFINE`/`$UNDEF` lines in the code, and every directive of the group's files naming it - a test with whether its branch is compiled, a `$DEFINE` with whether it is live - a library's counted; `file` narrows the rows. A shared analysis is built with its first member's defines: where a member of it that compiles the unit has other defines for a name a block tests, it is said (`AppB does not define FIXTURE_A, the analysis takes AppA's defines - built as AppB, it is not defined here`). Each analysis reading the file answers; analyses that agree are one answer, the symbols in effect said apart. A `symbol` no declaration matches that is a conditional symbol says to ask `defines`. `limit` (100) caps the directives of `name` and the branches of `file` alone. |
 
 What comes next - new tools and changes to these - is section 9.
 
@@ -714,9 +715,32 @@ gap between the answers and the truth.
    declaring it, whether it is already reachable, whether it belongs in the
    interface or the implementation `uses`, and whether adding it to the
    interface would close a circular reference.
-6. **`defines`** - where a conditional symbol is defined and which are in
-   effect at a position (`FindDefines`, `DefinesAt`). The `{$IFDEF}` branch
-   an agent edits may not be the one that is compiled.
+6. **`defines`** (done, 0.27.0, section 3) - whether a line is compiled and
+   what decides each `{$IF}`/`{$IFDEF}` around it, a file's lines not
+   compiled, and where a conditional symbol is defined with every directive
+   naming it. The `{$IFDEF}` branch an agent edits may not be the one that
+   is compiled - and in a shared analysis, not the one another member of it
+   compiles. Measured on the client group (`local/defines-bench`): a
+   position 0.12-0.23 s and 215-540 tokens (two analyses reading the file
+   answer apart where they differ), a file's uncompiled branches 39-592, a
+   symbol's 21 directives 382 with its `$DEFINE` in the shared include named
+   first. A line under the main program's own define is compiled as the
+   analysis reads it and said not to be in two other builds: a COM server
+   shares the analysis without that define, the server is analyzed apart
+   without it. Before, grep for the directive, the `$DEFINE` in an
+   include, each `.dproj`'s `DCC_Define` per configuration - and the
+   members sharing an analysis were not told apart at all.
+   Checked against dcc: on the client group a `{$MESSAGE WARN}` probe after
+   each of 2,708 conditional directives in 201 files, every member built.
+   Of 4,776 member-line pairs, 4,734 answers matched what dcc compiled, and
+   the 26 where a member builds the line the other way
+   (a COM server, a guardian, a browser host sharing the main program's
+   analysis without its defines) carry the note naming the member. The one
+   false text it found is fixed: a symbol only a member sharing the
+   analysis defines was said to be defined by nothing in the group. 16
+   pairs had no answer - the server's `.dpr` names a unit `in` a file that
+   does not exist and dcc takes the one on the search path, which the
+   index does not (a `uses` resolution matter, not this tool's).
 
 ### 9.7 Checks and metrics
 
@@ -796,8 +820,8 @@ gap between the answers and the truth.
 9. `mode: count | files` (9.2; done for `references`, 0.26.0) - the answers the limits cut are about widely
    used library members and properties set on thousands of form lines; a
    count per file first, then the lines of the files that matter.
-10. `defines` (9.6) - `references` now names the lines in branches not
-   compiled; which define selects each is the next question.
+10. `defines` (done, 0.27.0, 9.6) - `references` names the lines in branches not
+   compiled; `defines` says which define selects each, and for which member.
 11. `lint` (the two `uses` rules first), `metrics`. `unused-symbol`'s
    exceptions are measured: 24 of 384 sampled symbols that no code names
    are called through a base, an interface or a property, and a published

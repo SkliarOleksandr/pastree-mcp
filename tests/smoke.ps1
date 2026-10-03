@@ -93,7 +93,7 @@ Check 'definition inactive' (Block $b 'definition {"file":"AppB/uBoxes.pas","lin
 Check 'find joined cut' (Block $b 'find {"query":"TWideBox.Many"}') @('AppB\uBoxes.pas:74  TWideBox.Many (procedure)  procedure Many(const AAlphaName, ABetaName, AGammaName: string; ADeltaCount, AEpsilonCount, AZetaCount: Integer; const AEtaText, AThetaText, ...); virtual;')
 # A name no declaration matches: what the index is, and where the name is
 # written outside it - in a unit no project uses - or that it is nowhere.
-Check 'find outside the index' (Block $b 'find {"query":"OrphanRoutine"}') @('no declaration matches `OrphanRoutine` among the ', ' units indexed - what the 3 projects of Fixture.groupproj compile: 18 of their own, ', "``OrphanRoutine`` is written in 1 file(s) that no indexed project uses - no tool here sees them:`n  AppB\uOrphan.pas:8  procedure OrphanRoutine;")
+Check 'find outside the index' (Block $b 'find {"query":"OrphanRoutine"}') @('no declaration matches `OrphanRoutine` among the ', ' units indexed - what the 3 projects of Fixture.groupproj compile: 19 of their own, ', "``OrphanRoutine`` is written in 1 file(s) that no indexed project uses - no tool here sees them:`n  AppB\uOrphan.pas:8  procedure OrphanRoutine;")
 Check 'find nowhere' (Block $b 'find {"query":"NothingAnywhere"}') @('no declaration matches `NothingAnywhere` among the ', 'no Pascal file outside them writes `NothingAnywhere` either (1 searched, under the group directory')
 Check 'definition' (Block $b 'definition {"symbol":"TCircle.Area"') @('declared at Shared\uShapes.pas:26', 'implemented at Shared\uShapes.pas:53', 'Result := Pi * FRadius * FRadius;')
 Check 'source' (Block $b 'source {"symbol":"TCircle.Area"}') @('TCircle.Area (function) implemented at Shared\uShapes.pas:53-56', "53  function TCircle.Area: Double;`n54  begin", "56  end;`n") @('declared at')
@@ -287,7 +287,7 @@ Check 'impact nothing' (Block $b 'impact {}') @('give `diff`')
 # session did not change is counted, not listed. The second compiles only the
 # program - uMembers is not recompiled, so its warning is not reported again,
 # and not gone either.
-Check 'compile' (Block $b 'compile {"member":"AppA"}') @('compile AppA (Win32 Debug): built in', '294 lines compiled', 'AppA-Win32-Debug\exe\AppA.exe', 'first build here: every unit compiled', 'warnings - none in files changed this session (1 elsewhere, not listed)')
+Check 'compile' (Block $b 'compile {"member":"AppA"}') @('compile AppA (Win32 Debug): built in', '342 lines compiled', 'AppA-Win32-Debug\exe\AppA.exe', 'first build here: every unit compiled', 'warnings - none in files changed this session (1 elsewhere, not listed)')
 Check 'compile again' (Block $b 'compile {"member":"AppA", "limit"') @('compile AppA (Win32 Debug): built in', '13 lines compiled', 'no errors, warnings or hints') @('first build here')
 Check 'compile bare dpr' (Block $b 'compile {"member":"AppB"}') @('compile AppB (Win32): built in', 'AppB-Win32\exe\AppB.exe', 'first build here', 'no errors, warnings or hints')
 # The forms member: dcc converts its text form files to binary as it links
@@ -295,7 +295,7 @@ Check 'compile bare dpr' (Block $b 'compile {"member":"AppB"}') @('compile AppB 
 Check 'compile forms' (Block $b 'compile {"member":"AppF"}') @('compile AppF (Win32): built in', 'AppF-Win32\exe\AppF.exe', 'no errors, warnings or hints')
 Check 'compile file' (Block $b 'compile {"file"') @('compile - 2 members, those compiling Shared\uShapes.pas', '  AppA (Win32 Debug): built in', '  AppB (Win32): built in', 'no errors, warnings or hints')
 # A rebuild recompiles uMembers: its warning again, known, so not new.
-Check 'compile rebuild' (Block $b 'compile {"member":"AppA", "rebuild"') @('294 lines compiled', "warnings - 1 in the group's files:`nAppA\uMembers.pas", '  37  W1055 PUBLISHED caused RTTI', "to be added to type 'TDerived' (in TDerived)`n        published") @('[new]')
+Check 'compile rebuild' (Block $b 'compile {"member":"AppA", "rebuild"') @('342 lines compiled', "warnings - 1 in the group's files:`nAppA\uMembers.pas", '  37  W1055 PUBLISHED caused RTTI', "to be added to type 'TDerived' (in TDerived)`n        published") @('[new]')
 Check 'compile no member' (Block $b 'compile {"member":"NoSuch"}') @('no member named NoSuch - the group has: AppA, AppB, AppF')
 Check 'compile bad show' (Block $b 'compile {"show"') @('`show` is new, warnings or all')
 Check 'compile nothing changed' (Block $b 'compile {}') @('no file has changed since the server started - name the `member` to build (the group has: AppA, AppB, AppF)')
@@ -452,6 +452,24 @@ Check 'references count' (Block $b 'references {"symbol":"TShape.Area","mode":"c
 Check 'references bad mode' (Block $b 'references {"symbol":"TShape.Area","mode":"bogus"}') @('`mode` is lines (the default), files (a count per file) or count (the counts alone) - not `bogus`')
 Check 'references files none' (Block $b 'references {"symbol":"NeverCalled","mode":"files"}') @('0 references in 0 files')
 
+# defines: Shared\uFlags.pas, lines pinned. AppB shares AppA's analysis and
+# not its FIXTURE_A: said where it decides a branch.
+Check 'defines else' (Block $b 'defines {"file":"Shared/uFlags.pas","line":21}') @('Shared\uFlags.pas:21 is not compiled (analysis 0: AppA, AppB, AppF; Win32)', '  18 {$IFDEF FIXTURE_A}, its {$ELSE} at 20: not taken - FIXTURE_A defined by the project', "    (AppB does not define FIXTURE_A, the analysis takes AppA's defines - built as AppB, it is not defined here)", "in effect here:`n  by `$DEFINE in Shared\Flags.inc: FIXTURE_LOCAL 2`n  by the project: FIXTURE_A`n  predefined for Win32: ", 'MSWINDOWS', "  undefined by a unit's `$UNDEF: FIXTURE_GONE") @('AppF do')
+Check 'defines nested' (Block $b 'defines {"file":"Shared/uFlags.pas","line":25,"name":"FIXTURE_OFF"}') @('Shared\uFlags.pas:25 is compiled', 'here: FIXTURE_OFF not defined - its $DEFINE at Shared\Flags.inc:6 does not reach here', "outermost first:`n  23 {`$IFDEF FIXTURE_LOCAL}: taken - FIXTURE_LOCAL defined at Shared\Flags.inc:2`n  24 {`$IFNDEF FIXTURE_OFF}: taken")
+Check 'defines not reached' (Block $b 'defines {"file":"Shared/uFlags.pas","line":34}') @('Shared\uFlags.pas:34 is not compiled', '  31 {$IFDEF FIXTURE_NEVER}: not taken - FIXTURE_NEVER not defined - nothing in the group defines it', '  33 {$IFDEF FIXTURE_A}: not reached')
+Check 'defines include' (Block $b 'defines {"file":"Shared/Flags.inc","line":6}') @('Shared\Flags.inc:6 is not compiled, a directive line', '(an include file: read as Shared\uFlags.pas reads it)', '  5 {$IFDEF FIXTURE_NEVER}: not taken')
+Check 'defines file' (Block $b 'defines {"file":"Shared/uFlags.pas"}') @('Shared\uFlags.pas: 5 lines not compiled, in 2 branches', '  line 21: 18 {$IFDEF FIXTURE_A}, its {$ELSE} at 20: not taken', '  lines 32-35: 31 {$IFDEF FIXTURE_NEVER}: not taken') @('more (raise')
+Check 'defines file cut' (Block $b 'defines {"file":"Shared/uFlags.pas","limit":1}') @('in 2 branches', '  line 21: ', '... 1 more (raise `limit`)') @('lines 32-35')
+Check 'defines file none' (Block $b 'defines {"file":"Shared/uShapes.pas"}') @('Shared\uShapes.pas: 0 lines not compiled')
+Check 'defines no block' (Block $b 'defines {"file":"Shared/uShapes.pas","line":5}') @('Shared\uShapes.pas:5 is compiled', 'no conditional block around it', 'in effect here:') @('by $DEFINE')
+Check 'defines name' (Block $b 'defines {"name":"FIXTURE_A"}') @('FIXTURE_A (conditional symbol) - 2 directives in 1 file of the group', 'analysis 0: AppA, AppB, AppF; Win32: defined by the project - AppB does not define FIXTURE_A', "Shared\uFlags.pas`n  18  {`$IFDEF FIXTURE_A} - its branch compiled`n  33  {`$IFDEF FIXTURE_A} - not reached")
+Check 'defines name undef' (Block $b 'defines {"name":"FIXTURE_GONE"}') @('3 directives in 2 files', 'in the code: $DEFINE at Shared\Flags.inc:3; $UNDEF at Shared\Flags.inc:4', "Shared\Flags.inc`n  3  {`$DEFINE FIXTURE_GONE} - live`n  4  {`$UNDEF FIXTURE_GONE} - live", '  28  {$IF Defined(MSWINDOWS) and not Defined(FIXTURE_GONE)} - its branch compiled')
+Check 'defines name in file' (Block $b 'defines {"name":"FIXTURE_A","file":"Shared/Flags.inc"}') @('FIXTURE_A (conditional symbol) - 0 directives in Shared\Flags.inc', 'defined by the project')
+Check 'defines name count' (Block $b 'defines {"name":"MSWINDOWS","limit":0}') @('MSWINDOWS (conditional symbol) - 1 directive in 1 file of the group (+', ' in library files, not listed)', 'predefined for Win32', '... 1 more (raise `limit`') @('uFlags.pas')
+Check 'defines name none' (Block $b 'defines {"name":"NOPE_X"}') @('no directive names `NOPE_X` and no project or platform defines it')
+Check 'defines no args' (Block $b 'defines {}') @('pass `name` (a conditional symbol')
+Check 'references define by name' (Block $b 'references {"symbol":"FIXTURE_A"}') @('`FIXTURE_A` is a conditional symbol: `defines` with `name`')
+
 # ---- 2. strict policy ---------------------------------------------------------
 Write-Host '--- CLI, strict policy'
 $b = Run-Cli @('--groups', 'strict')
@@ -465,6 +483,10 @@ Check 'strict descendants' (Block $b 'related {"relation":"descendants"') @('des
 Check 'strict overrides' (Block $b 'related {"relation":"overrides"') @('overrides of TShape.Area (Shared\uShapes.pas:17): 4')
 # Rows of both analyses in one walk: RunA is project A's, the rest project B's.
 Check 'strict callers' (Block $b 'callers {"symbol":"TCircle.Area", "depth":3}') @('3 calls in 3 routines; depth 2: 2 in 2; depth 3: 1 in 1', '22  [via TShape.Area]', '75  [via IShape.Area]', '10  [-> RunA, main block]', '13  [-> RunB, main block]')
+# Each analysis its own answer; what they agree on said once.
+Check 'strict defines' (Block $b 'defines {"file":"Shared/uFlags.pas","line":21}') @('Shared\uFlags.pas:21 is not compiled (analysis 0: AppA; Win32)', 'Shared\uFlags.pas:21 is compiled (analysis 1: AppB, AppF; Win32)', ': taken - FIXTURE_A not defined - the project of AppA defines it, analyzed apart', 'in effect here (analysis 0: AppA; Win32):', 'in effect here (analysis 1: AppB, AppF; Win32):') @('AppB does not define')
+Check 'strict defines agree' (Block $b 'defines {"file":"Shared/uFlags.pas","line":34}') @('Shared\uFlags.pas:34 is not compiled (analysis 0: AppA; Win32; analysis 1: AppB, AppF; Win32)')
+Check 'strict defines name' (Block $b 'defines {"name":"FIXTURE_A"}') @('analysis 0: AppA; Win32: defined by the project', 'analysis 1: AppB, AppF; Win32: not defined by the project', '  18  {$IFDEF FIXTURE_A} - its branch compiled in analysis 0, its branch not compiled in analysis 1')
 Check 'strict members' (Block $b 'members {"symbol":"TDerived"}') @('8 members', '19  FCount: Integer;')
 # The implementations of one call, merged from both analyses: TBigCircle is
 # project B's alone.
@@ -677,7 +699,7 @@ try {
     $stdin.WriteLine('{"jsonrpc":"2.0","method":"notifications/initialized"}')
     $r = Rpc 2 'tools/list' '{}'
     $names = ($r.result.tools | ForEach-Object { $_.name }) -join ','
-    Check 'tools/list' $names @('status', 'find', 'definition', 'source', 'members', 'references', 'callers', 'callees', 'impact', 'compile', 'related', 'outline', 'diagnostics', 'unit_deps', 'rename_plan', 'change_plan')
+    Check 'tools/list' $names @('status', 'find', 'definition', 'source', 'members', 'references', 'callers', 'callees', 'impact', 'compile', 'related', 'outline', 'diagnostics', 'unit_deps', 'rename_plan', 'change_plan', 'defines')
     $r = Rpc 3 'tools/call' '{"name":"related","arguments":{"relation":"creations","symbol":"TCircle"}}'
     Check 'call before edit' (ToolText $r) @('creations of TCircle', ': 1')
     if ($r.result.isError) { Write-Host 'FAIL call before edit reported isError'; $script:failures++ }

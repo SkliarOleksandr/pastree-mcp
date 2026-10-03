@@ -1531,6 +1531,27 @@ begin
   end;
 end;
 
+// Is AName a conditional symbol - one the project or the platform defines,
+// or one a directive of the analyzed code names? Asked by name, it has no
+// declaration to find.
+function IsConditionalName(AWs: TMcpWorkspace; const AName: string): Boolean;
+begin
+  Result := False;
+  if (AName = '') or (Pos('.', AName) > 0) then
+    Exit;
+  for var LA in AWs.Analyses do
+  begin
+    if LA.Proj = nil then
+      Continue;
+    if LA.Proj.IsBaseDefined(AName) then
+      Exit(True);
+    for var LMid := 0 to LA.Proj.ModelCount - 1 do
+      for var LR in LA.Proj.Model(LMid).Tree.Source.DefineRefs do
+        if SameText(LR.Name, AName) then
+          Exit(True);
+  end;
+end;
+
 // The refusal of a name no declaration matches, for every tool that takes
 // `symbol`: what was searched, and where the name is written outside it.
 function NoSuchDeclaration(AWs: TMcpWorkspace; const ASymbol: string): string;
@@ -1544,6 +1565,10 @@ begin
   LNote := OutsideIndexNote(AWs, ASymbol, False);
   if LNote <> '' then
     Result := Result + sLineBreak + LNote;
+  if IsConditionalName(AWs, ASymbol) then
+    Result := Result + sLineBreak + Format('`%s` is a conditional symbol: '
+      + '`defines` with `name` says where it is defined and which branches it '
+      + 'selects', [ASymbol]);
 end;
 
 function IsRoutineTarget(const AT: TTarget): Boolean;
@@ -3612,6 +3637,1137 @@ begin
     LSb.Free;
     LHeaderSeen.Free;
     LSet.Free;
+  end;
+end;
+
+{ ---- defines ---------------------------------------------------------------- }
+
+type
+  // One branch of a conditional block in one file of a unit: the text from
+  // the end of the directive opening it ($IF, $IFDEF, $IFNDEF, $IFOPT,
+  // $ELSEIF, $ELSE) to the start of the directive ending it.
+  TCondBranch = record
+    Head: Integer;      // token of the directive opening the block
+    Dir: Integer;       // token of the directive opening this branch
+    EndDir: Integer;    // token of the directive ending it; -1 = the file's end
+    Parent: Integer;    // the branch the block sits in; -1 = none
+    Taken: Boolean;     // compiled when reached
+    Decided: Boolean;
+    Reached: Boolean;   // every branch around it taken
+  end;
+
+  // A place in a unit's processing order: a file and an offset in it - the
+  // position asked first, then each `$I` it was reached through.
+  TCondStop = record
+    Fi, Offset: Integer;
+  end;
+
+// The word of a directive token, upper case: IFDEF, ELSE, DEFINE.
+function DirectiveWord(const ATS: TPasTokenStream; ATok: Integer): string;
+var
+  LP, LEnd: Integer;
+begin
+  Result := '';
+  LP := ATS.Tokens[ATok].Start + 1;
+  LEnd := ATS.Tokens[ATok].EndPos;
+  if (LP <= LEnd) and (ATS.Source[LP] = '{') then
+    Inc(LP, 2)
+  else
+    Inc(LP, 3);
+  while (LP <= LEnd) and CharInSet(ATS.Source[LP], ['A'..'Z', 'a'..'z']) do
+  begin
+    Result := Result + UpCase(ATS.Source[LP]);
+    Inc(LP);
+  end;
+end;
+
+function IsCondOpen(const AWord: string): Boolean;
+begin
+  Result := (AWord = 'IF') or (AWord = 'IFDEF') or (AWord = 'IFNDEF') or
+    (AWord = 'IFOPT');
+end;
+
+// The index of the token holding AOffset in ATS, -1 for none.
+function TokenAt(const ATS: TPasTokenStream; AOffset: Integer): Integer;
+var
+  LLo, LHi, LMid: Integer;
+begin
+  LLo := 0;
+  LHi := High(ATS.Tokens);
+  while LLo <= LHi do
+  begin
+    LMid := (LLo + LHi) div 2;
+    if ATS.Tokens[LMid].Start > AOffset then
+      LHi := LMid - 1
+    else if ATS.Tokens[LMid].EndPos <= AOffset then
+      LLo := LMid + 1
+    else
+      Exit(LMid);
+  end;
+  Result := -1;
+end;
+
+function LineOfOffset(const ATS: TPasTokenStream; AOffset: Integer): Integer;
+var
+  LCol: Integer;
+begin
+  ATS.OffsetToLineCol(AOffset, Result, LCol);
+end;
+
+// The conditional blocks of file AFi of LM, every branch of each, in the
+// order their directives stand. Whether a branch is compiled is what the
+// preprocessor did: the first token in it, outside a nested block, is in a
+// skipped region or not - or, for a branch holding only directives, a name
+// in one of them was live or not.
+function CondBranches(LM: TPasSemaModel; AFi: Integer): TArray<TCondBranch>;
+var
+  LList: TList<TCondBranch>;
+  LStack: TList<Integer>;
+  LRefs: TArray<TPasDefineRef>;
+  LRi: Integer;
+  LWord: string;
+  LB: TCondBranch;
+
+  procedure Decide(ATaken: Boolean);
+  var
+    LCur: TCondBranch;
+  begin
+    if LStack.Count = 0 then
+      Exit;
+    LCur := LList[LStack.Last];
+    if LCur.Decided then
+      Exit;
+    LCur.Taken := ATaken;
+    LCur.Decided := True;
+    LList[LStack.Last] := LCur;
+  end;
+
+  procedure Close(ATok: Integer);
+  var
+    LCur: TCondBranch;
+  begin
+    LCur := LList[LStack.Last];
+    LCur.EndDir := ATok;
+    LList[LStack.Last] := LCur;
+  end;
+
+begin
+  LRefs := nil;
+  for var LR in LM.Tree.Source.DefineRefs do
+    if LR.FileId = AFi then
+      LRefs := LRefs + [LR];
+  TArray.Sort<TPasDefineRef>(LRefs, TComparer<TPasDefineRef>.Construct(
+    function(const L, R: TPasDefineRef): Integer
+    begin
+      Result := L.Start - R.Start;
+    end));
+  LRi := 0;
+  LList := TList<TCondBranch>.Create;
+  LStack := TList<Integer>.Create;
+  try
+    with LM.Tree.Source.Files[AFi] do
+      for var LI := 0 to High(Tokens) do
+      begin
+        if Tokens[LI].Kind = tkEndOfFile then
+          Break;
+        if Tokens[LI].Kind <> tkDirective then
+        begin
+          Decide(not LM.Tree.Source.IsSkipped(AFi, Tokens[LI].Start));
+          Continue;
+        end;
+        LWord := DirectiveWord(LM.Tree.Source.Files[AFi], LI);
+        // A name in a directive of the branch itself (a nested block's
+        // opening one, a $DEFINE) was live or not with it.
+        if (LWord <> 'ELSE') and (LWord <> 'ELSEIF') and (LWord <> 'ENDIF') and
+           (LWord <> 'IFEND') then
+        begin
+          while (LRi <= High(LRefs)) and (LRefs[LRi].Start < Tokens[LI].Start) do
+            Inc(LRi);
+          if (LRi <= High(LRefs)) and (LRefs[LRi].Start < Tokens[LI].EndPos) then
+            Decide(LRefs[LRi].Active);
+        end;
+        if IsCondOpen(LWord) then
+        begin
+          LB := Default(TCondBranch);
+          LB.Head := LI;
+          LB.Dir := LI;
+          LB.EndDir := -1;
+          LB.Parent := -1;
+          if LStack.Count > 0 then
+            LB.Parent := LStack.Last;
+          LB.Taken := True;
+          LStack.Add(LList.Add(LB));
+        end
+        else if ((LWord = 'ELSE') or (LWord = 'ELSEIF')) and (LStack.Count > 0) then
+        begin
+          Close(LI);
+          LB := Default(TCondBranch);
+          LB.Head := LList[LStack.Last].Head;
+          LB.Dir := LI;
+          LB.EndDir := -1;
+          LB.Parent := LList[LStack.Last].Parent;
+          LB.Taken := True;
+          LStack[LStack.Count - 1] := LList.Add(LB);
+        end
+        else if ((LWord = 'ENDIF') or (LWord = 'IFEND')) and (LStack.Count > 0) then
+        begin
+          Close(LI);
+          LStack.Delete(LStack.Count - 1);
+        end;
+      end;
+    Result := LList.ToArray;
+  finally
+    LStack.Free;
+    LList.Free;
+  end;
+  // A parent stands before its children.
+  for var LI := 0 to High(Result) do
+    Result[LI].Reached := (Result[LI].Parent < 0) or
+      (Result[Result[LI].Parent].Reached and Result[Result[LI].Parent].Taken);
+end;
+
+function BranchStart(const ATS: TPasTokenStream; const AB: TCondBranch): Integer;
+begin
+  Result := ATS.Tokens[AB.Dir].EndPos;
+end;
+
+function BranchEnd(const ATS: TPasTokenStream; const AB: TCondBranch): Integer;
+begin
+  if AB.EndDir >= 0 then
+    Result := ATS.Tokens[AB.EndDir].Start
+  else
+    Result := Length(ATS.Source);
+end;
+
+// The branch whose opening directive holds AOffset, -1 for none.
+function BranchOfDirective(const ATS: TPasTokenStream;
+  const ABranches: TArray<TCondBranch>; AOffset: Integer): Integer;
+begin
+  for var LI := 0 to High(ABranches) do
+    if (ATS.Tokens[ABranches[LI].Dir].Start <= AOffset) and
+       (AOffset < ATS.Tokens[ABranches[LI].Dir].EndPos) then
+      Exit(LI);
+  Result := -1;
+end;
+
+// The `$I` of LM through which file AFi was read first: the includer's file
+// and the directive's offset. False for the unit's own file.
+function IncludeSiteOf(LM: TPasSemaModel; AFi: Integer;
+  out AIncFi, AOffset: Integer): Boolean;
+begin
+  for var LR in LM.Tree.Source.IncludeRefs do
+    if LR.IncludedFileId = AFi then
+    begin
+      AIncFi := LR.FileId;
+      AOffset := LR.Start;
+      Exit(True);
+    end;
+  Result := False;
+end;
+
+// AFi at AOffset, then each `$I` site it was reached through.
+function CondStops(LM: TPasSemaModel; AFi, AOffset: Integer): TArray<TCondStop>;
+var
+  LStop: TCondStop;
+  LIncFi, LAt: Integer;
+begin
+  LStop.Fi := AFi;
+  LStop.Offset := AOffset;
+  Result := [LStop];
+  while (LStop.Fi > 0) and (Length(Result) < 16) and
+        IncludeSiteOf(LM, LStop.Fi, LIncFi, LAt) do
+  begin
+    LStop.Fi := LIncFi;
+    LStop.Offset := LAt;
+    Result := Result + [LStop];
+  end;
+end;
+
+// The live $DEFINE / $UNDEF processed before AStops[0]: name -> the index
+// of the last one in DefineRefs.
+function DefinesBefore(LM: TPasSemaModel;
+  const AStops: TArray<TCondStop>): TDictionary<string, Integer>;
+var
+  LStop: Boolean;
+begin
+  Result := TDictionary<string, Integer>.Create(TIStringComparer.Ordinal);
+  for var LI := 0 to High(LM.Tree.Source.DefineRefs) do
+    with LM.Tree.Source.DefineRefs[LI] do
+    begin
+      LStop := False;
+      for var LS in AStops do
+        if (FileId = LS.Fi) and (Start >= LS.Offset) then
+          LStop := True;
+      if LStop then
+        Break;
+      if Active and (Kind in [drDefine, drUndef]) then
+        Result.AddOrSetValue(Name, LI);
+    end;
+end;
+
+// What an analysis holds of the project's defines and the platform's.
+type
+  TBaseDefines = record
+    Project, Platform: TArray<string>;
+    function HasProject(const AName: string): Boolean;
+    function HasPlatform(const AName: string): Boolean;
+  end;
+
+function TBaseDefines.HasProject(const AName: string): Boolean;
+begin
+  Result := MatchText(AName, Project);
+end;
+
+function TBaseDefines.HasPlatform(const AName: string): Boolean;
+begin
+  Result := MatchText(AName, Platform);
+end;
+
+function BaseDefinesOf(AA: TMcpAnalysis): TBaseDefines;
+begin
+  AA.Proj.BaseDefineNames(Result.Project, Result.Platform);
+end;
+
+function AnalysisLabel(AWs: TMcpWorkspace; AA: TMcpAnalysis): string;
+var
+  LNames: TArray<string>;
+begin
+  // A few members by name: on the client group one analysis holds six, and
+  // the label stands on every answer.
+  LNames := nil;
+  for var LMi in AA.Members do
+    LNames := LNames + [AWs.Members[LMi].Name];
+  if Length(LNames) > 3 then
+    LNames := Copy(LNames, 0, 2) + [Format('+%d more', [Length(LNames) - 2])];
+  Result := Format('analysis %d: %s; %s', [AA.Index, String.Join(', ', LNames),
+    PlatformName(AA.Platform)]);
+end;
+
+// file:line of a DefineRefs entry.
+function DefineRefSite(AWs: TMcpWorkspace; LM: TPasSemaModel;
+  ARef: Integer): string;
+begin
+  with LM.Tree.Source.DefineRefs[ARef] do
+    Result := Format('%s:%d', [AWs.RelPath(LM.Tree.Source.FileNames[FileId]),
+      LineOfOffset(LM.Tree.Source.Files[FileId], Start)]);
+end;
+
+// The members of AA whose program's uses closure holds one of AMids: the
+// projects of the analysis that compile those units.
+function MembersReaching(AWs: TMcpWorkspace; AA: TMcpAnalysis;
+  const AMids: TArray<Integer>): TArray<Integer>;
+var
+  LSeen: TArray<Boolean>;
+  LQueue: TList<Integer>;
+  LTo, LRoot: Integer;
+  LHit: Boolean;
+begin
+  Result := nil;
+  LQueue := TList<Integer>.Create;
+  try
+    for var LMi in AA.Members do
+    begin
+      LRoot := AA.Nav.ModelIdOf(AWs.Members[LMi].MainSource);
+      if LRoot < 0 then
+        Continue;
+      LSeen := nil;
+      SetLength(LSeen, AA.Proj.ModelCount);
+      LQueue.Clear;
+      LSeen[LRoot] := True;
+      LQueue.Add(LRoot);
+      LTo := 0;
+      while LTo < LQueue.Count do
+      begin
+        for var LU in AA.Proj.Model(LQueue[LTo]).UsesList do
+          if (LU.UnitId >= 0) and (LU.UnitId < Length(LSeen)) and
+             not LSeen[LU.UnitId] then
+          begin
+            LSeen[LU.UnitId] := True;
+            LQueue.Add(LU.UnitId);
+          end;
+        Inc(LTo);
+      end;
+      LHit := False;
+      for var LMid in AMids do
+        if (LMid >= 0) and (LMid < Length(LSeen)) and LSeen[LMid] then
+          LHit := True;
+      if LHit then
+        Result := Result + [LMi];
+    end;
+  finally
+    LQueue.Free;
+  end;
+end;
+
+// Of AMembers, those whose own defines differ from the analysis' on AName:
+// a shared analysis is built with its first member's defines, and a project
+// of it that does not have them builds the same line another way.
+function MemberDefineNote(AWs: TMcpWorkspace; AA: TMcpAnalysis;
+  const ABase: TBaseDefines; const AName: string;
+  const AMembers: TArray<Integer>): string;
+var
+  LHas, LLacks: TArray<string>;
+  LOwn: Boolean;
+  LFirst: string;
+begin
+  Result := '';
+  if ABase.HasPlatform(AName) or (Length(AA.Members) = 0) then
+    Exit;
+  LHas := nil;
+  LLacks := nil;
+  for var LMi in AMembers do
+  begin
+    LOwn := MatchText(AName, AWs.Members[LMi].Defines);
+    if LOwn and not ABase.HasProject(AName) then
+      LHas := LHas + [AWs.Members[LMi].Name]
+    else if not LOwn and ABase.HasProject(AName) then
+      LLacks := LLacks + [AWs.Members[LMi].Name];
+  end;
+  LFirst := AWs.Members[AA.Members[0]].Name;
+  if Length(LHas) > 0 then
+    Result := Format('%s define%s %s, the analysis takes %s''s defines - '
+      + 'built as %s, it is defined here', [String.Join(', ', LHas),
+      IfThen(Length(LHas) = 1, 's', ''), AName, LFirst, LHas[0]]);
+  if Length(LLacks) > 0 then
+    Result := Format('%s do%s not define %s, the analysis takes %s''s '
+      + 'defines - built as %s, it is not defined here', [String.Join(', ',
+      LLacks), IfThen(Length(LLacks) = 1, 'es', ''), AName, LFirst,
+      LLacks[0]]);
+end;
+
+// Where AName gets its value at the place ADefs was taken: a unit's $DEFINE
+// or $UNDEF, the project, the platform - or nowhere, and then the $DEFINE
+// of it that does not reach here, if any. AByUnit: a unit's directive
+// decides it (a member's own defines do not matter then).
+function DefineStateText(AWs: TMcpWorkspace; AA: TMcpAnalysis;
+  LM: TPasSemaModel; ADefs: TDictionary<string, Integer>;
+  const ABase: TBaseDefines; const AName: string; out AByUnit: Boolean): string;
+var
+  LRef: Integer;
+  LElse, LOthers, LSharing, LParts: TArray<string>;
+begin
+  AByUnit := False;
+  if ADefs.TryGetValue(AName, LRef) then
+  begin
+    AByUnit := True;
+    if LM.Tree.Source.DefineRefs[LRef].Kind = drDefine then
+      Exit(Format('%s defined at %s', [AName, DefineRefSite(AWs, LM, LRef)]))
+    else
+      Exit(Format('%s undefined at %s', [AName, DefineRefSite(AWs, LM, LRef)]));
+  end;
+  if ABase.HasProject(AName) then
+    Exit(Format('%s defined by the project', [AName]));
+  if ABase.HasPlatform(AName) then
+    Exit(Format('%s predefined for %s', [AName, PlatformName(AA.Platform)]));
+  LElse := nil;
+  for var LH in AA.Nav.FindDefineReferences(AName) do
+    if (LH.Kind = drDefine) and AWs.IsOwnFile(LH.Hit.FilePath) then
+      LElse := LElse + [Format('%s:%d', [AWs.RelPath(LH.Hit.FilePath),
+        LH.Hit.Line])];
+  // A project of another analysis defining it: the same line compiles the
+  // other way there.
+  LOthers := nil;
+  LSharing := nil;
+  for var LMi := 0 to High(AWs.Members) do
+    if MatchText(AName, AWs.Members[LMi].Defines) then
+      if AWs.Members[LMi].Analysis <> AA.Index then
+        LOthers := LOthers + [AWs.Members[LMi].Name]
+      else
+        LSharing := LSharing + [AWs.Members[LMi].Name];
+  LParts := nil;
+  // A member sharing this analysis whose own defines have it: analyzed with
+  // the first member's, which do not (the member note says how it builds).
+  if Length(LSharing) > 0 then
+    LParts := LParts + [Format('the project of %s defines it, analyzed with '
+      + '%s''s defines', [String.Join(', ', LSharing),
+      AWs.Members[AA.Members[0]].Name])];
+  if Length(LOthers) > 0 then
+    LParts := LParts + [Format('the project of %s defines it, analyzed apart',
+      [String.Join(', ', LOthers)])];
+  if Length(LElse) > 0 then
+    LParts := LParts + [Format('its $DEFINE at %s%s does not reach here',
+      [String.Join(', ', Copy(LElse, 0, 3)), IfThen(Length(LElse) > 3, ', ...',
+      '')])];
+  if Length(LParts) = 0 then
+    LParts := ['nothing in the group defines it'];
+  Result := Format('%s not defined - %s', [AName, String.Join('; ', LParts)]);
+end;
+
+// The names a branch's directives test: its block's opening directive and
+// every $ELSEIF up to the branch's own.
+function BranchNames(LM: TPasSemaModel; AFi: Integer;
+  const ABranches: TArray<TCondBranch>; AIdx: Integer): TArray<string>;
+var
+  LTS: TPasTokenStream;
+  LFrom, LTo: Integer;
+begin
+  Result := nil;
+  LTS := LM.Tree.Source.Files[AFi];
+  LFrom := LTS.Tokens[ABranches[AIdx].Head].Start;
+  LTo := LTS.Tokens[ABranches[AIdx].Dir].EndPos;
+  for var LR in LM.Tree.Source.DefineRefs do
+    if (LR.FileId = AFi) and (LR.Start >= LFrom) and (LR.Start < LTo) and
+       (LR.Kind in [drIfdef, drIfndef, drDefined]) and
+       not MatchText(LR.Name, Result) then
+    begin
+      // Only the block's own directives, not a nested block's between them.
+      for var LB in ABranches do
+        if (LB.Head = ABranches[AIdx].Head) and
+           (LTS.Tokens[LB.Dir].Start <= LR.Start) and
+           (LR.Start < LTS.Tokens[LB.Dir].EndPos) then
+        begin
+          Result := Result + [LR.Name];
+          Break;
+        end;
+    end;
+end;
+
+// A branch as a row: its block's opening directive, the branch's own when
+// it is an $ELSE or $ELSEIF, and whether it is compiled, with why.
+function BranchText(AWs: TMcpWorkspace; AA: TMcpAnalysis; LM: TPasSemaModel;
+  AFi: Integer; const ABranches: TArray<TCondBranch>; AIdx: Integer;
+  const ABase: TBaseDefines; const AMembers: TArray<Integer>;
+  out ANotes: TArray<string>): string;
+var
+  LTS: TPasTokenStream;
+  LB: TCondBranch;
+  LDefs: TDictionary<string, Integer>;
+  LWhy: TArray<string>;
+  LByUnit: Boolean;
+  LNote: string;
+begin
+  ANotes := nil;
+  LTS := LM.Tree.Source.Files[AFi];
+  LB := ABranches[AIdx];
+  Result := Format('%d %s', [LineOfOffset(LTS, LTS.Tokens[LB.Head].Start),
+    CleanLine(LTS.TokenText(LB.Head), 100)]);
+  if LB.Dir <> LB.Head then
+    Result := Result + Format(', its %s at %d', [CleanLine(LTS.TokenText(LB.Dir),
+      100), LineOfOffset(LTS, LTS.Tokens[LB.Dir].Start)]);
+  if not LB.Reached then
+    Exit(Result + ': not reached');
+  if LB.Taken then
+    Result := Result + ': taken'
+  else
+    Result := Result + ': not taken';
+  LWhy := nil;
+  LDefs := DefinesBefore(LM, CondStops(LM, AFi, LTS.Tokens[LB.Head].Start));
+  try
+    for var LName in BranchNames(LM, AFi, ABranches, AIdx) do
+    begin
+      LWhy := LWhy + [DefineStateText(AWs, AA, LM, LDefs, ABase, LName, LByUnit)];
+      if not LByUnit then
+      begin
+        LNote := MemberDefineNote(AWs, AA, ABase, LName, AMembers);
+        if LNote <> '' then
+          ANotes := ANotes + [LNote];
+      end;
+    end;
+  finally
+    LDefs.Free;
+  end;
+  if Length(LWhy) > 0 then
+    Result := Result + ' - ' + String.Join('; ', LWhy);
+end;
+
+// The model of AA that reads AFile - its own or, for an include, the first
+// own unit pulling it in - and the file's index there. False for none.
+function CondModelOf(AWs: TMcpWorkspace; AA: TMcpAnalysis; const AFile: string;
+  out AMid, AFi: Integer): Boolean;
+var
+  LNames: TArray<string>;
+begin
+  AFi := 0;
+  AMid := AA.Nav.ModelIdOf(AFile);
+  if AMid < 0 then
+  begin
+    AMid := IncluderOf(AWs, AA, AFile);
+    if AMid < 0 then
+      Exit(False);
+  end;
+  if not AA.Proj.EnsureHydrated(AMid) then
+    Exit(False);
+  LNames := AA.Proj.Model(AMid).Tree.Source.FileNames;
+  for var LFi := 0 to High(LNames) do
+    if SameText(LNames[LFi], AFile) then
+    begin
+      AFi := LFi;
+      Exit(True);
+    end;
+  Result := False;
+end;
+
+// The branches around AOffset in AFi, outermost first, through the `$I`
+// sites it was read through: (file, branch) pairs.
+type
+  TCondPlace = record
+    Fi, Branch: Integer;
+  end;
+
+function BranchesAround(LM: TPasSemaModel; AFi, AOffset: Integer;
+  ACache: TDictionary<Integer, TArray<TCondBranch>>): TArray<TCondPlace>;
+var
+  LBr: TArray<TCondBranch>;
+  LPlace: TCondPlace;
+  LStops: TArray<TCondStop>;
+  LTS: TPasTokenStream;
+begin
+  Result := nil;
+  LStops := CondStops(LM, AFi, AOffset);
+  for var LS := High(LStops) downto 0 do
+  begin
+    if not ACache.TryGetValue(LStops[LS].Fi, LBr) then
+    begin
+      LBr := CondBranches(LM, LStops[LS].Fi);
+      ACache.Add(LStops[LS].Fi, LBr);
+    end;
+    LTS := LM.Tree.Source.Files[LStops[LS].Fi];
+    for var LI := 0 to High(LBr) do
+      if (BranchStart(LTS, LBr[LI]) <= LStops[LS].Offset) and
+         (LStops[LS].Offset < BranchEnd(LTS, LBr[LI])) then
+      begin
+        LPlace.Fi := LStops[LS].Fi;
+        LPlace.Branch := LI;
+        Result := Result + [LPlace];
+      end;
+  end;
+end;
+
+// file + line: is the line compiled, the conditionals around it and what
+// decides each, and the symbols in effect there.
+function DefinesAtLine(AWs: TMcpWorkspace; AA: TMcpAnalysis;
+  const AFile: string; ALine: Integer; const AName: string): string;
+var
+  LMid, LFi, LOffset, LUnitCount: Integer;
+  LM: TPasSemaModel;
+  LTS: TPasTokenStream;
+  LCache: TDictionary<Integer, TArray<TCondBranch>>;
+  LPlaces: TArray<TCondPlace>;
+  LBr: TArray<TCondBranch>;
+  LBase: TBaseDefines;
+  LDefs: TDictionary<string, Integer>;
+  LSb: TStringBuilder;
+  LCompiled, LByUnit: Boolean;
+  LNotes, LUnitDefs, LUndone, LProject, LPlatform, LParts: TArray<string>;
+  LLineText, LNote: string;
+  LMembers: TArray<Integer>;
+begin
+  if not CondModelOf(AWs, AA, AFile, LMid, LFi) then
+    Exit('');
+  LM := AA.Proj.Model(LMid);
+  LTS := LM.Tree.Source.Files[LFi];
+  if (ALine < 1) or (ALine > Length(LTS.LineStarts)) then
+    raise EToolError.CreateFmt('%s has %d lines', [AWs.RelPath(AFile),
+      Length(LTS.LineStarts)]);
+  // The line's first character that is not blank.
+  LOffset := LTS.LineStarts[ALine - 1];
+  while (LOffset < Length(LTS.Source)) and
+        CharInSet(LTS.Source[LOffset + 1], [' ', #9]) do
+    Inc(LOffset);
+  LMembers := MembersReaching(AWs, AA, [LMid]);
+  LBase := BaseDefinesOf(AA);
+  LCache := TDictionary<Integer, TArray<TCondBranch>>.Create;
+  LSb := TStringBuilder.Create;
+  try
+    LPlaces := BranchesAround(LM, LFi, LOffset, LCache);
+    LCompiled := True;
+    for var LP in LPlaces do
+      LCompiled := LCompiled and LCache[LP.Fi][LP.Branch].Taken;
+    LLineText := '';
+    if TokenAt(LTS, LOffset) >= 0 then
+      if LTS.Tokens[TokenAt(LTS, LOffset)].Kind = tkDirective then
+        LLineText := ', a directive line';
+    LSb.AppendLine(Format('%s:%d is %s%s (%s)', [AWs.RelPath(AFile), ALine,
+      IfThen(LCompiled, 'compiled', 'not compiled'), LLineText,
+      AnalysisLabel(AWs, AA)]));
+    if LFi > 0 then
+      LSb.AppendLine(Format('(an include file: read as %s reads it)',
+        [AWs.RelPath(AA.Proj.ModelFile(LMid))]));
+    LDefs := DefinesBefore(LM, CondStops(LM, LFi, LOffset));
+    try
+      if AName <> '' then
+      begin
+        LSb.AppendLine('here: ' + DefineStateText(AWs, AA, LM, LDefs, LBase,
+          AName, LByUnit));
+        if not LByUnit then
+        begin
+          LNote := MemberDefineNote(AWs, AA, LBase, AName, LMembers);
+          if LNote <> '' then
+            LSb.AppendLine('  (' + LNote + ')');
+        end;
+      end;
+      if Length(LPlaces) = 0 then
+        LSb.AppendLine('no conditional block around it')
+      else
+      begin
+        LSb.AppendLine('conditionals around it, outermost first:');
+        for var LP in LPlaces do
+        begin
+          LBr := LCache[LP.Fi];
+          LSb.Append('  ');
+          if LP.Fi <> LFi then
+            LSb.Append(AWs.RelPath(LM.Tree.Source.FileNames[LP.Fi]) + ':');
+          LSb.AppendLine(BranchText(AWs, AA, LM, LP.Fi, LBr, LP.Branch, LBase,
+            LMembers, LNotes));
+          for var LN in LNotes do
+            LSb.AppendLine('    (' + LN + ')');
+        end;
+      end;
+      // In effect here: the units' own first, by the file of their $DEFINE
+      // (on the client group one include defines 18 of them).
+      LUnitDefs := nil;
+      LUndone := nil;
+      LUnitCount := 0;
+      for var LPair in LDefs do
+        with LM.Tree.Source.DefineRefs[LPair.Value] do
+          if Kind = drDefine then
+          begin
+            Inc(LUnitCount);
+            LUnitDefs := LUnitDefs + [Format('%s'#9'%s %d', [AWs.RelPath(
+              LM.Tree.Source.FileNames[FileId]), LPair.Key, LineOfOffset(
+              LM.Tree.Source.Files[FileId], Start)])];
+          end
+          else
+            LUndone := LUndone + [LPair.Key];
+      TArray.Sort<string>(LUnitDefs, TComparer<string>.Construct(
+        function(const L, R: string): Integer
+        begin
+          Result := CompareText(L, R);
+        end));
+      LProject := nil;
+      for var LName in LBase.Project do
+        if not MatchText(LName, LUndone) and not LDefs.ContainsKey(LName) then
+          LProject := LProject + [LName];
+      LPlatform := nil;
+      for var LName in LBase.Platform do
+        if not MatchText(LName, LUndone) and not LDefs.ContainsKey(LName) then
+          LPlatform := LPlatform + [LName];
+      LSb.AppendLine('in effect here:');
+      if LUnitCount > 0 then
+      begin
+        LLineText := '';
+        LNote := '';
+        for var LI := 0 to Min(High(LUnitDefs), 29) do
+        begin
+          LParts := LUnitDefs[LI].Split([#9]);
+          if not SameText(LParts[0], LNote) then
+          begin
+            LLineText := LLineText + IfThen(LNote <> '', '; ', '') + 'in '
+              + LParts[0] + ': ';
+            LNote := LParts[0];
+          end
+          else
+            LLineText := LLineText + ', ';
+          LLineText := LLineText + LParts[1];
+        end;
+        LSb.AppendLine(Format('  by $DEFINE %s%s', [LLineText, IfThen(
+          LUnitCount > 30, Format(', +%d more', [LUnitCount - 30]), '')]));
+      end;
+      LSb.AppendLine('  by the project: ' + IfThen(Length(LProject) = 0,
+        '(none)', String.Join(', ', LProject)));
+      LSb.AppendLine(Format('  predefined for %s: %s', [PlatformName(
+        AA.Platform), String.Join(', ', LPlatform)]));
+      if Length(LUndone) > 0 then
+        LSb.AppendLine('  undefined by a unit''s $UNDEF: ' + String.Join(', ',
+          LUndone));
+    finally
+      LDefs.Free;
+    end;
+    Result := LSb.ToString;
+  finally
+    LSb.Free;
+    LCache.Free;
+  end;
+end;
+
+// file alone: the branches of it the configuration does not compile, the
+// outermost of each nest, by line range, with what decides each.
+function DefinesOfFile(AWs: TMcpWorkspace; AA: TMcpAnalysis;
+  const AFile: string; ALimit: Integer): string;
+var
+  LMid, LFi, LFrom, LTo, LLines, LShown, LCount: Integer;
+  LM: TPasSemaModel;
+  LTS: TPasTokenStream;
+  LBr: TArray<TCondBranch>;
+  LBase: TBaseDefines;
+  LSb, LRows: TStringBuilder;
+  LNotes: TArray<string>;
+  LMembers: TArray<Integer>;
+  LAt: Integer;
+begin
+  if not CondModelOf(AWs, AA, AFile, LMid, LFi) then
+    Exit('');
+  LMembers := MembersReaching(AWs, AA, [LMid]);
+  LM := AA.Proj.Model(LMid);
+  LTS := LM.Tree.Source.Files[LFi];
+  LBr := CondBranches(LM, LFi);
+  LBase := BaseDefinesOf(AA);
+  LSb := TStringBuilder.Create;
+  LRows := TStringBuilder.Create;
+  try
+    LLines := 0;
+    LShown := 0;
+    LCount := 0;
+    for var LI := 0 to High(LBr) do
+    begin
+      if not LBr[LI].Reached or LBr[LI].Taken then
+        Continue;
+      // The lines of the branch: from the one after its directive, unless
+      // text follows it there, to the one before the closing directive.
+      LAt := BranchStart(LTS, LBr[LI]);
+      LFrom := LineOfOffset(LTS, LAt);
+      while (LAt < Length(LTS.Source)) and CharInSet(LTS.Source[LAt + 1],
+            [' ', #9]) do
+        Inc(LAt);
+      if (LAt >= Length(LTS.Source)) or CharInSet(LTS.Source[LAt + 1],
+         [#13, #10]) then
+        Inc(LFrom);
+      LAt := BranchEnd(LTS, LBr[LI]);
+      LTo := LineOfOffset(LTS, Max(LAt, 0));
+      if Trim(Copy(LTS.Source, LTS.LineStarts[LTo - 1] + 1,
+         LAt - LTS.LineStarts[LTo - 1])) = '' then
+        Dec(LTo);
+      if LTo < LFrom then
+        Continue;
+      Inc(LCount);
+      Inc(LLines, LTo - LFrom + 1);
+      if LShown >= ALimit then
+        Continue;
+      Inc(LShown);
+      if LTo = LFrom then
+        LRows.Append(Format('  line %d: ', [LFrom]))
+      else
+        LRows.Append(Format('  lines %d-%d: ', [LFrom, LTo]));
+      LRows.AppendLine(BranchText(AWs, AA, LM, LFi, LBr, LI, LBase, LMembers,
+        LNotes));
+      for var LN in LNotes do
+        LRows.AppendLine('    (' + LN + ')');
+    end;
+    LSb.AppendLine(Format('%s: %s not compiled%s (%s)', [AWs.RelPath(AFile),
+      Plural(LLines, 'line'), IfThen(LCount > 0, Format(', in %d %s', [LCount,
+      IfThen(LCount = 1, 'branch', 'branches')]), ''), AnalysisLabel(AWs, AA)]));
+    if LFi > 0 then
+      LSb.AppendLine(Format('(an include file: read as %s reads it)',
+        [AWs.RelPath(AA.Proj.ModelFile(LMid))]));
+    LSb.Append(LRows.ToString);
+    if LShown < LCount then
+      LSb.AppendLine(Format('... %d more (raise `limit`)', [LCount - LShown]));
+    Result := LSb.ToString;
+  finally
+    LRows.Free;
+    LSb.Free;
+  end;
+end;
+
+type
+  // One directive naming the symbol, in the group's files: its place, its
+  // text and what each analysis made of it.
+  TDefineRow = record
+    FilePath: string;
+    Line: Integer;
+    Text: string;
+    Kind: TPasDefineRefKind;
+    States: TArray<string>;   // by analysis index; '' = not read there
+  end;
+
+// name: where the symbol gets its value in each analysis, and every
+// directive of the group naming it - a test with whether its branch is
+// compiled, a $DEFINE or $UNDEF with whether it is live.
+function DefinesOfName(AWs: TMcpWorkspace; const AName, AFile: string;
+  ALimit: Integer): string;
+var
+  LRows: TList<TDefineRow>;
+  LIndex: TDictionary<string, Integer>;
+  LLibrary: TDictionary<string, Boolean>;
+  LCache: TDictionary<string, TArray<TCondBranch>>;
+  LM: TPasSemaModel;
+  LTS: TPasTokenStream;
+  LBr: TArray<TCondBranch>;
+  LRow: TDefineRow;
+  LKey, LState, LFileName, LLast, LNote: string;
+  LBase: TBaseDefines;
+  LSb: TStringBuilder;
+  LAt, LBi, LShown, LFiles: Integer;
+  LParts: TArray<string>;
+  LAny: Boolean;
+  LMatchMids: TArray<TArray<Integer>>;
+begin
+  LRows := TList<TDefineRow>.Create;
+  LIndex := TDictionary<string, Integer>.Create;
+  LLibrary := TDictionary<string, Boolean>.Create;
+  LCache := TDictionary<string, TArray<TCondBranch>>.Create;
+  LSb := TStringBuilder.Create;
+  try
+    LAny := False;
+    SetLength(LMatchMids, AWs.Analyses.Count);
+    for var LA in AWs.Analyses do
+    begin
+      if LA.Proj = nil then
+        Continue;
+      LBase := BaseDefinesOf(LA);
+      LAny := LAny or LBase.HasProject(AName) or LBase.HasPlatform(AName);
+      for var LMid := 0 to LA.Proj.ModelCount - 1 do
+      begin
+        LM := LA.Proj.Model(LMid);
+        for var LR in LM.Tree.Source.DefineRefs do
+        begin
+          if not SameText(LR.Name, AName) then
+            Continue;
+          LFileName := LM.Tree.Source.FileNames[LR.FileId];
+          if not AWs.IsOwnFile(LFileName) then
+          begin
+            LLibrary.AddOrSetValue(Format('%s:%d', [LowerCase(LFileName),
+              LR.Start]), True);
+            Continue;
+          end;
+          if (AFile <> '') and not SameText(LFileName, AFile) then
+            Continue;
+          if not LA.Proj.EnsureHydrated(LMid) then
+            Continue;
+          LTS := LM.Tree.Source.Files[LR.FileId];
+          LMatchMids[LA.Index] := LMatchMids[LA.Index] + [LMid];
+          case LR.Kind of
+            drDefine, drUndef:
+              LState := IfThen(LR.Active, 'live', 'in a branch not compiled');
+          else
+            begin
+              LKey := Format('%d:%d:%d', [LA.Index, LMid, LR.FileId]);
+              if not LCache.TryGetValue(LKey, LBr) then
+              begin
+                LBr := CondBranches(LM, LR.FileId);
+                LCache.Add(LKey, LBr);
+              end;
+              LBi := BranchOfDirective(LTS, LBr, LR.Start);
+              if LBi < 0 then
+                LState := IfThen(LR.Active, 'reached', 'not reached')
+              else if not LBr[LBi].Reached then
+                LState := 'not reached'
+              else if LBr[LBi].Taken then
+                LState := 'its branch compiled'
+              else
+                LState := 'its branch not compiled';
+            end;
+          end;
+          LKey := Format('%s:%d', [LowerCase(LFileName), LR.Start]);
+          if not LIndex.TryGetValue(LKey, LAt) then
+          begin
+            LRow := Default(TDefineRow);
+            LRow.FilePath := LFileName;
+            LRow.Line := LineOfOffset(LTS, LR.Start);
+            LRow.Kind := LR.Kind;
+            LAt := TokenAt(LTS, LR.Start);
+            if LAt >= 0 then
+              LRow.Text := CleanLine(LTS.TokenText(LAt), 100);
+            SetLength(LRow.States, AWs.Analyses.Count);
+            LAt := LRows.Add(LRow);
+            LIndex.Add(LKey, LAt);
+          end;
+          LRow := LRows[LAt];
+          // An include read by several units of one analysis, differently.
+          if (LRow.States[LA.Index] <> '') and (LRow.States[LA.Index] <> LState) then
+            LRow.States[LA.Index] := 'differs by the unit including it'
+          else
+            LRow.States[LA.Index] := LState;
+          LRows[LAt] := LRow;
+        end;
+      end;
+    end;
+    if (LRows.Count = 0) and (LLibrary.Count = 0) and not LAny then
+      raise EToolError.CreateFmt('no directive names `%s` and no project or '
+        + 'platform defines it%s', [AName, IfThen(AFile <> '', ' in ' +
+        AWs.RelPath(AFile), '')]);
+    LRows.Sort(TComparer<TDefineRow>.Construct(
+      function(const L, R: TDefineRow): Integer
+      begin
+        Result := CompareText(L.FilePath, R.FilePath);
+        if Result = 0 then
+          Result := L.Line - R.Line;
+      end));
+    LFiles := 0;
+    LLast := '';
+    for var LR in LRows do
+      if not SameText(LR.FilePath, LLast) then
+      begin
+        Inc(LFiles);
+        LLast := LR.FilePath;
+      end;
+    if AFile <> '' then
+      LSb.AppendLine(Format('%s (conditional symbol) - %s in %s', [AName,
+        Plural(LRows.Count, 'directive'), AWs.RelPath(AFile)]))
+    else
+      LSb.AppendLine(Format('%s (conditional symbol) - %s in %s of the '
+        + 'group%s', [AName, Plural(LRows.Count, 'directive'), Plural(LFiles,
+        'file'), IfThen(LLibrary.Count > 0, Format(' (+%d in library files, '
+        + 'not listed)', [LLibrary.Count]), '')]));
+    for var LA in AWs.Analyses do
+    begin
+      if LA.Proj = nil then
+        Continue;
+      LBase := BaseDefinesOf(LA);
+      if LBase.HasProject(AName) then
+        LState := 'defined by the project'
+      else if LBase.HasPlatform(AName) then
+        LState := 'predefined for ' + PlatformName(LA.Platform)
+      else
+        LState := 'not defined by the project';
+      LNote := MemberDefineNote(AWs, LA, LBase, AName,
+        MembersReaching(AWs, LA, LMatchMids[LA.Index]));
+      if LNote <> '' then
+        LState := LState + ' - ' + LNote;
+      LSb.AppendLine(Format('%s: %s', [AnalysisLabel(AWs, LA), LState]));
+    end;
+    // Where the code itself defines or undefines it: a unit's $DEFINE is
+    // what the project's defines do not show.
+    LParts := nil;
+    for var LR in LRows do
+      if LR.Kind in [drDefine, drUndef] then
+        LParts := LParts + [Format('%s at %s:%d%s', [IfThen(LR.Kind = drDefine,
+          '$DEFINE', '$UNDEF'), AWs.RelPath(LR.FilePath), LR.Line, IfThen(
+          MatchText('live', LR.States), '', ' (not compiled)')])];
+    if Length(LParts) > 0 then
+      LSb.AppendLine(Format('in the code: %s%s', [String.Join('; ', Copy(LParts,
+        0, 5)), IfThen(Length(LParts) > 5, Format('; +%d more', [Length(LParts)
+        - 5]), '')]));
+    LShown := 0;
+    LLast := '';
+    for var LR in LRows do
+    begin
+      if LShown >= ALimit then
+        Break;
+      Inc(LShown);
+      if not SameText(LR.FilePath, LLast) then
+      begin
+        LSb.AppendLine(AWs.RelPath(LR.FilePath));
+        LLast := LR.FilePath;
+      end;
+      // One state when every analysis reading it agrees.
+      LParts := nil;
+      LState := '';
+      for var LI := 0 to High(LR.States) do
+        if LR.States[LI] <> '' then
+        begin
+          if LState = '' then
+            LState := LR.States[LI]
+          else if LState <> LR.States[LI] then
+            LState := #0;
+          LParts := LParts + [Format('%s in analysis %d', [LR.States[LI], LI])];
+        end;
+      if LState = #0 then
+        LState := String.Join(', ', LParts);
+      LSb.AppendLine(Format('  %d  %s - %s', [LR.Line, LR.Text, LState]));
+    end;
+    if LShown < LRows.Count then
+      LSb.AppendLine(Format('... %d more (raise `limit`, or pass `file`)',
+        [LRows.Count - LShown]));
+    Result := LSb.ToString.TrimRight;
+  finally
+    LSb.Free;
+    LCache.Free;
+    LLibrary.Free;
+    LIndex.Free;
+    LRows.Free;
+  end;
+end;
+
+function ToolDefines(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
+const
+  EFFECT = 'in effect here:';
+var
+  LFile, LName, LPart, LEffect, LLabel: string;
+  LLine, LLimit, LAt: Integer;
+  LParts, LLabels, LEffects, LEffectLabels: TList<string>;
+  LSb: TStringBuilder;
+
+  // One answer for the analyses that agree.
+  procedure Group(AList, ALabels: TList<string>; const AText: string);
+  var
+    LIdx: Integer;
+  begin
+    LIdx := AList.IndexOf(AText);
+    if LIdx < 0 then
+    begin
+      AList.Add(AText);
+      ALabels.Add(LLabel);
+    end
+    else
+      ALabels[LIdx] := ALabels[LIdx] + '; ' + LLabel;
+  end;
+
+begin
+  LName := Trim(ArgStr(AArgs, 'name'));
+  LFile := '';
+  if ArgStr(AArgs, 'file') <> '' then
+    LFile := ArgFile(AWs, AArgs);
+  LLine := ArgInt(AArgs, 'line', 0);
+  LLimit := EnsureRange(ArgInt(AArgs, 'limit', 100), 0, 5000);
+  if (LFile = '') and (LName = '') then
+    raise EToolError.Create('pass `name` (a conditional symbol: where it is '
+      + 'defined and which branches it selects), `file` + `line` (is the line '
+      + 'compiled, and what decides it), or `file` alone (its branches not '
+      + 'compiled)');
+  if (LFile = '') and (LLine > 0) then
+    raise EToolError.Create('`line` needs `file`');
+  if (LName <> '') and (LLine = 0) then
+    Exit(DefinesOfName(AWs, LName, LFile, LLimit));
+  // By position or file: the answer of each analysis reading the file, and
+  // the symbols in effect there, each said once for the analyses agreeing -
+  // two configurations differ in the project's defines at least.
+  LParts := TList<string>.Create;
+  LLabels := TList<string>.Create;
+  LEffects := TList<string>.Create;
+  LEffectLabels := TList<string>.Create;
+  LSb := TStringBuilder.Create;
+  try
+    for var LA in AWs.Analyses do
+    begin
+      if LA.Proj = nil then
+        Continue;
+      if LLine > 0 then
+        LPart := DefinesAtLine(AWs, LA, LFile, LLine, LName)
+      else
+        LPart := DefinesOfFile(AWs, LA, LFile, LLimit);
+      if LPart = '' then
+        Continue;
+      LLabel := AnalysisLabel(AWs, LA);
+      // The label is on the first line; the rest is what is compared.
+      LAt := Pos(' (' + LLabel + ')', LPart);
+      LPart := Copy(LPart, 1, LAt - 1) + Copy(LPart, LAt + Length(LLabel) + 3,
+        MaxInt);
+      LAt := Pos(sLineBreak + EFFECT, LPart);
+      if LAt > 0 then
+      begin
+        Group(LEffects, LEffectLabels, Copy(LPart, LAt + Length(sLineBreak) +
+          Length(EFFECT), MaxInt));
+        LPart := Copy(LPart, 1, LAt + Length(sLineBreak) - 1);
+      end;
+      Group(LParts, LLabels, LPart);
+    end;
+    if LParts.Count = 0 then
+      raise EToolError.CreateFmt('%s is not part of any analyzed project',
+        [AWs.RelPath(LFile)]);
+    for var LI := 0 to LParts.Count - 1 do
+    begin
+      if LI > 0 then
+        LSb.AppendLine;
+      LAt := Pos(sLineBreak, LParts[LI]);
+      LSb.AppendLine(Copy(LParts[LI], 1, LAt - 1) + ' (' + LLabels[LI] + ')');
+      LSb.Append(Copy(LParts[LI], LAt + Length(sLineBreak), MaxInt));
+    end;
+    for var LI := 0 to LEffects.Count - 1 do
+    begin
+      LEffect := EFFECT;
+      if LEffects.Count > 1 then
+        LEffect := Format('in effect here (%s):', [LEffectLabels[LI]]);
+      LSb.Append(LEffect);
+      LSb.Append(LEffects[LI]);
+    end;
+    Result := LSb.ToString.TrimRight;
+  finally
+    LSb.Free;
+    LEffectLabels.Free;
+    LEffects.Free;
+    LLabels.Free;
+    LParts.Free;
   end;
 end;
 
@@ -12487,7 +13643,27 @@ const
     + '"inputSchema":{"type":"object","properties":{'
     + '"unit":{"type":"string","description":"Unit name"},'
     + '"file":{"type":"string","description":"Or the unit''s file"},'
-    + '"direction":{"type":"string","enum":["uses","used_by","both"]}}}}' +
+    + '"direction":{"type":"string","enum":["uses","used_by","both"]}}}},' +
+
+    '{"name":"defines","description":"Conditional compilation, as the '
+    + 'analyzed configuration compiles it - before editing code between '
+    + '{$IFDEF}s, whether the branch you edit is the one that is built. '
+    + '`file` + `line`: whether the line is compiled, each {$IF}/{$IFDEF} '
+    + 'around it with whether its branch is taken and why (the unit $DEFINE '
+    + 'or $UNDEF at file:line, the project, the platform, or nothing - and '
+    + 'then a $DEFINE of it that does not reach there), and the symbols in '
+    + 'effect there. `file` alone: its lines not compiled, by branch. `name`: '
+    + 'where a symbol is defined in each analysis and every directive of the '
+    + 'group naming it - a test with whether its branch is compiled. A '
+    + 'project of the group analyzed with another member''s defines is said: '
+    + 'built as that project, the answer differs.",'
+    + '"inputSchema":{"type":"object","properties":{'
+    + '"name":{"type":"string","description":"A conditional symbol (DEBUG, '
+    + 'MSWINDOWS); with `file` and no `line`, only that file''s directives"},'
+    + '"file":{"type":"string","description":"A unit or include file"},'
+    + '"line":{"type":"integer","description":"A line of `file`"},'
+    + '"limit":{"type":"integer","description":"Max rows: directives for '
+    + '`name`, branches for `file` alone (default 100)"}}}}' +
     ']';
 
 function ToolDefinitions: TJSONArray;
@@ -12526,7 +13702,8 @@ begin
     + 'and form lines - to apply yourself, `change_plan` what a change of a '
     + 'routine''s parameters or result must touch - its overrides, the '
     + 'interface methods it implements and their implementations, each '
-    + 'header, and every call. Their rows name the routine or type they sit '
+    + 'header, and every call, `defines` whether a line between {$IFDEF}s '
+    + 'is compiled and which define decides it. Their rows name the routine or type they sit '
     + 'in, which usually answers the question without opening the file. '
     + 'A header counts every row, cut or not: `limit: 0` asks whether and '
     + 'how many, without the rows. '
@@ -12612,6 +13789,8 @@ begin
       Result := ToolDiagnostics(AWs, AArgs)
     else if AName = 'unit_deps' then
       Result := ToolUnitDeps(AWs, AArgs)
+    else if AName = 'defines' then
+      Result := ToolDefines(AWs, AArgs)
     else
       raise EToolError.Create('unknown tool: ' + AName);
   except
