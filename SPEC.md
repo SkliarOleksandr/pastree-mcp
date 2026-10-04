@@ -168,6 +168,7 @@ Common rules:
 | `diagnostics` | model `Diags` | Own units by default. Each unit reports from ONE analysis - its owner (section 4) - so a unit analyzed under two configurations does not report twice. Over the limit, a per-file count comes first. |
 | `unit_deps` | `UsesList`, `NodeSite`, `FindUnitReferences` | Uses resolved to files, implementation-section ones marked; used-by merged across analyses. |
 | `defines` | the preprocessor's `DefineRefs`, `Skipped` regions and `IncludeRefs`, the raw token stream, `BaseDefineNames`, `FindDefineReferences` | Conditional compilation as the analyzed configuration compiles it. **`file` + `line`**: whether the line is compiled; each `{$IF}`/`{$IFDEF}`/`{$IFNDEF}`/`{$IFOPT}` block around it, outermost first (through the `$I` an include file was read through), with the branch the line is in (`its {$ELSE} at 20`), taken, not taken or not reached, and why - for each name the block tests, the unit `$DEFINE` or `$UNDEF` in effect at the directive (file:line), the project's defines, the platform's predefined set, or nothing, and then a project of another analysis defining it and the `$DEFINE` of it that does not reach there; then the symbols in effect at the line (the units' own by the file of their `$DEFINE`, the project's, the platform's, those a `$UNDEF` cancelled). A branch is taken by what the preprocessor did, never re-evaluated: the first token in it outside a nested block is in a skipped region or not, or, for a branch of directives only, a name in one of them was live. **`file` alone**: its lines not compiled, the outermost branch of each nest by line range, with the same why. **`name`**: per analysis whether the project or the platform defines it, the `$DEFINE`/`$UNDEF` lines in the code, and every directive of the group's files naming it - a test with whether its branch is compiled, a `$DEFINE` with whether it is live - a library's counted; `file` narrows the rows. A shared analysis is built with its first member's defines: where a member of it that compiles the unit has other defines for a name a block tests, it is said (`AppB does not define FIXTURE_A, the analysis takes AppA's defines - built as AppB, it is not defined here`). Each analysis reading the file answers; analyses that agree are one answer, the symbols in effect said apart. A `symbol` no declaration matches that is a conditional symbol says to ask `defines`. `limit` (100) caps the directives of `name` and the branches of `file` alone. |
+| `lint` | each model's `UsesList`, `ExtRefMap` and `RefMap` (what a name binds to, and whether before `implementation`), the interface scope's names (`EnumScopeDeep`), the `uses` graph from each program of an analysis, the `Skipped` regions, the unit's form file (`PasDfmLoad`) | Rules `unused-uses` and `uses-to-implementation` (9.7) over the own units, `rules`, `file` and `in` narrowing; an entry is judged over every analysis holding the unit, and one that uses a name of it keeps it. A name counts for the unit listing it when dcc needs that unit in scope to bind it: a unit-level declaration of its interface, an enum value, a member of a helper it declares. A member reached through a value or a type does not - `List.Add` needs no `uses` of Classes; the type written does. Counted too: the qualifier of `Unit.Name`; the unit's form file naming a class or a module the unit declares (`PopupMenu = dmData.pmMain`: the designer keeps that unit listed); a name bound to a unit not listed - PasTree binds an alias of the same name through to what it names (`TModalResult` of Vcl.Controls to System.UITypes) - credited to each listed unit declaring the name; and a name of the interface bound to a unit of the implementation `uses`, which dcc does not search there and PasTree 0.91.1 does, credited to the interface units declaring it. Said at the end of a row, as `but ...`: the units with initialization, finalization or a `{$R}` resource that removing the entry leaves out of a program, no other path of it reaching them; the same for the entry removed together with every other unused-uses row that has no `but` - an agent acts on the rows at once, and each may be safe alone while all are not (so the rows of every own unit are weighed, whatever `file` and `in` show); a branch not compiled here naming the unit or a name of it; a name bound to nothing that the unit declares; a routine of another unit called here that the unit declares too - dcc picks among the same-named routines of every unit in scope, and the index's pick may not be its (on the client group `Trim(ShortString)` took AnsiStrings' Trim, not the SysUtils one the index bound, and removing AnsiStrings added two W1057); for a move, the implementation bindings the unit would take over, searched first once listed last. Said on a move row, not as a `but`: the `{$IF}` blocks the entry is written in (`it is inside {$IFDEF X} at line 27 - move it with its condition`) - moved bare, it is compiled where it was not. A program whose project's defines differ from its shared analysis' (section 4) is weighed in two graphs, each whole: the analysis' `uses` edges, and the same without the entries of own units written in a block that names a define the two disagree on - the ones it may not have. Checked against dcc on the client group (9.7). |
 
 What comes next - new tools and changes to these - is section 9.
 
@@ -771,6 +772,26 @@ gap between the answers and the truth.
    The two `uses` rules need only the `uses` graph and references PasTree
    already has; the others need passes it does not have yet. Build the two
    first.
+
+   The two are built (0.28.0) and checked against dcc on the client group -
+   eight programs, 1,967 own units: 30,702 rows in about 2.5 s, 24,911
+   unused-uses and 5,791 uses-to-implementation, 413 with a `but`.
+   Removing every unused-uses entry without a `but` (24,687 in 1,785 files,
+   by a script) left all eight building with the warnings they had, and none
+   of the 20 units they stopped linking has initialization, finalization or
+   a resource. Moving every uses-to-implementation entry without a `but`
+   and outside a conditional block (5,560 in 1,420 files) - the same. The
+   shared policy's rows are the strict policy's, with 7 `but`s more on the
+   COM server analyzed with the main program's defines. The rounds before
+   that found what section 3's row now describes, each a wrong row: a
+   unit's form file naming its class, an alias bound through, a name of the
+   interface bound to an implementation unit, the initialization a removal
+   leaves out alone and together with the other rows, a program analyzed
+   with another's defines, the overload dcc picks in another unit (two new
+   W1057), an entry moved out of its `{$IF}` (F2613 in the program that does
+   not define it) - and in PasTree 0.91.2, a parameter's type named like
+   the parameter (`var X: X`) bound to the parameter, which said a unit
+   used in the interface could move (E2003).
 2. **`metrics`** - per routine: lines, nesting depth, branches, callers;
    per unit: lines, fan-in, fan-out, and how many units a change to its
    interface recompiles; and the `uses` cycles through interface sections.
@@ -824,7 +845,7 @@ gap between the answers and the truth.
    count per file first, then the lines of the files that matter.
 10. `defines` (done, 0.27.0, 9.6) - `references` names the lines in branches not
    compiled; `defines` says which define selects each, and for which member.
-11. `lint` (the two `uses` rules first), `metrics`. `unused-symbol`'s
+11. `lint` (the two `uses` rules - done, 0.28.0, 9.7), `metrics`. `unused-symbol`'s
    exceptions are measured: 24 of 384 sampled symbols that no code names
    are called through a base, an interface or a property, and a published
    property's uses are form lines.

@@ -243,3 +243,15 @@ defines {"name":"MSWINDOWS","limit":0}
 defines {"name":"NOPE_X"}
 defines {}
 references {"symbol":"FIXTURE_A"}
+lint {"file":"AppB/uLint.pas"}
+lint {"file":"AppB/uLint.pas","rules":"unused-uses"}
+lint {"in":"AppF","rules":"uses-to-implementation"}
+lint {"file":"AppF/uMainForm.pas"}
+lint {"limit":0}
+lint {"limit":2}
+lint {"file":"Shared/uShapes.pas"}
+lint {"rules":"nope"}
+lint {"file":"AppB/AppB.dpr"}
+lint {"file":"AppB/uLintBase.pas"}
+lint {"file":"AppB/uLintLast.pas"}
+lint {"file":"AppB/uLintDef.pas"}

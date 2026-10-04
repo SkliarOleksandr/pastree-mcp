@@ -93,7 +93,7 @@ Check 'definition inactive' (Block $b 'definition {"file":"AppB/uBoxes.pas","lin
 Check 'find joined cut' (Block $b 'find {"query":"TWideBox.Many"}') @('AppB\uBoxes.pas:74  TWideBox.Many (procedure)  procedure Many(const AAlphaName, ABetaName, AGammaName: string; ADeltaCount, AEpsilonCount, AZetaCount: Integer; const AEtaText, AThetaText, ...); virtual;')
 # A name no declaration matches: what the index is, and where the name is
 # written outside it - in a unit no project uses - or that it is nowhere.
-Check 'find outside the index' (Block $b 'find {"query":"OrphanRoutine"}') @('no declaration matches `OrphanRoutine` among the ', ' units indexed - what the 3 projects of Fixture.groupproj compile: 20 of their own, ', "``OrphanRoutine`` is written in 1 file(s) that no indexed project uses - no tool here sees them:`n  AppB\uOrphan.pas:8  procedure OrphanRoutine;")
+Check 'find outside the index' (Block $b 'find {"query":"OrphanRoutine"}') @('no declaration matches `OrphanRoutine` among the ', ' units indexed - what the 3 projects of Fixture.groupproj compile: 32 of their own, ', "``OrphanRoutine`` is written in 1 file(s) that no indexed project uses - no tool here sees them:`n  AppB\uOrphan.pas:8  procedure OrphanRoutine;")
 Check 'find nowhere' (Block $b 'find {"query":"NothingAnywhere"}') @('no declaration matches `NothingAnywhere` among the ', 'no Pascal file outside them writes `NothingAnywhere` either (1 searched, under the group directory')
 Check 'definition' (Block $b 'definition {"symbol":"TCircle.Area"') @('declared at Shared\uShapes.pas:26', 'implemented at Shared\uShapes.pas:53', 'Result := Pi * FRadius * FRadius;')
 Check 'source' (Block $b 'source {"symbol":"TCircle.Area"}') @('TCircle.Area (function) implemented at Shared\uShapes.pas:53-56', "53  function TCircle.Area: Double;`n54  begin", "56  end;`n") @('declared at')
@@ -467,13 +467,40 @@ Check 'defines file' (Block $b 'defines {"file":"Shared/uFlags.pas"}') @('Shared
 Check 'defines file cut' (Block $b 'defines {"file":"Shared/uFlags.pas","limit":1}') @('in 2 branches', '  line 21: ', '... 1 more (raise `limit`)') @('lines 32-35')
 Check 'defines file none' (Block $b 'defines {"file":"Shared/uShapes.pas"}') @('Shared\uShapes.pas: 0 lines not compiled')
 Check 'defines no block' (Block $b 'defines {"file":"Shared/uShapes.pas","line":5}') @('Shared\uShapes.pas:5 is compiled', 'no conditional block around it', 'in effect here:') @('by $DEFINE')
-Check 'defines name' (Block $b 'defines {"name":"FIXTURE_A"}') @('FIXTURE_A (conditional symbol) - 2 directives in 1 file of the group', 'analysis 0: AppA, AppB, AppF; Win32: defined by the project - AppB does not define FIXTURE_A', "Shared\uFlags.pas`n  18  {`$IFDEF FIXTURE_A} - its branch compiled`n  33  {`$IFDEF FIXTURE_A} - not reached")
+Check 'defines name' (Block $b 'defines {"name":"FIXTURE_A"}') @('FIXTURE_A (conditional symbol) - 5 directives in 2 files of the group', 'analysis 0: AppA, AppB, AppF; Win32: defined by the project - AppB does not define FIXTURE_A', "Shared\uFlags.pas`n  18  {`$IFDEF FIXTURE_A} - its branch compiled`n  33  {`$IFDEF FIXTURE_A} - not reached")
 Check 'defines name undef' (Block $b 'defines {"name":"FIXTURE_GONE"}') @('3 directives in 2 files', 'in the code: $DEFINE at Shared\Flags.inc:3; $UNDEF at Shared\Flags.inc:4', "Shared\Flags.inc`n  3  {`$DEFINE FIXTURE_GONE} - live`n  4  {`$UNDEF FIXTURE_GONE} - live", '  28  {$IF Defined(MSWINDOWS) and not Defined(FIXTURE_GONE)} - its branch compiled')
 Check 'defines name in file' (Block $b 'defines {"name":"FIXTURE_A","file":"Shared/Flags.inc"}') @('FIXTURE_A (conditional symbol) - 0 directives in Shared\Flags.inc', 'defined by the project')
 Check 'defines name count' (Block $b 'defines {"name":"MSWINDOWS","limit":0}') @('MSWINDOWS (conditional symbol) - 1 directive in 1 file of the group (+', ' in library files, not listed)', 'predefined for Win32', '... 1 more (raise `limit`') @('uFlags.pas')
 Check 'defines name none' (Block $b 'defines {"name":"NOPE_X"}') @('no directive names `NOPE_X` and no project or platform defines it')
 Check 'defines no args' (Block $b 'defines {}') @('pass `name` (a conditional symbol')
 Check 'references define by name' (Block $b 'references {"symbol":"FIXTURE_A"}') @('`FIXTURE_A` is a conditional symbol: `defines` with `name`')
+# lint: AppB\uLint.pas, lines pinned, an entry per case - used in the
+# interface (SysUtils), only in the implementation (Classes; uLintHelp, whose
+# helper is all it uses and whose Limit would take over uLintMore's), nothing
+# used (uColors), nothing but its initialization (uLintInit), a member of its
+# class only (uCells), a name in a branch not compiled (uBoxes), a qualified
+# name (uFlags), an alias the index binds through (uLintAlias), an interface
+# name uLintMore of the implementation `uses` declares too (uLintBase). A
+# form file's link to a data module keeps uMainForm's uData. uLintAlias and
+# uLintBase both list uLintReg for nothing: either alone may go, not both.
+Check 'lint unit' (Block $b 'lint {"file":"AppB/uLint.pas"}') @('6 findings in 1 file of 1 own unit: unused-uses 4, uses-to-implementation 2 - 3 with a "but"', 'AppB\uLint.pas:10:3: uses-to-implementation System.Classes - used only in the implementation (first at line 33, in LintRun)', 'AppB\uLint.pas:11:3: unused-uses uColors - no name of it is used here', 'AppB\uLint.pas:12:3: unused-uses uLintInit - no name of it is used here; but removing it leaves uLintInit (initialization) out of AppB', 'AppB\uLint.pas:13:3: uses-to-implementation uLintHelp - used only in the implementation (first at line 39, in LintRun); but moved, it would take over `Limit` at AppB\uLint.pas:39 from uLintMore', 'AppB\uLint.pas:26:3: unused-uses uCells - no name of it is used here', 'AppB\uLint.pas:28:3: unused-uses uBoxes - no name of it is used here; but a branch not compiled here names `nevercalled` at AppB\uLint.pas:44') @('SysUtils', 'uFlags', 'uLintAlias', 'uLintBase', 'uLintMore -')
+Check 'lint rule' (Block $b 'lint {"file":"AppB/uLint.pas","rules":"unused-uses"}') @('4 findings in 1 file of 1 own unit: unused-uses 4 - 2 with a "but"') @('uses-to-implementation')
+Check 'lint none in' (Block $b 'lint {"in":"AppF","rules":"uses-to-implementation"}') @('no findings (uses-to-implementation) in 6 own units')
+Check 'lint form file' (Block $b 'lint {"file":"AppF/uMainForm.pas"}') @('2 findings', 'AppF\uMainForm.pas:11:19: unused-uses Vcl.Controls') @('uData')
+Check 'lint count only' (Block $b 'lint {"limit":0}') @('21 findings in 11 files of 29 own units: unused-uses 18, uses-to-implementation 3 - 7 with a "but"') @('AppB\', 'more (raise')
+Check 'lint cut' (Block $b 'lint {"limit":2}') @('AppB\uBoxes.pas:10:19: unused-uses uColors', '... 19 more (raise `limit`, or narrow with `file`, `in` or `rules`)')
+Check 'lint together' (Block $b 'lint {"file":"AppB/uLintBase.pas"}') @('AppB\uLintBase.pas:10:3: unused-uses uLintReg - no name of it is used here; but removed with the other unused-uses rows that have no "but", it leaves uLintReg (initialization) out of AppB - keep it, or another row saying so')
+# uLintDef lists uLintOnce under FIXTURE_A, which the shared analysis takes
+# from AppA: AppB, built without it, reaches uLintOnce through uLintLast alone.
+# uLintLast calls LintTwin, declared by uLintTwin and uLintTwinA: dcc picks
+# among both, so the one the index does not bind to is not said unused bare.
+# uLintDef's System.Classes, used only in the implementation, is listed in
+# the interface under FIXTURE_A: the row names the block it is to move with.
+Check 'lint conditional move' (Block $b 'lint {"file":"AppB/uLintDef.pas"}') @('AppB\uLintDef.pas:13:3: uses-to-implementation System.Classes - used only in the implementation (first at line 28, in LintDef); it is inside {$IFDEF FIXTURE_A} at line 11 - move it with its condition')
+Check 'lint other defines' (Block $b 'lint {"file":"AppB/uLintLast.pas"}') @('AppB\uLintLast.pas:11:3: unused-uses uLintOnce - no name of it is used here; but removing it leaves uLintOnce (initialization) out of AppB', 'AppB\uLintLast.pas:12:3: unused-uses uLintTwinA - no name of it is used here; but it declares an overload of `LintTwin`, called at AppB\uLintLast.pas:19 - removed, the call may take another overload')
+Check 'lint nothing' (Block $b 'lint {"file":"Shared/uShapes.pas"}') @('no findings (unused-uses, uses-to-implementation) in Shared\uShapes.pas')
+Check 'lint bad rule' (Block $b 'lint {"rules":"nope"}') @('unknown rule `nope` - the rules: unused-uses, uses-to-implementation')
+Check 'lint program' (Block $b 'lint {"file":"AppB/AppB.dpr"}') @('AppB\AppB.dpr is not a unit any analysis holds - lint reads the `uses` of units')
 
 # ---- 2. strict policy ---------------------------------------------------------
 Write-Host '--- CLI, strict policy'
@@ -485,6 +512,9 @@ Check 'strict rename_plan' (Block $b 'rename_plan {"symbol":"TCircle","new_name"
 Check 'strict rename_plan unit' (Block $b 'rename_plan {"symbol":"uShapes"') @('to uShapesNew - 5 edits in 4 files')
 Check 'strict change_plan' (Block $b 'change_plan {"symbol":"TShape.Area"}') @('the signature on 8 lines in 2 files, 4 other routines tied to it; 3 calls in 3 routines')
 Check 'strict descendants' (Block $b 'related {"relation":"descendants"') @('descendants of TShape (Shared\uShapes.pas:15): 3', 'TBigCircle <- TCircle')
+Check 'strict lint' (Block $b 'lint {"limit":0}') @('20 findings in 10 files of 29 own units: unused-uses 18, uses-to-implementation 2 - 7 with a "but"')
+# AppB's own analysis does not compile uLintDef's FIXTURE_A entries.
+Check 'strict lint conditional' (Block $b 'lint {"file":"AppB/uLintDef.pas"}') @('no findings (unused-uses, uses-to-implementation) in AppB\uLintDef.pas')
 Check 'strict overrides' (Block $b 'related {"relation":"overrides"') @('overrides of TShape.Area (Shared\uShapes.pas:17): 4')
 # Rows of both analyses in one walk: RunA is project A's, the rest project B's.
 Check 'strict callers' (Block $b 'callers {"symbol":"TCircle.Area", "depth":3}') @('3 calls in 3 routines; depth 2: 2 in 2; depth 3: 1 in 1', '22  [via TShape.Area]', '75  [via IShape.Area]', '10  [-> RunA, main block]', '13  [-> RunB, main block]')
@@ -704,7 +734,7 @@ try {
     $stdin.WriteLine('{"jsonrpc":"2.0","method":"notifications/initialized"}')
     $r = Rpc 2 'tools/list' '{}'
     $names = ($r.result.tools | ForEach-Object { $_.name }) -join ','
-    Check 'tools/list' $names @('status', 'find', 'definition', 'source', 'members', 'references', 'callers', 'callees', 'impact', 'compile', 'related', 'outline', 'diagnostics', 'unit_deps', 'rename_plan', 'change_plan', 'defines')
+    Check 'tools/list' $names @('status', 'find', 'definition', 'source', 'members', 'references', 'callers', 'callees', 'impact', 'compile', 'related', 'outline', 'diagnostics', 'unit_deps', 'rename_plan', 'change_plan', 'defines', 'lint')
     $r = Rpc 3 'tools/call' '{"name":"related","arguments":{"relation":"creations","symbol":"TCircle"}}'
     Check 'call before edit' (ToolText $r) @('creations of TCircle', ': 1')
     if ($r.result.isError) { Write-Host 'FAIL call before edit reported isError'; $script:failures++ }

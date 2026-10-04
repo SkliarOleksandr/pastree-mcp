@@ -10325,6 +10325,1456 @@ begin
   end;
 end;
 
+{ ---- lint ------------------------------------------------------------------------ }
+
+{ Named rules over the group's own units (SPEC 9.7). The two `uses` rules read
+  only what the analysis already holds - each unit's uses list and the
+  bindings of its names - and a uses entry is judged over EVERY analysis
+  holding the unit: one configuration naming something of it is enough to
+  keep it.
+
+  A name counts as a use of the unit listing it when dcc needs that unit in
+  scope to bind it: a unit-level declaration of its interface (a type, a
+  routine, a constant, a variable, an enum value) or a member of a helper it
+  declares - a helper applies only where its unit is used. A member reached
+  through a value or a type (`List.Add`, `TFoo.Create`) does not: dcc finds
+  members wherever the type came from, and the type named is the use.
+
+  What the index cannot see is said on the row rather than decided: a name
+  bound to nothing that the unit declares, a branch not compiled here naming
+  it, and - since a unit can be in `uses` for what its initialization does,
+  registering a class or a graphic format - the initialization a removal
+  leaves out of a program: the units no other path of the program reaches
+  any more, those of them with initialization or finalization code named. }
+
+const
+  LINT_UNUSED_USES = 'unused-uses';
+  LINT_USES_TO_IMPL = 'uses-to-implementation';
+  LINT_RULES: TArray<string> = [LINT_UNUSED_USES, LINT_USES_TO_IMPL];
+  // Doubts and bindings named on one row; past them, counted.
+  MAX_LINT_NAMED = 3;
+
+type
+  // A `uses` edge of one analysis: model From lists Target. A is the index
+  // of the analysis among those lint reads.
+  TLintEdge = record
+    A, From, Target: Integer;
+  end;
+
+  // One `uses` entry of an own unit, over every analysis holding the unit.
+  TLintUses = record
+    Name: string;              // as written
+    Line, Col: Integer;
+    InInterface: Boolean;
+    Used, UsedInInterface: Boolean;
+    // Its first use in the implementation, for the move row: the token
+    // index (to keep the first over analyses) and its place.
+    UseTok, UseLine, UseCol: Integer;
+    UseFile: string;
+    Doubts: TArray<string>;    // why the answer may be wrong, said on the row
+    Drops: TArray<string>;     // init units a removal leaves out of a program
+    Programs: TArray<string>;  // the programs they leave
+    Shadows: TArray<string>;   // the bindings a move would change
+    Conds: string;             // the conditional blocks it is written in
+    ShadowCount: Integer;
+    Edges: TArray<TLintEdge>;  // the `uses` edge it is, per analysis
+  end;
+
+  TLintPlace = record
+    FilePath: string;
+    Line: Integer;
+  end;
+
+  TLintRow = record
+    FilePath: string;
+    Line, Col: Integer;
+    Rule, Text: string;
+    Doubt: Boolean;
+    Edges: TArray<TLintEdge>;
+  end;
+
+  // What lint reads of one analysis more than once: the interface names of
+  // the units it checks against, the uses graph and what each program
+  // reaches, which units run code at start.
+  TLintAnalysis = class
+  private
+    FWs: TMcpWorkspace;
+    FA: TMcpAnalysis;
+    FNames: TObjectDictionary<Integer, TDictionary<string, Integer>>;
+    FStart, FEdges: TArray<Integer>;
+    FRoots: TArray<Integer>;
+    FReach, FCertain: TDictionary<Integer, TArray<Boolean>>;
+    FEffect: TDictionary<Integer, string>;
+    // A program whose project's defines differ from the analysis' -> the
+    // names they differ on; the uncertain edges per such set of names.
+    FDiff: TDictionary<Integer, TArray<string>>;
+    FUncertain: TObjectDictionary<string, TDictionary<Int64, Boolean>>;
+    procedure BuildGraph;
+    function ReachOf(ARoot, ASkipFrom, ASkipTo: Integer;
+      AAlso: TDictionary<Int64, Boolean>): TArray<Boolean>;
+  public
+    constructor Create(AWs: TMcpWorkspace; AA: TMcpAnalysis);
+    destructor Destroy; override;
+    // The names AMid's interface declares at unit level (its enum values
+    // included), lower case -> symbol.
+    function NamesOf(AMid: Integer): TDictionary<string, Integer>;
+    // What linking AMid into a program does by itself, '' for nothing: it
+    // has initialization or finalization code, or links a resource in.
+    function LinkEffect(AMid: Integer): string;
+    // The units with code at start that a program of the analysis no longer
+    // reaches once AFrom stops using ATo, and the programs.
+    procedure Drops(AFrom, ATo: Integer; var AUnits, APrograms: TArray<string>);
+    // What ARoot reaches, every edge in ASkip (From shl 32 or Target) left
+    // out, and those in AAlso (nil: none); and leaving out only AAlso.
+    function ReachWithout(ARoot: Integer; ASkip: TDictionary<Int64, Integer>;
+      AAlso: TDictionary<Int64, Boolean>): TArray<Boolean>;
+    function FullReach(ARoot: Integer;
+      AAlso: TDictionary<Int64, Boolean>): TArray<Boolean>;
+    // The `uses` edges of own units ARoot's project may not have: inside a
+    // conditional block naming a define its project and the analysis do not
+    // agree on. nil for a program built as analyzed.
+    function Uncertain(ARoot: Integer): TDictionary<Int64, Boolean>;
+    // The graphs a removal is weighed in for ARoot: the analysis' edges
+    // (nil), and for a program built with other defines the same without
+    // its uncertain edges. Each is weighed whole - what the program reaches
+    // and what it loses in the same graph - since a unit reached only
+    // through an uncertain edge is not linked at all if the edge is not
+    // there.
+    function Worlds(ARoot: Integer): TArray<TDictionary<Int64, Boolean>>;
+    // The units with an effect AStart reaches through the units in ALost,
+    // 'Name (initialization)'.
+    function EffectsFrom(AStart: Integer;
+      const ALost: TArray<Boolean>): TArray<string>;
+    property A: TMcpAnalysis read FA;
+    property Roots: TArray<Integer> read FRoots;
+  end;
+
+// The module node: the root itself, or its child.
+function ModuleNode(LM: TPasSemaModel): Integer;
+var
+  LC: Integer;
+begin
+  Result := NIL_NODE;
+  if Length(LM.Tree.Nodes) = 0 then
+    Exit;
+  if LM.Tree.Nodes[0].Kind in [nkUnit, nkProgram, nkLibrary, nkPackage] then
+    Exit(0);
+  LC := LM.Tree.Nodes[0].FirstChild;
+  while LC <> NIL_NODE do
+  begin
+    if LM.Tree.Nodes[LC].Kind in [nkUnit, nkProgram, nkLibrary, nkPackage] then
+      Exit(LC);
+    LC := LM.Tree.Nodes[LC].NextSibling;
+  end;
+end;
+
+// The module's child of kind AKind, NIL_NODE when it has none.
+function ModuleChild(LM: TPasSemaModel; AKind: TPasNodeKind): Integer;
+var
+  LMod: Integer;
+begin
+  Result := NIL_NODE;
+  LMod := ModuleNode(LM);
+  if LMod = NIL_NODE then
+    Exit;
+  Result := LM.Tree.Nodes[LMod].FirstChild;
+  while (Result <> NIL_NODE) and (LM.Tree.Nodes[Result].Kind <> AKind) do
+    Result := LM.Tree.Nodes[Result].NextSibling;
+end;
+
+// Whether ANode's subtree holds anything but empty blocks: an
+// `initialization` with a statement in it.
+function HasStatements(LM: TPasSemaModel; ANode: Integer): Boolean;
+var
+  LC: Integer;
+begin
+  Result := False;
+  LC := LM.Tree.Nodes[ANode].FirstChild;
+  while LC <> NIL_NODE do
+  begin
+    if not (LM.Tree.Nodes[LC].Kind in [nkBlock, nkEmptyStmt]) or
+       HasStatements(LM, LC) then
+      Exit(True);
+    LC := LM.Tree.Nodes[LC].NextSibling;
+  end;
+end;
+
+function InUsesClause(LM: TPasSemaModel; ANode: Integer): Boolean;
+var
+  LP: Integer;
+begin
+  LP := ANode;
+  while LP <> NIL_NODE do
+  begin
+    if LM.Tree.Nodes[LP].Kind = nkUsesClause then
+      Exit(True);
+    LP := LM.Tree.Nodes[LP].Parent;
+  end;
+  Result := False;
+end;
+
+// Whether a binding to AExt needs its unit in `uses`: a unit-level
+// declaration of its interface, an enum value, a helper's member - not a
+// member reached through a value or a type.
+function NeedsItsUnit(AA: TMcpAnalysis; const AExt: TPasExtRef): Boolean;
+var
+  UM: TPasSemaModel;
+  LScope, LOwner: Integer;
+begin
+  Result := False;
+  if (AExt.UnitId < 0) or (AExt.UnitId >= AA.Proj.ModelCount) then
+    Exit;
+  UM := AA.Proj.Model(AExt.UnitId);
+  if (AExt.Sym < 0) or (AExt.Sym >= UM.SymCount) then
+    Exit;
+  LScope := UM.Symbols[AExt.Sym].Scope;
+  if (LScope < 0) or (LScope >= UM.Scopes.Count) then
+    Exit;
+  case UM.Scopes[LScope].Kind of
+    sckUnit, sckEnum:
+      Result := True;
+    sckStruct:
+      begin
+        LOwner := UM.Scopes[LScope].OwnerNode;
+        Result := (LOwner >= 0) and (LOwner <= High(UM.Tree.Nodes)) and
+          (UM.Tree.Nodes[LOwner].Kind = nkHelperType);
+      end;
+  end;
+end;
+
+constructor TLintAnalysis.Create(AWs: TMcpWorkspace; AA: TMcpAnalysis);
+var
+  LMid: Integer;
+  LDiff, LOwn: TArray<string>;
+begin
+  inherited Create;
+  FWs := AWs;
+  FA := AA;
+  FNames := TObjectDictionary<Integer, TDictionary<string, Integer>>.Create(
+    [doOwnsValues]);
+  FReach := TDictionary<Integer, TArray<Boolean>>.Create;
+  FCertain := TDictionary<Integer, TArray<Boolean>>.Create;
+  FEffect := TDictionary<Integer, string>.Create;
+  FDiff := TDictionary<Integer, TArray<string>>.Create;
+  FUncertain := TObjectDictionary<string, TDictionary<Int64, Boolean>>.Create(
+    [doOwnsValues]);
+  // Roots and Members are added together, one per member.
+  for var LI := 0 to High(AA.Roots) do
+  begin
+    LMid := AA.Proj.ModelIdOf(AA.Roots[LI]);
+    if LMid < 0 then
+      Continue;
+    FRoots := FRoots + [LMid];
+    if LI > High(AA.Members) then
+      Continue;
+    LOwn := AWs.Members[AA.Members[LI]].Defines;
+    LDiff := nil;
+    for var LD in LOwn do
+      if not MatchText(LD, AA.Defines) and not MatchText(LD, LDiff) then
+        LDiff := LDiff + [LowerCase(LD)];
+    for var LD in AA.Defines do
+      if not MatchText(LD, LOwn) and not MatchText(LD, LDiff) then
+        LDiff := LDiff + [LowerCase(LD)];
+    if LDiff <> nil then
+    begin
+      TArray.Sort<string>(LDiff, TStringComparer.Ordinal);
+      FDiff.AddOrSetValue(LMid, LDiff);
+    end;
+  end;
+end;
+
+destructor TLintAnalysis.Destroy;
+begin
+  FUncertain.Free;
+  FDiff.Free;
+  FEffect.Free;
+  FCertain.Free;
+  FReach.Free;
+  FNames.Free;
+  inherited;
+end;
+
+function TLintAnalysis.NamesOf(AMid: Integer): TDictionary<string, Integer>;
+var
+  UM: TPasSemaModel;
+  LNames: TDictionary<string, Integer>;
+begin
+  if FNames.TryGetValue(AMid, Result) then
+    Exit;
+  LNames := TDictionary<string, Integer>.Create;
+  FNames.Add(AMid, LNames);
+  Result := LNames;
+  UM := FA.Proj.Model(AMid);
+  if (UM.InterfaceScope < 0) or (UM.InterfaceScope >= UM.Scopes.Count) then
+    Exit;
+  UM.EnumScopeDeep(UM.InterfaceScope,
+    procedure(ASym, AScope: Integer)
+    begin
+      if (UM.Scopes[AScope].Kind in [sckUnit, sckEnum]) and
+         (UM.Symbols[ASym].Kind <> skUnitRef) then
+        LNames.TryAdd(UM.Symbols[ASym].NameLower, ASym);
+    end);
+end;
+
+function TLintAnalysis.LinkEffect(AMid: Integer): string;
+var
+  LM: TPasSemaModel;
+  LSec: Integer;
+  LText: string;
+begin
+  if FEffect.TryGetValue(AMid, Result) then
+    Exit;
+  LM := FA.Proj.Model(AMid);
+  Result := '';
+  LSec := ModuleChild(LM, nkInitSec);
+  if (LSec <> NIL_NODE) and HasStatements(LM, LSec) then
+    Result := 'initialization';
+  LSec := ModuleChild(LM, nkFinalSec);
+  if (Result = '') and (LSec <> NIL_NODE) and HasStatements(LM, LSec) then
+    Result := 'finalization';
+  // `{$R WindowsXP.res}` - Vcl.XPMan does nothing else. A form file's
+  // `{$R *.dfm}` is not counted: its class is what a program would use.
+  if Result = '' then
+  begin
+    try
+      LText := TFile.ReadAllText(FA.Proj.ModelFile(AMid));
+    except
+      LText := '';
+    end;
+    for var LMatch in TRegEx.Matches(LText,
+      '\{\$(R|RESOURCE)\s+([^}]*)\}', [roIgnoreCase]) do
+      if not TRegEx.IsMatch(LMatch.Groups[2].Value,
+        '^\s*[+-]|\*\.(dfm|fmx|xfm)', [roIgnoreCase]) then
+      begin
+        Result := 'a resource';
+        Break;
+      end;
+  end;
+  FEffect.Add(AMid, Result);
+end;
+
+procedure TLintAnalysis.BuildGraph;
+var
+  LN, LTo: Integer;
+  LFill: TArray<Integer>;
+  LM: TPasSemaModel;
+begin
+  if FStart <> nil then
+    Exit;
+  LN := FA.Proj.ModelCount;
+  SetLength(FStart, LN + 1);
+  for var LMid := 0 to LN - 1 do
+  begin
+    LM := FA.Proj.Model(LMid);
+    for var LU := 0 to High(LM.UsesList) do
+    begin
+      LTo := LM.UsesList[LU].UnitId;
+      if (LTo >= 0) and (LTo < LN) then
+        Inc(FStart[LMid + 1]);
+    end;
+  end;
+  for var LI := 1 to LN do
+    Inc(FStart[LI], FStart[LI - 1]);
+  SetLength(FEdges, FStart[LN]);
+  LFill := Copy(FStart);
+  for var LMid := 0 to LN - 1 do
+  begin
+    LM := FA.Proj.Model(LMid);
+    for var LU := 0 to High(LM.UsesList) do
+    begin
+      LTo := LM.UsesList[LU].UnitId;
+      if (LTo >= 0) and (LTo < LN) then
+      begin
+        FEdges[LFill[LMid]] := LTo;
+        Inc(LFill[LMid]);
+      end;
+    end;
+  end;
+end;
+
+// The units ARoot reaches through `uses`, the edge ASkipFrom -> ASkipTo left
+// out (-1: none), and the edges in AAlso (nil: none). System and SysInit are
+// in every program and need no edge. nil when ASkipTo is reached all the
+// same: whatever the edge led to is then reached through it, and nothing is
+// lost.
+function TLintAnalysis.ReachOf(ARoot, ASkipFrom, ASkipTo: Integer;
+  AAlso: TDictionary<Int64, Boolean>): TArray<Boolean>;
+var
+  LQueue: TList<Integer>;
+  LAt, LU: Integer;
+begin
+  BuildGraph;
+  // A dynamic array result arrives holding the caller's variable: the
+  // previous root's reach, which SetLength would keep.
+  Result := nil;
+  SetLength(Result, FA.Proj.ModelCount);
+  LQueue := TList<Integer>.Create;
+  try
+    Result[ARoot] := True;
+    LQueue.Add(ARoot);
+    LAt := 0;
+    while LAt < LQueue.Count do
+    begin
+      LU := LQueue[LAt];
+      for var LE := FStart[LU] to FStart[LU + 1] - 1 do
+        if not Result[FEdges[LE]] and
+           not ((LU = ASkipFrom) and (FEdges[LE] = ASkipTo)) and
+           not ((AAlso <> nil) and AAlso.ContainsKey((Int64(LU) shl 32) or
+             Cardinal(FEdges[LE]))) then
+        begin
+          if (ASkipTo >= 0) and (FEdges[LE] = ASkipTo) then
+            Exit(nil);
+          Result[FEdges[LE]] := True;
+          LQueue.Add(FEdges[LE]);
+        end;
+      Inc(LAt);
+    end;
+  finally
+    LQueue.Free;
+  end;
+end;
+
+function TLintAnalysis.FullReach(ARoot: Integer;
+  AAlso: TDictionary<Int64, Boolean>): TArray<Boolean>;
+var
+  LCache: TDictionary<Integer, TArray<Boolean>>;
+begin
+  if AAlso = nil then
+    LCache := FReach
+  else
+    LCache := FCertain;
+  if not LCache.TryGetValue(ARoot, Result) then
+  begin
+    Result := ReachOf(ARoot, -1, -1, AAlso);
+    LCache.Add(ARoot, Result);
+  end;
+end;
+
+function TLintAnalysis.Worlds(
+  ARoot: Integer): TArray<TDictionary<Int64, Boolean>>;
+begin
+  Result := [nil];
+  if Uncertain(ARoot) <> nil then
+    Result := Result + [Uncertain(ARoot)];
+end;
+
+function TLintAnalysis.ReachWithout(ARoot: Integer;
+  ASkip: TDictionary<Int64, Integer>;
+  AAlso: TDictionary<Int64, Boolean>): TArray<Boolean>;
+var
+  LQueue: TList<Integer>;
+  LAt, LU: Integer;
+  LKey: Int64;
+begin
+  BuildGraph;
+  Result := nil;   // see ReachOf
+  SetLength(Result, FA.Proj.ModelCount);
+  LQueue := TList<Integer>.Create;
+  try
+    Result[ARoot] := True;
+    LQueue.Add(ARoot);
+    LAt := 0;
+    while LAt < LQueue.Count do
+    begin
+      LU := LQueue[LAt];
+      for var LE := FStart[LU] to FStart[LU + 1] - 1 do
+      begin
+        LKey := (Int64(LU) shl 32) or Cardinal(FEdges[LE]);
+        if not Result[FEdges[LE]] and not ASkip.ContainsKey(LKey) and
+           not ((AAlso <> nil) and AAlso.ContainsKey(LKey)) then
+        begin
+          Result[FEdges[LE]] := True;
+          LQueue.Add(FEdges[LE]);
+        end;
+      end;
+      Inc(LAt);
+    end;
+  finally
+    LQueue.Free;
+  end;
+end;
+
+// A shared analysis is built with its first member's defines (SPEC 4), and
+// a program whose own defines differ may not compile a `uses` entry the
+// analysis does - or compile one it does not. A removal is weighed for it
+// in the graph without the ones it may lack too (Worlds): on the client
+// group a COM server sharing the main program's analysis reached through
+// entries under the main program's defines units it does not build, and
+// paths to units it does build that it does not have - three removals that
+// left its only path to a unit with initialization were weighed as harmless,
+// where its own analysis (strict policy) said so. The entries it may have
+// and the analysis does not are not in the graph; they only add paths. A
+// `uses` read through `$I` is not looked into.
+function TLintAnalysis.Uncertain(ARoot: Integer): TDictionary<Int64, Boolean>;
+var
+  LDiff: TArray<string>;
+  LKey, LWord: string;
+  LM: TPasSemaModel;
+  LRefs: TArray<Integer>;
+  LUses: TArray<TPair<Integer, Integer>>;   // token index in file 0, target
+  LStack: TList<Boolean>;
+  LRi, LUi, LTok, LLast: Integer;
+  LVis: TPasVisibleToken;
+  LMention, LIn: Boolean;
+begin
+  Result := nil;
+  if not FDiff.TryGetValue(ARoot, LDiff) then
+    Exit;
+  LKey := string.Join(';', LDiff);
+  if FUncertain.TryGetValue(LKey, Result) then
+    Exit;
+  Result := TDictionary<Int64, Boolean>.Create;
+  FUncertain.Add(LKey, Result);
+  LStack := TList<Boolean>.Create;
+  try
+    for var LMid := 0 to FA.Proj.ModelCount - 1 do
+    begin
+      if not FWs.IsOwnFile(FA.Proj.ModelFile(LMid)) or
+         not FA.Proj.EnsureHydrated(LMid) then
+        Continue;
+      LM := FA.Proj.Model(LMid);
+      if (Length(LM.UsesList) = 0) or (Length(LM.Tree.Source.Files) = 0) then
+        Continue;
+      LRefs := nil;
+      for var LR in LM.Tree.Source.DefineRefs do
+        if (LR.FileId = 0) and MatchText(LR.Name, LDiff) then
+          LRefs := LRefs + [LR.Start];
+      if LRefs = nil then
+        Continue;
+      TArray.Sort<Integer>(LRefs);
+      LUses := nil;
+      for var LU in LM.UsesList do
+      begin
+        if (LU.UnitId < 0) or (LU.UnitId >= FA.Proj.ModelCount) or
+           (LU.NameNode = NIL_NODE) then
+          Continue;
+        LTok := LM.Tree.Nodes[LU.NameNode].FirstToken;
+        if (LTok < 0) or (LTok > High(LM.Tree.Source.Visible)) then
+          Continue;
+        LVis := LM.Tree.Source.Visible[LTok];
+        if LVis.FileId = 0 then
+          LUses := LUses + [TPair<Integer, Integer>.Create(LVis.TokenIndex,
+            LU.UnitId)];
+      end;
+      if LUses = nil then
+        Continue;
+      TArray.Sort<TPair<Integer, Integer>>(LUses,
+        TComparer<TPair<Integer, Integer>>.Construct(
+        function(const L, R: TPair<Integer, Integer>): Integer
+        begin
+          Result := L.Key - R.Key;
+        end));
+      LLast := LUses[High(LUses)].Key;
+      // Each open block: whether a directive of it names one of LDiff - an
+      // `$ELSEIF` that does makes the branches after it uncertain too.
+      LStack.Clear;
+      LRi := 0;
+      LUi := 0;
+      with LM.Tree.Source.Files[0] do
+        for var LI := 0 to Min(LLast, High(Tokens)) do
+        begin
+          while (LUi <= High(LUses)) and (LUses[LUi].Key = LI) do
+          begin
+            LIn := False;
+            for var LB in LStack do
+              LIn := LIn or LB;
+            if LIn then
+              Result.AddOrSetValue((Int64(LMid) shl 32) or
+                Cardinal(LUses[LUi].Value), True);
+            Inc(LUi);
+          end;
+          if Tokens[LI].Kind <> tkDirective then
+            Continue;
+          LWord := DirectiveWord(LM.Tree.Source.Files[0], LI);
+          while (LRi <= High(LRefs)) and (LRefs[LRi] < Tokens[LI].Start) do
+            Inc(LRi);
+          LMention := (LRi <= High(LRefs)) and (LRefs[LRi] < Tokens[LI].EndPos);
+          if IsCondOpen(LWord) then
+            LStack.Add(LMention)
+          else if (LWord = 'ELSEIF') and (LStack.Count > 0) then
+            LStack[LStack.Count - 1] := LStack.Last or LMention
+          else if ((LWord = 'ENDIF') or (LWord = 'IFEND')) and
+                  (LStack.Count > 0) then
+            LStack.Delete(LStack.Count - 1);
+        end;
+    end;
+  finally
+    LStack.Free;
+  end;
+end;
+
+function TLintAnalysis.EffectsFrom(AStart: Integer;
+  const ALost: TArray<Boolean>): TArray<string>;
+var
+  LSeen: TArray<Boolean>;
+  LQueue: TList<Integer>;
+  LAt, LU: Integer;
+begin
+  Result := nil;
+  BuildGraph;
+  SetLength(LSeen, FA.Proj.ModelCount);
+  LQueue := TList<Integer>.Create;
+  try
+    LSeen[AStart] := True;
+    LQueue.Add(AStart);
+    LAt := 0;
+    while LAt < LQueue.Count do
+    begin
+      LU := LQueue[LAt];
+      if LinkEffect(LU) <> '' then
+        Result := Result + [Format('%s (%s)', [UnitNameOfFile(
+          FA.Proj.ModelFile(LU)), LinkEffect(LU)])];
+      for var LE := FStart[LU] to FStart[LU + 1] - 1 do
+        if ALost[FEdges[LE]] and not LSeen[FEdges[LE]] then
+        begin
+          LSeen[FEdges[LE]] := True;
+          LQueue.Add(FEdges[LE]);
+        end;
+      Inc(LAt);
+    end;
+  finally
+    LQueue.Free;
+  end;
+end;
+
+// What is lost is what the edge's unit reaches only through it, in each of
+// the program's graphs (Worlds).
+procedure TLintAnalysis.Drops(AFrom, ATo: Integer;
+  var AUnits, APrograms: TArray<string>);
+var
+  LFull, LLess, LLost: TArray<Boolean>;
+  LEffects: TArray<string>;
+  LName: string;
+begin
+  for var LRoot in FRoots do
+    for var LWorld in Worlds(LRoot) do
+    begin
+      LFull := FullReach(LRoot, LWorld);
+      if not LFull[AFrom] then
+        Continue;
+      LLess := ReachOf(LRoot, AFrom, ATo, LWorld);
+      if LLess = nil then
+        Continue;
+      SetLength(LLost, Length(LFull));
+      for var LMid := 0 to High(LFull) do
+        LLost[LMid] := LFull[LMid] and not LLess[LMid];
+      LEffects := EffectsFrom(ATo, LLost);
+      for var LU in LEffects do
+        if not MatchText(LU, AUnits) then
+          AUnits := AUnits + [LU];
+      LName := ChangeFileExt(ExtractFileName(FA.Proj.ModelFile(LRoot)), '');
+      if (LEffects <> nil) and not MatchText(LName, APrograms) then
+        APrograms := APrograms + [LName];
+    end;
+end;
+
+// 'a, b and 2 more'.
+function NamedList(const AItems: TArray<string>; AMax: Integer): string;
+begin
+  Result := '';
+  for var LI := 0 to Min(Length(AItems), AMax) - 1 do
+  begin
+    if LI > 0 then
+      Result := Result + IfThen((LI = Length(AItems) - 1), ' and ', ', ');
+    Result := Result + AItems[LI];
+  end;
+  if Length(AItems) > AMax then
+    Result := Result + Format(' and %d more', [Length(AItems) - AMax]);
+end;
+
+// The words of LM's own branches not compiled here, lower case -> the first
+// place each is written.
+function SkippedWordPlaces(AWs: TMcpWorkspace;
+  LM: TPasSemaModel): TDictionary<string, TLintPlace>;
+var
+  LText, LWord: string;
+  LAt, LEnd, LCol: Integer;
+  LPlace: TLintPlace;
+begin
+  Result := TDictionary<string, TLintPlace>.Create;
+  for var LFi := 0 to Min(High(LM.Tree.Source.Skipped),
+    High(LM.Tree.Source.Files)) do
+  begin
+    if (Length(LM.Tree.Source.Skipped[LFi]) = 0) or not AWs.IsOwnFile(
+      LM.Tree.Source.FileNames[LFi]) then
+      Continue;
+    for var LR in LM.Tree.Source.Skipped[LFi] do
+    begin
+      LText := Copy(LM.Tree.Source.Files[LFi].Source, LR.Start + 1,
+        LR.EndPos - LR.Start);
+      LAt := 1;
+      while LAt <= Length(LText) do
+      begin
+        if not IsIdentChar(LText[LAt]) or ((LAt > 1) and
+          IsIdentChar(LText[LAt - 1])) then
+        begin
+          Inc(LAt);
+          Continue;
+        end;
+        LEnd := LAt;
+        while (LEnd <= Length(LText)) and IsIdentChar(LText[LEnd]) do
+          Inc(LEnd);
+        LWord := LowerCase(Copy(LText, LAt, LEnd - LAt));
+        if not Result.ContainsKey(LWord) then
+        begin
+          LM.Tree.Source.Files[LFi].OffsetToLineCol(LR.Start + LAt - 1,
+            LPlace.Line, LCol);
+          LPlace.FilePath := LM.Tree.Source.FileNames[LFi];
+          Result.Add(LWord, LPlace);
+        end;
+        LAt := LEnd;
+      end;
+    end;
+  end;
+end;
+
+// The identifiers of LM bound to nothing, lower case -> the first node: a
+// name the index could not resolve may be one of a unit it calls unused. A
+// member name after a dot is left out - the unit of its base is what
+// decides it.
+function UnboundWords(LM: TPasSemaModel): TDictionary<string, Integer>;
+var
+  LP, LMod: Integer;
+  LSkip: TArray<TPair<Integer, Integer>>;   // token ranges: the module's
+                                            // name, its uses clauses
+  LOut: Boolean;
+begin
+  Result := TDictionary<string, Integer>.Create;
+  LSkip := nil;
+  LMod := ModuleNode(LM);
+  if LMod <> NIL_NODE then
+    LP := LM.Tree.Nodes[LMod].FirstChild
+  else
+    LP := NIL_NODE;
+  if LP <> NIL_NODE then
+    LSkip := LSkip + [TPair<Integer, Integer>.Create(
+      LM.Tree.Nodes[LP].FirstToken, LM.Tree.Nodes[LP].LastToken)];
+  for var LNode := 0 to High(LM.Tree.Nodes) do
+    if LM.Tree.Nodes[LNode].Kind = nkUsesClause then
+      LSkip := LSkip + [TPair<Integer, Integer>.Create(
+        LM.Tree.Nodes[LNode].FirstToken, LM.Tree.Nodes[LNode].LastToken)];
+  for var LNode := 0 to Min(High(LM.Tree.Nodes), High(LM.RefMap)) do
+  begin
+    if LM.Tree.Nodes[LNode].Kind <> nkIdent then
+      Continue;
+    LOut := False;
+    for var LR in LSkip do
+      if (LM.Tree.Nodes[LNode].FirstToken >= LR.Key) and
+         (LM.Tree.Nodes[LNode].FirstToken <= LR.Value) then
+        LOut := True;
+    if LOut or
+       (nfName in LM.Tree.Nodes[LNode].Flags) or
+       (LM.RefMap[LNode] <> NIL_SYM) or LM.ExtRefMap.ContainsKey(LNode) then
+      Continue;
+    LP := LM.Tree.Nodes[LNode].Parent;
+    if (LP <> NIL_NODE) and (LM.Tree.Nodes[LP].FirstChild <> LNode) and
+       (LM.Tree.Nodes[LP].Kind = nkMember) then
+      Continue;
+    if (LP <> NIL_NODE) and (LM.Tree.Nodes[LP].FirstChild = LNode) and
+       (LM.Tree.Nodes[LP].Kind in [nkNamedArg, nkAggregateField]) then
+      Continue;
+    Result.TryAdd(LowerCase(LM.Tree.NodeText(LNode)), LNode);
+  end;
+end;
+
+// Adds the `uses` findings of the own unit AFile to ARows.
+// The conditional blocks ANode of LM is written in, outermost first:
+// '{$IFDEF X} at line 27 and the {$ELSE} at line 31 of {$IF Y} at line 29'.
+// An entry moved out of them is compiled where it was not: on the client
+// group 37 interface entries a row says to move sit in such blocks, one of
+// them only for the server - moved bare, the main program asked for a unit
+// it does not have (F2613).
+function CondsAround(LM: TPasSemaModel; ANode: Integer;
+  ACache: TDictionary<Integer, TArray<TCondBranch>>): string;
+var
+  LTok: Integer;
+  LVis: TPasVisibleToken;
+  LTS: TPasTokenStream;
+  LBr: TArray<TCondBranch>;
+  LParts: TArray<string>;
+
+  function DirText(ATok: Integer): string;
+  begin
+    Result := Copy(LTS.Source, LTS.Tokens[ATok].Start + 1,
+      LTS.Tokens[ATok].EndPos - LTS.Tokens[ATok].Start);
+    if Length(Result) > 60 then
+      Result := Copy(Result, 1, 57) + '...';
+  end;
+
+begin
+  Result := '';
+  LTok := LM.Tree.Nodes[ANode].FirstToken;
+  if (LTok < 0) or (LTok > High(LM.Tree.Source.Visible)) then
+    Exit;
+  LVis := LM.Tree.Source.Visible[LTok];
+  LParts := nil;
+  for var LPlace in BranchesAround(LM, LVis.FileId,
+    LM.Tree.Source.Files[LVis.FileId].Tokens[LVis.TokenIndex].Start, ACache) do
+  begin
+    LBr := ACache[LPlace.Fi];
+    LTS := LM.Tree.Source.Files[LPlace.Fi];
+    if LBr[LPlace.Branch].Dir = LBr[LPlace.Branch].Head then
+      LParts := LParts + [Format('%s at line %d', [DirText(
+        LBr[LPlace.Branch].Head), LineOfOffset(LTS,
+        LTS.Tokens[LBr[LPlace.Branch].Head].Start)])]
+    else
+      LParts := LParts + [Format('the %s at line %d of %s at line %d', [
+        DirText(LBr[LPlace.Branch].Dir), LineOfOffset(LTS,
+        LTS.Tokens[LBr[LPlace.Branch].Dir].Start), DirText(
+        LBr[LPlace.Branch].Head), LineOfOffset(LTS,
+        LTS.Tokens[LBr[LPlace.Branch].Head].Start)])];
+  end;
+  Result := NamedList(LParts, MaxInt);
+end;
+
+procedure LintUses(AWs: TMcpWorkspace; const AFile: string;
+  ALints: TObjectList<TLintAnalysis>; AEnclosing: TEnclosing;
+  AUnused, AMove: Boolean; ARows: TList<TLintRow>);
+var
+  LEntries: TList<TLintUses>;
+  LByName: TDictionary<string, Integer>;
+  LByUnit, LBySym: TDictionary<Integer, Integer>;
+  LMid, LImplTok, LImplSec, LE, LLine, LCol, LNode, LSym: Integer;
+  LInIface: Boolean;
+  LM: TPasSemaModel;
+  LA: TMcpAnalysis;
+  LEntry: TLintUses;
+  LKey, LSite, LWhere, LText, LName: string;
+
+  LUnbound: TDictionary<string, Integer>;
+  LSkipped: TDictionary<string, TLintPlace>;
+  LOverCalls: TDictionary<string, Integer>;   // overloaded name -> a call
+  LNames: TDictionary<string, Integer>;
+  LRow: TLintRow;
+  LExt: TPasExtRef;
+  LImplRefs, LOrphans: TList<TPair<Integer, TPasExtRef>>;
+  LImplLine: Integer;
+  LFormWords: TDictionary<string, Integer>;
+  LDoc: IPasDfmDoc;
+  LFormFile: string;
+  LL: TLintAnalysis;
+  LEdge: TLintEdge;
+  LCondCache: TDictionary<Integer, TArray<TCondBranch>>;
+
+  function Candidate(const AE: TLintUses): Boolean;
+  begin
+    Result := (AUnused and not AE.Used) or (AMove and AE.InInterface and
+      AE.Used and not AE.UsedInInterface);
+  end;
+
+  // A name of entry AIdx bound at ANode of LM - in the interface, or the
+  // implementation's first.
+  procedure MarkUse(AIdx, ANode: Integer);
+  var
+    LX: TLintUses;
+    LAt: Integer;
+  begin
+    LX := LEntries[AIdx];
+    LX.Used := True;
+    LAt := LM.Tree.Nodes[ANode].FirstToken;
+    if LAt < LImplTok then
+      LX.UsedInInterface := True
+    else if LAt < LX.UseTok then
+    begin
+      LX.UseTok := LAt;
+      LA.Proj.NodeSite(LMid, ANode, LX.UseFile, LX.UseLine, LX.UseCol);
+    end;
+    LEntries[AIdx] := LX;
+  end;
+
+  procedure AddDoubt(AIdx: Integer; const AText: string);
+  var
+    LX: TLintUses;
+  begin
+    LX := LEntries[AIdx];
+    if MatchText(AText, LX.Doubts) then
+      Exit;
+    LX.Doubts := LX.Doubts + [AText];
+    LEntries[AIdx] := LX;
+  end;
+
+begin
+  LEntries := TList<TLintUses>.Create;
+  LByName := TDictionary<string, Integer>.Create;
+  LByUnit := TDictionary<Integer, Integer>.Create;
+  LBySym := TDictionary<Integer, Integer>.Create;
+  LImplRefs := TList<TPair<Integer, TPasExtRef>>.Create;
+  LOrphans := TList<TPair<Integer, TPasExtRef>>.Create;
+  LCondCache := TDictionary<Integer, TArray<TCondBranch>>.Create;
+  try
+    // Pass 1: what each analysis binds to each entry.
+    for var LAi := 0 to ALints.Count - 1 do
+    begin
+      LCondCache.Clear;   // per file of this analysis' model
+      LL := ALints[LAi];
+      LA := LL.A;
+      LMid := LA.Proj.ModelIdOf(AFile);
+      if LMid < 0 then
+        Continue;
+      LA.Proj.EnsureHydrated(LMid);
+      LM := LA.Proj.Model(LMid);
+      if ModuleChild(LM, nkInterfaceSec) = NIL_NODE then
+        Exit;   // a program, a library, a package: its uses are its contents
+      LImplSec := ModuleChild(LM, nkImplementationSec);
+      if LImplSec = NIL_NODE then
+        LImplTok := MaxInt
+      else
+        LImplTok := LM.Tree.Nodes[LImplSec].FirstToken;
+      LByUnit.Clear;
+      LBySym.Clear;
+      for var LU in LM.UsesList do
+      begin
+        if (LU.UnitId < 0) or (LU.NameNode = NIL_NODE) then
+          Continue;
+        LKey := LowerCase(LU.NameFull);
+        if not LByName.TryGetValue(LKey, LE) then
+        begin
+          LEntry := Default(TLintUses);
+          LEntry.Name := LU.NameFull;
+          // A dotted name is an nkMember whose first token is a dot: the
+          // row points at its first segment.
+          LNode := LU.NameNode;
+          while (LM.Tree.Nodes[LNode].Kind = nkMember) and
+                (LM.Tree.Nodes[LNode].FirstChild <> NIL_NODE) do
+            LNode := LM.Tree.Nodes[LNode].FirstChild;
+          LA.Proj.NodeSite(LMid, LNode, LSite, LEntry.Line, LEntry.Col);
+          LEntry.InInterface := LM.Tree.Nodes[LU.NameNode].FirstToken <
+            LImplTok;
+          LEntry.UseTok := MaxInt;
+          if LEntry.InInterface then
+            LEntry.Conds := CondsAround(LM, LU.NameNode, LCondCache);
+          LE := LEntries.Add(LEntry);
+          LByName.Add(LKey, LE);
+        end;
+        LEntry := LEntries[LE];
+        LEdge.A := LAi;
+        LEdge.From := LMid;
+        LEdge.Target := LU.UnitId;
+        LEntry.Edges := LEntry.Edges + [LEdge];
+        LEntries[LE] := LEntry;
+        LByUnit.AddOrSetValue(LU.UnitId, LE);
+        if LU.Sym <> NIL_SYM then
+          LBySym.AddOrSetValue(LU.Sym, LE);
+      end;
+      LOrphans.Clear;
+      for var LPair in LM.ExtRefMap do
+      begin
+        if not NeedsItsUnit(LA, LPair.Value) then
+          Continue;
+        LInIface := LM.Tree.Nodes[LPair.Key].FirstToken < LImplTok;
+        if LByUnit.TryGetValue(LPair.Value.UnitId, LE) and
+           (LEntries[LE].InInterface or not LInIface) then
+          MarkUse(LE, LPair.Key)
+        else if (LPair.Value.UnitId <> LMid) and not MatchText(LA.Proj.Model(
+          LPair.Value.UnitId).UnitNameLower, ['system', 'sysinit']) then
+          LOrphans.Add(LPair);
+      end;
+      // A name bound to a unit not in `uses` came through one that is: an
+      // alias of it there (`TModalResult = System.UITypes.TModalResult` in
+      // Vcl.Controls), which the index binds through to what it names. And
+      // a name of the interface bound to a unit of the implementation `uses`
+      // - which dcc does not search there; PasTree does (0.91.1) when both
+      // declare the name - is one of an interface unit. Every listed unit
+      // declaring the name, of the interface for a name there, is credited.
+      for var LPair in LOrphans do
+      begin
+        LName := LA.Proj.Model(LPair.Value.UnitId).Symbols[
+          LPair.Value.Sym].NameLower;
+        LInIface := LM.Tree.Nodes[LPair.Key].FirstToken < LImplTok;
+        for var LU in LM.UsesList do
+          if (LU.UnitId >= 0) and LByUnit.TryGetValue(LU.UnitId, LE) and
+             (LEntries[LE].InInterface or not LInIface) and
+             LL.NamesOf(LU.UnitId).ContainsKey(LName) then
+            MarkUse(LE, LPair.Key);
+      end;
+      // `Unit.Name`: the qualifier binds to the uses entry itself.
+      if LBySym.Count > 0 then
+        for LNode := 0 to High(LM.RefMap) do
+        begin
+          LSym := LM.RefMap[LNode];
+          if (LSym <> NIL_SYM) and LBySym.TryGetValue(LSym, LE) and
+             not InUsesClause(LM, LNode) then
+            MarkUse(LE, LNode);
+        end;
+    end;
+    if LEntries.Count = 0 then
+      Exit;
+    // The unit's form file naming a unit's declaration - a component class,
+    // a link to another module's component (`PopupMenu = dmData.pmMain`) -
+    // uses it as the implementation would: the designer keeps such a unit
+    // in `uses`, and a class a form streams must be linked in.
+    LFormWords := nil;
+    for var LExt2 in ['.dfm', '.fmx'] do
+      if (LFormWords = nil) and FileExists(ChangeFileExt(AFile, LExt2)) then
+      begin
+        LDoc := PasDfmLoad(ChangeFileExt(AFile, LExt2));
+        if (LDoc = nil) or (LDoc.Doc.Error <> '') then
+          Continue;
+        LFormFile := ChangeFileExt(AFile, LExt2);
+        LFormWords := TDictionary<string, Integer>.Create;
+        for var LI := 0 to High(LDoc.Doc.Idents) do
+          if ((LDoc.Doc.Idents[LI].Role = dirClassName) or
+             ((LDoc.Doc.Idents[LI].Role = dirValue) and
+             (LDoc.Doc.Idents[LI].Seg = 0) and
+             (LDoc.Doc.Idents[LI].SegCount > 1))) then
+            LFormWords.TryAdd(LowerCase(LDoc.Doc.IdentText(LI)),
+              LDoc.Doc.LineOf(LDoc.Doc.Idents[LI].Offset));
+      end;
+    if LFormWords <> nil then
+      try
+        for LL in ALints do
+        begin
+          LMid := LL.A.Proj.ModelIdOf(AFile);
+          if LMid < 0 then
+            Continue;
+          for var LU in LL.A.Proj.Model(LMid).UsesList do
+          begin
+            if (LU.UnitId < 0) or not LByName.TryGetValue(LowerCase(
+              LU.NameFull), LE) or LEntries[LE].Used then
+              Continue;
+            LNames := LL.NamesOf(LU.UnitId);
+            for var LW in LFormWords do
+              if LNames.ContainsKey(LW.Key) then
+              begin
+                LEntry := LEntries[LE];
+                LEntry.Used := True;
+                LEntry.UseFile := LFormFile;
+                LEntry.UseLine := LW.Value;
+                LEntry.UseCol := 1;
+                LEntries[LE] := LEntry;
+                Break;
+              end;
+          end;
+        end;
+      finally
+        LFormWords.Free;
+      end;
+    LE := 0;
+    for var LX in LEntries do
+      if Candidate(LX) then
+        Inc(LE);
+    if LE = 0 then
+      Exit;
+
+    // Pass 2: per analysis, what may make a candidate wrong.
+    for LL in ALints do
+    begin
+      LA := LL.A;
+      LMid := LA.Proj.ModelIdOf(AFile);
+      if LMid < 0 then
+        Continue;
+      LM := LA.Proj.Model(LMid);
+      LImplSec := ModuleChild(LM, nkImplementationSec);
+      if LImplSec = NIL_NODE then
+        LImplTok := MaxInt
+      else
+        LImplTok := LM.Tree.Nodes[LImplSec].FirstToken;
+      LImplLine := MaxInt;
+      if LImplSec <> NIL_NODE then
+        LA.Proj.NodeSite(LMid, LImplSec, LSite, LImplLine, LCol);
+      LByUnit.Clear;
+      for var LU in LM.UsesList do
+        if (LU.UnitId >= 0) and LByName.TryGetValue(LowerCase(LU.NameFull),
+          LE) then
+          LByUnit.AddOrSetValue(LU.UnitId, LE);
+      LImplRefs.Clear;
+      for var LPair in LM.ExtRefMap do
+        if (LM.Tree.Nodes[LPair.Key].FirstToken >= LImplTok) and
+           LByUnit.ContainsKey(LPair.Value.UnitId) and
+           NeedsItsUnit(LA, LPair.Value) then
+          LImplRefs.Add(LPair);
+      LUnbound := nil;
+      LSkipped := nil;
+      LOverCalls := nil;
+      try
+        for var LU in LM.UsesList do
+        begin
+          if (LU.UnitId < 0) or not LByName.TryGetValue(LowerCase(LU.NameFull),
+            LE) or not Candidate(LEntries[LE]) then
+            Continue;
+          LEntry := LEntries[LE];
+          LNames := LL.NamesOf(LU.UnitId);
+          if LUnbound = nil then
+            LUnbound := UnboundWords(LM);
+          if LSkipped = nil then
+            LSkipped := SkippedWordPlaces(AWs, LM);
+          // A name bound to nothing here that the unit declares - in the
+          // interface, for the move.
+          for var LW in LUnbound do
+            if LNames.ContainsKey(LW.Key) and (not LEntry.Used or
+              (LM.Tree.Nodes[LW.Value].FirstToken < LImplTok)) then
+            begin
+              LA.Proj.NodeSite(LMid, LW.Value, LSite, LLine, LCol);
+              AddDoubt(LE, Format('`%s` at %s:%d is bound to nothing and %s '
+                + 'declares it', [LM.Tree.NodeText(LW.Value), AWs.RelPath(
+                LSite), LLine, LU.NameFull]));
+            end;
+          // A branch not compiled here naming the unit or a name of it - for
+          // the move, one before `implementation` (or in an include).
+          LName := LowerCase(UnitNameOfFile(LA.Proj.ModelFile(LU.UnitId)));
+          if LName.Contains('.') then
+            LName := Copy(LName, LName.LastIndexOf('.') + 2, MaxInt);
+          for var LW in LSkipped do
+            if (LNames.ContainsKey(LW.Key) or (LW.Key = LName)) and
+               (not LEntry.Used or not SameText(LW.Value.FilePath, AFile) or
+               (LW.Value.Line < LImplLine)) then
+              AddDoubt(LE, Format('a branch not compiled here names `%s` at '
+                + '%s:%d', [LW.Key, AWs.RelPath(LW.Value.FilePath),
+                LW.Value.Line]));
+          // A routine of another unit called here that this unit declares
+          // too: dcc picks among the overloads of every unit in scope, and
+          // PasTree's pick may not be its. On the client group
+          // `Trim(ShortString)` was bound to SysUtils' Trim, and the AnsiStrings
+          // listed beside it said unused - removed, dcc took SysUtils' Trim
+          // where it had taken AnsiStrings' (two new W1057).
+          if not LEntry.Used then
+          begin
+            if LOverCalls = nil then
+            begin
+              LOverCalls := TDictionary<string, Integer>.Create;
+              for var LPair in LM.ExtRefMap do
+                if NeedsItsUnit(LA, LPair.Value) and (LA.Proj.Model(
+                  LPair.Value.UnitId).Symbols[LPair.Value.Sym].Kind =
+                  skRoutine) then
+                  LOverCalls.TryAdd(LA.Proj.Model(LPair.Value.UnitId).Symbols[
+                    LPair.Value.Sym].NameLower, LPair.Key);
+            end;
+            for var LW in LOverCalls do
+              if LNames.TryGetValue(LW.Key, LSym) and
+                (LA.Proj.Model(LU.UnitId).Symbols[LSym].Kind = skRoutine) then
+              begin
+                LA.Proj.NodeSite(LMid, LW.Value, LSite, LLine, LCol);
+                AddDoubt(LE, Format('it declares an overload of `%s`, '
+                  + 'called at %s:%d - removed, the call may take another '
+                  + 'overload', [LM.Tree.NodeText(LW.Value), AWs.RelPath(
+                  LSite), LLine]));
+              end;
+          end;
+          LEntry := LEntries[LE];
+          if not LEntry.Used then
+            LL.Drops(LMid, LU.UnitId, LEntry.Drops, LEntry.Programs)
+          else
+          begin
+            // Moved to the end of the implementation uses, the unit is
+            // searched before every other: a name of it hides the same name
+            // of another unit wherever the implementation binds that.
+            for var LPair in LImplRefs do
+            begin
+              LExt := LPair.Value;
+              if (LExt.UnitId = LU.UnitId) or not LNames.ContainsKey(
+                LA.Proj.Model(LExt.UnitId).Symbols[LExt.Sym].NameLower) then
+                Continue;
+              Inc(LEntry.ShadowCount);
+              if Length(LEntry.Shadows) < MAX_LINT_NAMED then
+              begin
+                LA.Proj.NodeSite(LMid, LPair.Key, LSite, LLine, LCol);
+                LText := Format('`%s` at %s:%d from %s', [
+                  LA.Proj.Model(LExt.UnitId).Symbols[LExt.Sym].Name,
+                  AWs.RelPath(LSite), LLine, UnitNameOfFile(
+                  LA.Proj.ModelFile(LExt.UnitId))]);
+                if not MatchText(LText, LEntry.Shadows) then
+                  LEntry.Shadows := LEntry.Shadows + [LText];
+              end;
+            end;
+          end;
+          LEntries[LE] := LEntry;
+        end;
+      finally
+        LOverCalls.Free;
+        LSkipped.Free;
+        LUnbound.Free;
+      end;
+    end;
+
+    for var LX in LEntries do
+    begin
+      if not Candidate(LX) then
+        Continue;
+      LRow := Default(TLintRow);
+      LRow.FilePath := AFile;
+      LRow.Line := LX.Line;
+      LRow.Col := LX.Col;
+      LRow.Edges := LX.Edges;
+      LRow.Doubt := (Length(LX.Doubts) > 0) or (Length(LX.Drops) > 0) or
+        (LX.ShadowCount > 0);
+      if not LX.Used then
+      begin
+        LRow.Rule := LINT_UNUSED_USES;
+        LRow.Text := LX.Name + ' - no name of it is used here';
+        if Length(LX.Drops) > 0 then
+          LRow.Text := LRow.Text + Format('; but removing it leaves %s out '
+            + 'of %s', [NamedList(LX.Drops,
+            MAX_LINT_NAMED), NamedList(LX.Programs, MAX_LINT_NAMED)]);
+      end
+      else
+      begin
+        LRow.Rule := LINT_USES_TO_IMPL;
+        LWhere := '';
+        if LX.UseFile <> '' then
+          LWhere := AEnclosing.NameAt(LX.UseFile, LX.UseLine, LX.UseCol,
+            False);
+        LRow.Text := Format('%s - used only in the implementation (first at '
+          + '%s%d%s)', [LX.Name, IfThen(SameText(LX.UseFile, AFile), 'line ',
+          AWs.RelPath(LX.UseFile) + ':'), LX.UseLine, IfThen(LWhere <> '',
+          ', in ' + LWhere, '')]);
+        if LX.Conds <> '' then
+          LRow.Text := LRow.Text + '; it is inside ' + LX.Conds +
+            ' - move it with its condition';
+        if LX.ShadowCount > 0 then
+          LRow.Text := LRow.Text + Format('; but moved, it would take over '
+            + '%s%s', [NamedList(LX.Shadows, MAX_LINT_NAMED),
+            IfThen(LX.ShadowCount > Length(LX.Shadows), Format(
+            ' (%d bindings in all)', [LX.ShadowCount]), '')]);
+      end;
+      if Length(LX.Doubts) > 0 then
+        LRow.Text := LRow.Text + '; but ' + NamedList(LX.Doubts,
+          MAX_LINT_NAMED);
+      ARows.Add(LRow);
+    end;
+  finally
+    LOrphans.Free;
+    LImplRefs.Free;
+    LBySym.Free;
+    LByUnit.Free;
+    LByName.Free;
+    LCondCache.Free;
+    LEntries.Free;
+  end;
+end;
+
+// The `unused-uses` rows no `but` holds back are removed together by whoever
+// acts on them, and each may be safe alone while all of them are not: a unit
+// with an effect (initialization, a resource) reached by several of the
+// removed edges leaves the program with the last of them. On the client
+// group removing them all left 13 units out of the main program - JvGIF,
+// which registers the GIF format with TPicture, among them. Each removed
+// edge whose importer the program still reaches and whose unit it no longer
+// does is such a last path: its row gets the `but`, and the check runs again
+// without it until nothing more is lost.
+procedure LintTogether(ALints: TObjectList<TLintAnalysis>;
+  ARows: TList<TLintRow>);
+var
+  LSkip: TDictionary<Int64, Integer>;
+  LFull, LLess, LLost: TArray<Boolean>;
+  LChanged, LAny: Boolean;
+  LFrom, LTarget: Integer;
+  LUnits, LPrograms: TArray<TArray<string>>;
+  LRow: TLintRow;
+  LName: string;
+begin
+  SetLength(LUnits, ARows.Count);
+  SetLength(LPrograms, ARows.Count);
+  LSkip := TDictionary<Int64, Integer>.Create;
+  try
+    repeat
+      LChanged := False;
+      for var LAi := 0 to ALints.Count - 1 do
+      begin
+        LSkip.Clear;
+        for var LR := 0 to ARows.Count - 1 do
+          if (ARows[LR].Rule = LINT_UNUSED_USES) and not ARows[LR].Doubt then
+            for var LE in ARows[LR].Edges do
+              if LE.A = LAi then
+                LSkip.AddOrSetValue((Int64(LE.From) shl 32) or
+                  Cardinal(LE.Target), LR);
+        if LSkip.Count = 0 then
+          Continue;
+        for var LRoot in ALints[LAi].Roots do
+        for var LWorld in ALints[LAi].Worlds(LRoot) do
+        begin
+          LFull := ALints[LAi].FullReach(LRoot, LWorld);
+          LLess := ALints[LAi].ReachWithout(LRoot, LSkip, LWorld);
+          SetLength(LLost, Length(LFull));
+          LAny := False;
+          for var LMid := 0 to High(LFull) do
+          begin
+            LLost[LMid] := LFull[LMid] and not LLess[LMid];
+            if LLost[LMid] and (ALints[LAi].LinkEffect(LMid) <> '') then
+              LAny := True;
+          end;
+          if not LAny then
+            Continue;
+          LName := ChangeFileExt(ExtractFileName(
+            ALints[LAi].A.Proj.ModelFile(LRoot)), '');
+          for var LPair in LSkip do
+          begin
+            LFrom := Integer(LPair.Key shr 32);
+            LTarget := Integer(LPair.Key and $FFFFFFFF);
+            if not LLess[LFrom] or not LLost[LTarget] then
+              Continue;
+            for var LU in ALints[LAi].EffectsFrom(LTarget, LLost) do
+              if not MatchText(LU, LUnits[LPair.Value]) then
+                LUnits[LPair.Value] := LUnits[LPair.Value] + [LU];
+            if Length(LUnits[LPair.Value]) = 0 then
+              Continue;
+            if not MatchText(LName, LPrograms[LPair.Value]) then
+              LPrograms[LPair.Value] := LPrograms[LPair.Value] + [LName];
+            LRow := ARows[LPair.Value];
+            if not LRow.Doubt then
+            begin
+              LRow.Doubt := True;
+              ARows[LPair.Value] := LRow;
+              LChanged := True;
+            end;
+          end;
+        end;
+      end;
+    until not LChanged;
+  finally
+    LSkip.Free;
+  end;
+  for var LR := 0 to ARows.Count - 1 do
+    if Length(LUnits[LR]) > 0 then
+    begin
+      LRow := ARows[LR];
+      LRow.Text := LRow.Text + Format('; but removed with the other '
+        + 'unused-uses rows that have no "but", it leaves %s out of %s - keep '
+        + 'it, or another row saying so', [NamedList(LUnits[LR],
+        MAX_LINT_NAMED), NamedList(LPrograms[LR], MAX_LINT_NAMED)]);
+      ARows[LR] := LRow;
+    end;
+end;
+
+function ToolLint(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
+var
+  LRules: TArray<string>;
+  LFile, LIn, LKey: string;
+  LLimit, LShown, LDoubts, LN, LAsked: Integer;
+  LUnused, LMove: Boolean;
+  LFiles, LOthers: TList<string>;
+  LSeen: TDictionary<string, Boolean>;
+  LRows: TList<TLintRow>;
+  LArr: TArray<TLintRow>;
+  LLints: TObjectList<TLintAnalysis>;
+  LEnclosing: TEnclosing;
+  LSb: TStringBuilder;
+  LByRule, LByFile: TDictionary<string, Integer>;
+begin
+  LRules := nil;
+  for var LR in ArgStr(AArgs, 'rules').Split([',', ' '],
+    TStringSplitOptions.ExcludeEmpty) do
+  begin
+    if not MatchText(LR.Trim, LINT_RULES) then
+      raise EToolError.CreateFmt('unknown rule `%s` - the rules: %s',
+        [LR.Trim, string.Join(', ', LINT_RULES)]);
+    LRules := LRules + [LowerCase(LR.Trim)];
+  end;
+  if LRules = nil then
+    LRules := LINT_RULES;
+  LUnused := MatchText(LINT_UNUSED_USES, LRules);
+  LMove := MatchText(LINT_USES_TO_IMPL, LRules);
+  LFile := '';
+  if ArgStr(AArgs, 'file') <> '' then
+    LFile := ArgFile(AWs, AArgs);
+  LIn := ArgStr(AArgs, 'in');
+  LLimit := EnsureRange(ArgInt(AArgs, 'limit', 100), 0, 100000);
+  LFiles := TList<string>.Create;
+  LOthers := TList<string>.Create;
+  LSeen := TDictionary<string, Boolean>.Create;
+  LRows := TList<TLintRow>.Create;
+  LLints := TObjectList<TLintAnalysis>.Create;
+  LEnclosing := TEnclosing.Create(AWs);
+  LSb := TStringBuilder.Create;
+  LByRule := TDictionary<string, Integer>.Create;
+  LByFile := TDictionary<string, Integer>.Create;
+  try
+    // LFiles: the units asked about; LOthers: the rest of the own units,
+    // whose unused-uses rows LintTogether weighs with theirs.
+    for var LA in AWs.Analyses do
+      if LA.Proj <> nil then
+      begin
+        LLints.Add(TLintAnalysis.Create(AWs, LA));
+        for var LMid := 0 to LA.Proj.ModelCount - 1 do
+        begin
+          LKey := LA.Proj.ModelFile(LMid);
+          if not SameText(ExtractFileExt(LKey), '.pas') or
+             not (AWs.IsOwnFile(LKey) or SameText(LKey, LFile)) or
+             not LSeen.TryAdd(LowerCase(LKey), True) then
+            Continue;
+          if ((LFile <> '') and not SameText(LKey, LFile)) or
+             ((LIn <> '') and not InFilterMatches(AWs, LKey, LIn)) then
+            LOthers.Add(LKey)
+          else
+            LFiles.Add(LKey);
+        end;
+      end;
+    if (LFile <> '') and (LFiles.Count = 0) then
+      raise EToolError.Create(AWs.RelPath(LFile) + ' is not a unit any '
+        + 'analysis holds - lint reads the `uses` of units; a program''s or '
+        + 'a package''s lists what it is made of');
+    for var LF in LFiles do
+      LintUses(AWs, LF, LLints, LEnclosing, LUnused, LMove, LRows);
+    if LUnused then
+    begin
+      LAsked := LRows.Count;
+      for var LF in LOthers do
+        LintUses(AWs, LF, LLints, LEnclosing, True, False, LRows);
+      LintTogether(LLints, LRows);
+      LRows.DeleteRange(LAsked, LRows.Count - LAsked);
+    end;
+    LArr := LRows.ToArray;
+    TArray.Sort<TLintRow>(LArr, TComparer<TLintRow>.Construct(
+      function(const L, R: TLintRow): Integer
+      begin
+        Result := CompareText(L.FilePath, R.FilePath);
+        if Result = 0 then
+          Result := L.Line - R.Line;
+        if Result = 0 then
+          Result := L.Col - R.Col;
+      end));
+    LDoubts := 0;
+    for var LRow in LArr do
+    begin
+      if not LByRule.TryGetValue(LRow.Rule, LN) then
+        LN := 0;
+      LByRule.AddOrSetValue(LRow.Rule, LN + 1);
+      if not LByFile.TryGetValue(LowerCase(LRow.FilePath), LN) then
+        LN := 0;
+      LByFile.AddOrSetValue(LowerCase(LRow.FilePath), LN + 1);
+      if LRow.Doubt then
+        Inc(LDoubts);
+    end;
+    if Length(LArr) = 0 then
+      LSb.AppendLine(Format('no findings (%s) in %s', [string.Join(', ',
+        LRules), IfThen(LFile <> '', AWs.RelPath(LFile), Plural(LFiles.Count,
+        'own unit'))]))
+    else
+    begin
+      LKey := '';
+      for var LR in LRules do
+        if LByRule.TryGetValue(LR, LN) then
+          LKey := LKey + IfThen(LKey <> '', ', ') + Format('%s %d', [LR, LN]);
+      LSb.AppendLine(Format('%s in %s of %s: %s%s', [Plural(Length(LArr),
+        'finding'), Plural(LByFile.Count, 'file'), Plural(LFiles.Count,
+        'own unit'), LKey, IfThen(LDoubts > 0, Format(' - %d with a "but" '
+        + 'to check before acting on it', [LDoubts]), '')]));
+    end;
+    LShown := 0;
+    for var LRow in LArr do
+    begin
+      if LShown >= LLimit then
+        Break;
+      LSb.AppendLine(Format('%s:%d:%d: %s %s', [AWs.RelPath(LRow.FilePath),
+        LRow.Line, LRow.Col, LRow.Rule, LRow.Text]));
+      Inc(LShown);
+    end;
+    if (LShown < Length(LArr)) and (LLimit > 0) then
+      LSb.AppendLine(Format('... %d more (raise `limit`, or narrow with '
+        + '`file`, `in` or `rules`)', [Length(LArr) - LShown]));
+    Result := LSb.ToString.TrimRight;
+  finally
+    LByFile.Free;
+    LByRule.Free;
+    LSb.Free;
+    LEnclosing.Free;
+    LLints.Free;
+    LRows.Free;
+    LSeen.Free;
+    LOthers.Free;
+    LFiles.Free;
+  end;
+end;
+
 { ---- impact ---------------------------------------------------------------------- }
 
 const
@@ -13674,7 +15124,32 @@ const
     + '"file":{"type":"string","description":"A unit or include file"},'
     + '"line":{"type":"integer","description":"A line of `file`"},'
     + '"limit":{"type":"integer","description":"Max rows: directives for '
-    + '`name`, branches for `file` alone (default 100)"}}}}' +
+    + '`name`, branches for `file` alone (default 100)"}}}},' +
+
+    '{"name":"lint","description":"Named checks over the group''s own '
+    + 'units, a row per finding tagged with its rule. unused-uses: a unit in '
+    + '`uses` none of whose names the unit uses - removing it shortens every '
+    + 'build of the importer. uses-to-implementation: an interface `uses` '
+    + 'entry whose names are used only in the implementation - moved there, '
+    + 'a change to its interface no longer recompiles the importer''s '
+    + 'importers, and a circular reference may break. Judged over every '
+    + 'analyzed configuration of the unit. A row ends with `but ...` where '
+    + 'acting on it may be wrong: a name bound to nothing that the unit '
+    + 'declares, a branch not compiled here naming it, the initialization a '
+    + 'removal leaves out of a program (a unit used for what it registers), '
+    + 'a routine called here that the unit declares too (dcc picks among '
+    + 'every unit''s), the bindings a move would change. A move row names the {$IF} blocks '
+    + 'the entry is written in: move it with them. Run `compile` after '
+    + 'acting on it.",'
+    + '"inputSchema":{"type":"object","properties":{'
+    + '"rules":{"type":"string","description":"Comma-separated: '
+    + 'unused-uses, uses-to-implementation (default all)"},'
+    + '"file":{"type":"string","description":"Only this unit"},'
+    + '"in":{"type":"string","description":"Only the units whose path '
+    + 'relative to the group contains this or matches it as a wildcard '
+    + '(client\\*, *Form.pas)"},'
+    + '"limit":{"type":"integer","description":"Max rows (default 100; 0: '
+    + 'the counts alone)"}}}}' +
     ']';
 
 function ToolDefinitions: TJSONArray;
@@ -13714,7 +15189,9 @@ begin
     + 'routine''s parameters or result must touch - its overrides, the '
     + 'interface methods it implements and their implementations, each '
     + 'header, and every call, `defines` whether a line between {$IFDEF}s '
-    + 'is compiled and which define decides it. Their rows name the routine or type they sit '
+    + 'is compiled and which define decides it, `lint` the `uses` entries '
+    + 'a unit does not need or needs only in its implementation. Their rows '
+    + 'name the routine or type they sit '
     + 'in, which usually answers the question without opening the file. '
     + 'A header counts every row, cut or not: `limit: 0` asks whether and '
     + 'how many, without the rows. '
@@ -13802,6 +15279,8 @@ begin
       Result := ToolUnitDeps(AWs, AArgs)
     else if AName = 'defines' then
       Result := ToolDefines(AWs, AArgs)
+    else if AName = 'lint' then
+      Result := ToolLint(AWs, AArgs)
     else
       raise EToolError.Create('unknown tool: ' + AName);
   except
