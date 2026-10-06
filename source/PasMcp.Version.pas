@@ -16,8 +16,8 @@ unit PasMcp.Version;
 interface
 
 const
-  PasTreeMcpVersion = '0.28.0';
-  cMinPasTreeVersion = '0.91.2';
+  PasTreeMcpVersion = '0.28.1';
+  cMinPasTreeVersion = '0.93.4';
 
 // 'pastree-mcp 0.1.0 (PasTree 0.50.1), built 2026-09-25 15:00' - the first
 // line of every log.

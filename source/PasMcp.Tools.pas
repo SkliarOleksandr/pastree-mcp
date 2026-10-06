@@ -78,6 +78,7 @@ uses
   PasTree.Sema.Model,
   PasTree.Sema.Project,
   PasTree.Sema.Nav,
+  PasTree.Sema.Lint,
   PasTree.Dfm,
   PasTree.Sema.Dfm,
   PasTree.Platforms,
@@ -10409,6 +10410,7 @@ type
     // names they differ on; the uncertain edges per such set of names.
     FDiff: TDictionary<Integer, TArray<string>>;
     FUncertain: TObjectDictionary<string, TDictionary<Int64, Boolean>>;
+    FTreeUnused: TDictionary<string, Boolean>;
     procedure BuildGraph;
     function ReachOf(ARoot, ASkipFrom, ASkipTo: Integer;
       AAlso: TDictionary<Int64, Boolean>): TArray<Boolean>;
@@ -10441,6 +10443,11 @@ type
     // through an uncertain edge is not linked at all if the edge is not
     // there.
     function Worlds(ARoot: Integer): TArray<TDictionary<Int64, Boolean>>;
+    // Whether PasTree's own rule (PasTree.Sema.Lint.FindUnusedUses) finds
+    // AFile's entry AName unused here - asked once per file.
+    function TreeSaysUnused(const AFile, AName: string): Boolean;
+    // The same for many files in one call - cheaper than one per file.
+    procedure AskTree(const AFiles: TArray<string>);
     // The units with an effect AStart reaches through the units in ALost,
     // 'Name (initialization)'.
     function EffectsFrom(AStart: Integer;
@@ -10585,6 +10592,7 @@ end;
 
 destructor TLintAnalysis.Destroy;
 begin
+  FTreeUnused.Free;
   FUncertain.Free;
   FDiff.Free;
   FEffect.Free;
@@ -10748,6 +10756,33 @@ begin
     Result := ReachOf(ARoot, -1, -1, AAlso);
     LCache.Add(ARoot, Result);
   end;
+end;
+
+procedure TLintAnalysis.AskTree(const AFiles: TArray<string>);
+var
+  LMids: TArray<Integer>;
+  LMid: Integer;
+begin
+  if FTreeUnused = nil then
+    FTreeUnused := TDictionary<string, Boolean>.Create;
+  LMids := nil;
+  for var LF in AFiles do
+  begin
+    LMid := FA.Proj.ModelIdOf(LF);
+    // The file itself marks it asked.
+    if (LMid >= 0) and FTreeUnused.TryAdd(LowerCase(LF), True) then
+      LMids := LMids + [LMid];
+  end;
+  if LMids <> nil then
+    for var LU in FindUnusedUses(FA.Nav, LMids) do
+      FTreeUnused.AddOrSetValue(LowerCase(LU.Hit.FilePath + '|' +
+        LU.UnitName), True);
+end;
+
+function TLintAnalysis.TreeSaysUnused(const AFile, AName: string): Boolean;
+begin
+  AskTree([AFile]);
+  Result := FTreeUnused.ContainsKey(LowerCase(AFile + '|' + AName));
 end;
 
 function TLintAnalysis.Worlds(
@@ -11129,7 +11164,7 @@ end;
 
 procedure LintUses(AWs: TMcpWorkspace; const AFile: string;
   ALints: TObjectList<TLintAnalysis>; AEnclosing: TEnclosing;
-  AUnused, AMove: Boolean; ARows: TList<TLintRow>);
+  AUnused, AMove, ATree: Boolean; ARows: TList<TLintRow>);
 var
   LEntries: TList<TLintUses>;
   LByName: TDictionary<string, Integer>;
@@ -11348,6 +11383,31 @@ begin
         end;
       finally
         LFormWords.Free;
+      end;
+    // PasTree's own rule knows uses a binding walk does not see: a unit
+    // an inline routine called here needs to be expanded (without it dcc
+    // does not inline the call, H2443 - System.UITypes for MessageDlg), the
+    // unit of an ancestor of a class the form file streams and of a
+    // component an inherited form holds (the designer puts them back into
+    // `uses` on save). An entry it finds used in an analysis is used, and
+    // offered for neither rule: where the use is, it does not say.
+    // ATree False: a unit only weighed with the rows asked (LintTogether) -
+    // an entry taken as removed that is not only adds a `but`.
+    for var LAi := 0 to IfThen(ATree, ALints.Count, 0) - 1 do
+      for LE := 0 to LEntries.Count - 1 do
+      begin
+        LEntry := LEntries[LE];
+        if LEntry.Used then
+          Continue;
+        for var LEd in LEntry.Edges do
+          if (LEd.A = LAi) and not ALints[LAi].TreeSaysUnused(AFile,
+            LEntry.Name) then
+          begin
+            LEntry.Used := True;
+            LEntry.UsedInInterface := True;
+            LEntries[LE] := LEntry;
+            Break;
+          end;
       end;
     LE := 0;
     for var LX in LEntries do
@@ -11646,6 +11706,7 @@ var
   LRows: TList<TLintRow>;
   LArr: TArray<TLintRow>;
   LLints: TObjectList<TLintAnalysis>;
+  LL: TLintAnalysis;
   LEnclosing: TEnclosing;
   LSb: TStringBuilder;
   LByRule, LByFile: TDictionary<string, Integer>;
@@ -11702,13 +11763,15 @@ begin
       raise EToolError.Create(AWs.RelPath(LFile) + ' is not a unit any '
         + 'analysis holds - lint reads the `uses` of units; a program''s or '
         + 'a package''s lists what it is made of');
+    for LL in LLints do
+      LL.AskTree(LFiles.ToArray);
     for var LF in LFiles do
-      LintUses(AWs, LF, LLints, LEnclosing, LUnused, LMove, LRows);
+      LintUses(AWs, LF, LLints, LEnclosing, LUnused, LMove, True, LRows);
     if LUnused then
     begin
       LAsked := LRows.Count;
       for var LF in LOthers do
-        LintUses(AWs, LF, LLints, LEnclosing, True, False, LRows);
+        LintUses(AWs, LF, LLints, LEnclosing, True, False, False, LRows);
       LintTogether(LLints, LRows);
       LRows.DeleteRange(LAsked, LRows.Count - LAsked);
     end;
@@ -15131,8 +15194,8 @@ const
     + '`uses` none of whose names the unit uses - removing it shortens every '
     + 'build of the importer. uses-to-implementation: an interface `uses` '
     + 'entry whose names are used only in the implementation - moved there, '
-    + 'a change to its interface no longer recompiles the importer''s '
-    + 'importers, and a circular reference may break. Judged over every '
+    + 'the unit may take part in a circular reference (dcc refuses one '
+    + 'through interfaces alone); it does not change what recompiles. Judged over every '
     + 'analyzed configuration of the unit. A row ends with `but ...` where '
     + 'acting on it may be wrong: a name bound to nothing that the unit '
     + 'declares, a branch not compiled here naming it, the initialization a '

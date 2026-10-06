@@ -486,9 +486,12 @@ Check 'references define by name' (Block $b 'references {"symbol":"FIXTURE_A"}')
 Check 'lint unit' (Block $b 'lint {"file":"AppB/uLint.pas"}') @('6 findings in 1 file of 1 own unit: unused-uses 4, uses-to-implementation 2 - 3 with a "but"', 'AppB\uLint.pas:10:3: uses-to-implementation System.Classes - used only in the implementation (first at line 33, in LintRun)', 'AppB\uLint.pas:11:3: unused-uses uColors - no name of it is used here', 'AppB\uLint.pas:12:3: unused-uses uLintInit - no name of it is used here; but removing it leaves uLintInit (initialization) out of AppB', 'AppB\uLint.pas:13:3: uses-to-implementation uLintHelp - used only in the implementation (first at line 39, in LintRun); but moved, it would take over `Limit` at AppB\uLint.pas:39 from uLintMore', 'AppB\uLint.pas:26:3: unused-uses uCells - no name of it is used here', 'AppB\uLint.pas:28:3: unused-uses uBoxes - no name of it is used here; but a branch not compiled here names `nevercalled` at AppB\uLint.pas:44') @('SysUtils', 'uFlags', 'uLintAlias', 'uLintBase', 'uLintMore -')
 Check 'lint rule' (Block $b 'lint {"file":"AppB/uLint.pas","rules":"unused-uses"}') @('4 findings in 1 file of 1 own unit: unused-uses 4 - 2 with a "but"') @('uses-to-implementation')
 Check 'lint none in' (Block $b 'lint {"in":"AppF","rules":"uses-to-implementation"}') @('no findings (uses-to-implementation) in 6 own units')
-Check 'lint form file' (Block $b 'lint {"file":"AppF/uMainForm.pas"}') @('2 findings', 'AppF\uMainForm.pas:11:19: unused-uses Vcl.Controls') @('uData')
-Check 'lint count only' (Block $b 'lint {"limit":0}') @('21 findings in 11 files of 29 own units: unused-uses 18, uses-to-implementation 3 - 7 with a "but"') @('AppB\', 'more (raise')
-Check 'lint cut' (Block $b 'lint {"limit":2}') @('AppB\uBoxes.pas:10:19: unused-uses uColors', '... 19 more (raise `limit`, or narrow with `file`, `in` or `rules`)')
+# Every entry of uMainForm is the unit of a class its form file streams or
+# of an ancestor of one (TLabel's TGraphicControl: Vcl.Controls) - the
+# designer puts those back on save (PasTree.Sema.Lint, 0.93.3).
+Check 'lint form file' (Block $b 'lint {"file":"AppF/uMainForm.pas"}') @('no findings (unused-uses, uses-to-implementation) in AppF\uMainForm.pas')
+Check 'lint count only' (Block $b 'lint {"limit":0}') @('13 findings in 7 files of 29 own units: unused-uses 10, uses-to-implementation 3 - 7 with a "but"') @('AppB\', 'more (raise')
+Check 'lint cut' (Block $b 'lint {"limit":2}') @('AppB\uBoxes.pas:10:19: unused-uses uColors', '... 11 more (raise `limit`, or narrow with `file`, `in` or `rules`)')
 Check 'lint together' (Block $b 'lint {"file":"AppB/uLintBase.pas"}') @('AppB\uLintBase.pas:10:3: unused-uses uLintReg - no name of it is used here; but removed with the other unused-uses rows that have no "but", it leaves uLintReg (initialization) out of AppB - keep it, or another row saying so')
 # uLintDef lists uLintOnce under FIXTURE_A, which the shared analysis takes
 # from AppA: AppB, built without it, reaches uLintOnce through uLintLast alone.
@@ -512,7 +515,7 @@ Check 'strict rename_plan' (Block $b 'rename_plan {"symbol":"TCircle","new_name"
 Check 'strict rename_plan unit' (Block $b 'rename_plan {"symbol":"uShapes"') @('to uShapesNew - 5 edits in 4 files')
 Check 'strict change_plan' (Block $b 'change_plan {"symbol":"TShape.Area"}') @('the signature on 8 lines in 2 files, 4 other routines tied to it; 3 calls in 3 routines')
 Check 'strict descendants' (Block $b 'related {"relation":"descendants"') @('descendants of TShape (Shared\uShapes.pas:15): 3', 'TBigCircle <- TCircle')
-Check 'strict lint' (Block $b 'lint {"limit":0}') @('20 findings in 10 files of 29 own units: unused-uses 18, uses-to-implementation 2 - 7 with a "but"')
+Check 'strict lint' (Block $b 'lint {"limit":0}') @('12 findings in 6 files of 29 own units: unused-uses 10, uses-to-implementation 2 - 7 with a "but"')
 # AppB's own analysis does not compile uLintDef's FIXTURE_A entries.
 Check 'strict lint conditional' (Block $b 'lint {"file":"AppB/uLintDef.pas"}') @('no findings (unused-uses, uses-to-implementation) in AppB\uLintDef.pas')
 Check 'strict overrides' (Block $b 'related {"relation":"overrides"') @('overrides of TShape.Area (Shared\uShapes.pas:17): 4')
