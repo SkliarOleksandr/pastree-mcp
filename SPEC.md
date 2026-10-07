@@ -169,6 +169,7 @@ Common rules:
 | `unit_deps` | `UsesList`, `NodeSite`, `FindUnitReferences` | Uses resolved to files, implementation-section ones marked; used-by merged across analyses. |
 | `defines` | the preprocessor's `DefineRefs`, `Skipped` regions and `IncludeRefs`, the raw token stream, `BaseDefineNames`, `FindDefineReferences` | Conditional compilation as the analyzed configuration compiles it. **`file` + `line`**: whether the line is compiled; each `{$IF}`/`{$IFDEF}`/`{$IFNDEF}`/`{$IFOPT}` block around it, outermost first (through the `$I` an include file was read through), with the branch the line is in (`its {$ELSE} at 20`), taken, not taken or not reached, and why - for each name the block tests, the unit `$DEFINE` or `$UNDEF` in effect at the directive (file:line), the project's defines, the platform's predefined set, or nothing, and then a project of another analysis defining it and the `$DEFINE` of it that does not reach there; then the symbols in effect at the line (the units' own by the file of their `$DEFINE`, the project's, the platform's, those a `$UNDEF` cancelled). A branch is taken by what the preprocessor did, never re-evaluated: the first token in it outside a nested block is in a skipped region or not, or, for a branch of directives only, a name in one of them was live. **`file` alone**: its lines not compiled, the outermost branch of each nest by line range, with the same why. **`name`**: per analysis whether the project or the platform defines it, the `$DEFINE`/`$UNDEF` lines in the code, and every directive of the group's files naming it - a test with whether its branch is compiled, a `$DEFINE` with whether it is live - a library's counted; `file` narrows the rows. A shared analysis is built with its first member's defines: where a member of it that compiles the unit has other defines for a name a block tests, it is said (`AppB does not define FIXTURE_A, the analysis takes AppA's defines - built as AppB, it is not defined here`). Each analysis reading the file answers; analyses that agree are one answer, the symbols in effect said apart. A `symbol` no declaration matches that is a conditional symbol says to ask `defines`. `limit` (100) caps the directives of `name` and the branches of `file` alone. |
 | `lint` | each model's `UsesList`, `ExtRefMap` and `RefMap` (what a name binds to, and whether before `implementation`), the interface scope's names (`EnumScopeDeep`), the `uses` graph from each program of an analysis, the `Skipped` regions, the unit's form file (`PasDfmLoad`) | Rules `unused-uses` and `uses-to-implementation` (9.7) over the own units, `rules`, `file` and `in` narrowing; an entry is judged over every analysis holding the unit, and one that uses a name of it keeps it. A name counts for the unit listing it when dcc needs that unit in scope to bind it: a unit-level declaration of its interface, an enum value, a member of a helper it declares. A member reached through a value or a type does not - `List.Add` needs no `uses` of Classes; the type written does. Counted too: the qualifier of `Unit.Name`; the unit's form file naming a class or a module the unit declares (`PopupMenu = dmData.pmMain`: the designer keeps that unit listed); a name bound to a unit not listed - PasTree binds an alias of the same name through to what it names (`TModalResult` of Vcl.Controls to System.UITypes) - credited to each listed unit declaring the name; and a name of the interface bound to a unit of the implementation `uses`, which dcc does not search there and PasTree 0.91.1 does, credited to the interface units declaring it. PasTree's own rule (`PasTree.Sema.Lint.FindUnusedUses`, 0.93.4) is asked too, for the units `file`/`in` select, and an entry it finds used in an analysis is used and offered for neither rule: a unit an inline routine called here needs to be expanded (without it dcc does not inline, H2443 - System.UITypes for MessageDlg), and the unit of a class a form file streams, of each ancestor of it, and of a component an inherited form holds - the designer puts those back into `uses` on save. Said at the end of a row, as `but ...`: the units with initialization, finalization or a `{$R}` resource that removing the entry leaves out of a program, no other path of it reaching them; the same for the entry removed together with every other unused-uses row that has no `but` - an agent acts on the rows at once, and each may be safe alone while all are not (so the rows of every own unit are weighed, whatever `file` and `in` show); a branch not compiled here naming the unit or a name of it; a name bound to nothing that the unit declares; a routine of another unit called here that the unit declares too - dcc picks among the same-named routines of every unit in scope, and the index's pick may not be its (on the client group `Trim(ShortString)` took AnsiStrings' Trim, not the SysUtils one the index bound, and removing AnsiStrings added two W1057); for a move, the implementation bindings the unit would take over, searched first once listed last. Said on a move row, not as a `but`: the `{$IF}` blocks the entry is written in (`it is inside {$IFDEF X} at line 27 - move it with its condition`) - moved bare, it is compiled where it was not. A program whose project's defines differ from its shared analysis' (section 4) is weighed in two graphs, each whole: the analysis' `uses` edges, and the same without the entries of own units written in a block that names a define the two disagree on - the ones it may not have. Checked against dcc on the client group (9.7). |
+| `metrics` | per own unit, the ranges of its interface declarations (the items of `nkInterfaceSec`, an overload set or a forward and its full declaration one by name) and of the bodies part of them (`Nav.RoutineImplNode` of an inline routine, of every method of a generic type, of an inline method); each model's `ExtRefMap` and `RefMap` placed in them; each model's `UsesList`; `lint`'s rows for `cycles` | `recompile` (9.7): a graph of the own units' interface declarations - a reference into one of another unit's declarations (a member's counts for its type) makes the referring unit a binder of it, and a reference inside a declaration or a body part of one makes that declaration take the other in, in its unit too. A change to a declaration recompiles its binders and changes every declaration taking it in, transitively; a unit's is the same from all of its declarations. `symbol` (a member names its type, and a routine's row says its body alone recompiles its unit), `file`, or neither: the own units ranked by it, from per-declaration unit sets computed once over the components of the graph (bitsets). A unit several analyses hold is counted over all of them, by file; each program of an analysis with the units of it recompiled. `cycles`: the strongly connected components of the own units' `uses` graph, those of one analysis contained in a larger one of another folded into it with its programs; per cycle its entries, the shortest way round through the unit asked or the most connected one (`->` interface, `~>` implementation), and the entries `lint` finds unused on it - the binding walk over the cycle's files first, PasTree's rule only for the files where it found one - with the largest cycle left without those that have no `but`. `limit` |
 
 What comes next - new tools and changes to these - is section 9.
 
@@ -802,39 +803,79 @@ gap between the answers and the truth.
    puts back on save, mostly a form's ancestor units (Vcl.Controls,
    System.Classes). A whole-group run takes 18 s, almost all of it that
    rule; one file 1.5 s.
-2. **`metrics`** - per routine: lines, nesting depth, branches, callers;
-   per unit: lines, fan-in, fan-out, and how many units a change to its
-   interface recompiles; and the `uses` cycles through interface sections.
-   Where to look first when optimizing a build or a hot path, from the AST
-   and the `uses` graph PasTree already holds.
 
-   Plan, in this order - each step checked against dcc before the next:
-   1. `metric: recompile` - what a change recompiles. Not by `uses`: dcc
-      37's Make recompiles a unit when a symbol it binds has changed
-      (probed 2026-10-04 on a seven-unit program, by the hints each unit
-      compiled gives). A unit listing A in its interface and binding
-      nothing of it is not recompiled when A's interface changes; one
-      binding A's constant in its implementation is; a new field in A's
-      record recompiles the unit declaring a record of it and that unit's
-      users of that record, not its users of an unrelated constant. A unit
-      whose interface declaration takes a changed symbol in - a constant's
-      value, a field's type, a parameter's - changes that symbol in turn.
-      So a symbol's cascade is the units binding it, then the units binding
-      an interface declaration of theirs that names it, and so on; a unit's
-      is the same from every symbol of its interface, the most a change
-      there can recompile. Without `symbol` or `file`: the own units
-      ranked by that count, each with the programs it reaches and the
-      declarations carrying it furthest; with one: that cascade per program
-      and the declarations through which it spreads. Per analysis, the
-      largest where a unit is in several. Checked by a Make after a change,
-      the units compiled against the count. `lint`'s moves do not shorten
-      it: a moved entry's names were bound in the implementation already.
-   2. `metric: cycles` - the units on a `uses` cycle (one through an
-      implementation section: dcc refuses one through interfaces alone,
-      F2047), largest first, with the edges `lint` says can move.
-   3. Per routine (lines, nesting, branches, callers) and per unit (lines,
-      fan-in, fan-out) - when a measured session asks for them; `source`,
-      `outline` and `callers` answer them one at a time today.
+2. **`metrics`** - what the code costs the build, from the bindings and
+   the `uses` graph PasTree already holds. `recompile` and `cycles` are
+   built (0.29.0); per routine (lines, nesting, branches, callers) and per
+   unit (lines, fan-in, fan-out) wait for a measured session to ask - today
+   `source`, `outline` and `callers` answer them one at a time.
+
+   **`recompile`** - what a change recompiles. Not by `uses`: dcc 37's Make
+   recompiles a unit when a declaration it binds has changed. Probed with
+   dcc64 37.0 on small programs (each unit compiled says so by a hint of its
+   own):
+   - a unit listing A in its interface and binding nothing of it is not
+     recompiled when A's interface changes; nor is one binding only a
+     declaration of A that did not change (another constant), nor anyone
+     when A's `uses`, a body or a new routine nobody calls changes;
+   - one binding A's constant, in its implementation as well, is;
+   - a declaration changes with one it takes in, in its unit or another: a
+     constant's value (`CM = CA + 1`), a field's type (a record holding A's
+     record - and only its users, not the users of an unrelated constant
+     beside it), a parameter's or a result's type (`procedure P(X: TCls)`
+     when a private field is added to TCls), an ancestor, a pointer's target;
+   - a member counts for its type: a unit calling only `GetObj.Method`
+     recompiles when a field or a method is added to the class;
+   - an overload set is one declaration: adding an overload recompiles the
+     callers of another;
+   - the body of an inline routine is part of it (its callers recompile when
+     it changes), and so are the method bodies of a generic type - a unit
+     only declaring a variable of `TGen<Integer>` recompiles when one
+     changes.
+
+   So the answer is a graph of the own units' interface declarations: who
+   binds each, and which declarations take each in. A change to a
+   declaration recompiles its binders and changes what takes it in, and so
+   on; a unit's change is the same from all its declarations - the most a
+   change there can recompile. With `symbol`: that cascade, per program, each
+   unit with what it binds and the declarations of other units it spreads
+   through; with `file`: the unit's, and its declarations ranked by reach;
+   with neither: the own units ranked. The fixture's uRc* units mirror the
+   probe, and dcc's Make recompiles exactly the smoke rows' units.
+
+   Checked on the client group with the main program (Win32 Debug, 1,527
+   own units compiled, each made to say so by a `{$MESSAGE}` of its own):
+   five changes - a private field in a class bound by 16 units, a private
+   field in a class carrying a form's declarations (88), a default
+   parameter added to a routine (3), a string constant's value (111, most
+   through an alias of it in another unit), a private field in the base
+   class of the record layer (1,211) - recompiled every unit predicted, and
+   two more in all: one per change of the last two, binding nothing the
+   cascade reaches (dcc's own reasons, not found). A whole-group ranking
+   takes 0.6 s; one cascade about as long.
+
+   **One Make does not converge there.** dcc's Make on a program with large
+   implementation cycles left units stale: after the constant's change it
+   compiled 18 units, a second Make 22 more and a third 84, before one
+   compiled nothing - and after the first, a unit using the constant still
+   held its old value in its .dcu. The counts above are what the repeated
+   Makes compiled, the changed unit included. What this means for `compile`
+   (one Make) is a question of its own (9.4).
+
+   **`cycles`** - the units on a `uses` cycle: dcc refuses one through
+   interfaces alone (F2047), so each is closed by an implementation `uses`.
+   Largest first, with the programs linking it, its entries, the shortest
+   way round (through the unit asked, or the most connected), and the
+   entries on it `lint` finds unused - removed, the cycle may break; the
+   answer says the largest cycle left without those that have no `but`.
+   Moving an interface entry to the implementation (`uses-to-implementation`)
+   changes no edge of the graph, so it breaks nothing and is not offered
+   here. A cycle of one analysis inside a larger one of another is that
+   one seen with other defines: folded into it. On the client group: 34
+   cycles, 971 units on them; the largest of 412 units, the next of 351 and
+   231 in two configurations of the record layer - 15 s for the first five,
+   nearly all of it PasTree's unused-uses rule, asked only of the files
+   where the binding walk found an unused entry on a cycle.
 
 ### 9.8 Order
 
@@ -883,7 +924,8 @@ gap between the answers and the truth.
    count per file first, then the lines of the files that matter.
 10. `defines` (done, 0.27.0, 9.6) - `references` names the lines in branches not
    compiled; `defines` says which define selects each, and for which member.
-11. `lint` (the two `uses` rules - done, 0.28.0, 9.7), `metrics`. `unused-symbol`'s
+11. `lint` (the two `uses` rules - done, 0.28.0, 9.7), `metrics`
+   (`recompile` and `cycles` - done, 0.29.0, 9.7). `unused-symbol`'s
    exceptions are measured: 24 of 384 sampled symbols that no code names
    are called through a base, an interface or a property, and a published
    property's uses are form lines.
