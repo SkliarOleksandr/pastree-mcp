@@ -11838,6 +11838,1705 @@ begin
   end;
 end;
 
+{ ---- metrics --------------------------------------------------------------------- }
+
+{ What a change costs the build (SPEC 9.7 item 2), from the bindings and the
+  `uses` graph the analysis holds.
+
+  recompile: dcc 37's Make recompiles a unit when a declaration it binds has
+  changed - not when a unit it lists has: a unit listing A and binding
+  nothing of it is not recompiled when A's interface changes. A declaration
+  here is a unit-level one of an interface: a type with its members, an
+  overload set, a constant, a variable; a member bound through a value
+  counts for its type (a unit calling only GetObj.Method recompiles when a
+  field is added to the class). One changes when its own text does, and when
+  a declaration it takes in does - a constant's value, a field's, a
+  parameter's or an ancestor's type, a pointer's target - and so do the
+  declarations of its unit taking it in. The body of an inline routine and
+  the method bodies of a generic type are part of it: a unit calling the
+  inline routine, or only declaring a variable of the generic, recompiles
+  when such a body changes. Any other body is not: its change recompiles its
+  unit alone. All of it probed with dcc64 37.0 (SPEC 9.7).
+
+  cycles: the own units on a `uses` cycle - one closed through an
+  implementation section, dcc refusing one through interfaces alone
+  (F2047) - with the entries on it `lint` finds unused, whose removal may
+  break it. }
+
+const
+  METRIC_RECOMPILE = 'recompile';
+  METRIC_CYCLES = 'cycles';
+  METRIC_NAMES: TArray<string> = [METRIC_RECOMPILE, METRIC_CYCLES];
+  // Declarations, units and entries named on one line; past them, counted.
+  MAX_METRIC_NAMED = 10;
+
+type
+  // A declaration of an own unit's interface, or a body that is part of one
+  // (Body): tokens First..Last of the unit's model, node Root.
+  TRcRange = record
+    First, Last, Root, Decl: Integer;
+    Body: Boolean;
+  end;
+
+  // One analysis' interface declarations of the own units, which units bind
+  // each and which declarations take each in.
+  TRcGraph = class
+  private
+    FWs: TMcpWorkspace;
+    FA: TMcpAnalysis;
+    FMids: TArray<Integer>;                  // own unit -> model id
+    FUnitOf: TDictionary<Integer, Integer>;  // model id -> own unit
+    FRanges: TArray<TArray<TRcRange>>;       // per own unit, by First
+    FDeclOf: TDictionary<string, Integer>;   // 'unit|name' -> declaration
+    FDeclUnit: TArray<Integer>;
+    FDeclName: TArray<string>;
+    FDeclBody: TArray<Boolean>;              // has a body that is part of it
+    FUnitDecls: TArray<TArray<Integer>>;
+    // CSR: the own units binding a declaration, the declarations taking it in.
+    FBindStart, FBind, FNextStart, FNext: TArray<Integer>;
+    // Per declaration, its strongly connected component, and per component
+    // the own units a change of it recompiles (ComputeBits).
+    FScc: TArray<Integer>;
+    FBits: TArray<TArray<UInt64>>;
+    function AddDecl(AU: Integer; const AName: string): Integer;
+    function DeclAt(AU, ATok: Integer; ABody: Boolean): Integer;
+    procedure Build;
+  public
+    constructor Create(AWs: TMcpWorkspace; AA: TMcpAnalysis);
+    destructor Destroy; override;
+    function UnitCount: Integer;
+    function UnitMid(AU: Integer): Integer;
+    // -1 for a model that is not an own unit with an interface.
+    function UnitOfMid(AMid: Integer): Integer;
+    // The interface declaration symbol ASym of own unit AU is, or is part of
+    // (a member, an enum value, an overload); -1 when it is none.
+    function DeclOfSym(AU, ASym: Integer): Integer;
+    function DeclsOf(AU: Integer): TArray<Integer>;
+    function DeclUnit(AD: Integer): Integer;
+    function DeclName(AD: Integer): string;
+    function DeclHasBody(AD: Integer): Boolean;
+    // What a change of the declarations AStart recompiles. AVia: per
+    // declaration, the one it changed with (-1 a start, -2 unchanged).
+    // ABound: per own unit, the changed declarations it binds (nil: not
+    // recompiled for a binding; the starts' units recompile all the same).
+    procedure Cascade(const AStart: TArray<Integer>; out AVia: TArray<Integer>;
+      out ABound: TArray<TArray<Integer>>);
+    procedure ComputeBits;
+    // The own units a change of AD recompiles, its own among them.
+    function DeclBits(AD: Integer): TArray<UInt64>;
+    property A: TMcpAnalysis read FA;
+  end;
+
+function PopCount64(AX: UInt64): Integer;
+begin
+  Result := 0;
+  while AX <> 0 do
+  begin
+    AX := AX and (AX - 1);
+    Inc(Result);
+  end;
+end;
+
+function BitsCount(const ABits: TArray<UInt64>): Integer;
+begin
+  Result := 0;
+  for var LW in ABits do
+    Inc(Result, PopCount64(LW));
+end;
+
+function BitSet(const ABits: TArray<UInt64>; AI: Integer): Boolean; inline;
+begin
+  Result := ABits[AI shr 6] and (UInt64(1) shl (AI and 63)) <> 0;
+end;
+
+procedure SetBit(var ABits: TArray<UInt64>; AI: Integer); inline;
+begin
+  ABits[AI shr 6] := ABits[AI shr 6] or (UInt64(1) shl (AI and 63));
+end;
+
+// The declared name of an interface item: its first identifier child (an
+// attribute group may come before it; a type's or a constant's carries no
+// nfName).
+function RcItemName(LM: TPasSemaModel; ANode: Integer): string;
+var
+  LC: Integer;
+begin
+  Result := '';
+  LC := LM.Tree.Nodes[ANode].FirstChild;
+  while LC <> NIL_NODE do
+  begin
+    if LM.Tree.Nodes[LC].Kind = nkIdent then
+      Exit(LM.Tree.NodeText(LC));
+    LC := LM.Tree.Nodes[LC].NextSibling;
+  end;
+end;
+
+// A routine declared with type parameters (`function F<T>`).
+function RcGenericRoutine(LM: TPasSemaModel; ASym: Integer): Boolean;
+var
+  LR, LC: Integer;
+begin
+  Result := False;
+  LR := LM.Symbols[ASym].DeclNode;
+  while (LR <> NIL_NODE) and (LM.Tree.Nodes[LR].Kind <> nkRoutine) do
+    LR := LM.Tree.Nodes[LR].Parent;
+  if LR = NIL_NODE then
+    Exit;
+  LC := LM.Tree.Nodes[LR].FirstChild;
+  while LC <> NIL_NODE do
+  begin
+    if (LM.Tree.Nodes[LC].Kind = nkGenericParams) or
+       ((LM.Tree.Nodes[LC].FirstChild <> NIL_NODE) and (LM.Tree.Nodes[
+       LM.Tree.Nodes[LC].FirstChild].Kind = nkGenericParams)) then
+      Exit(True);
+    LC := LM.Tree.Nodes[LC].NextSibling;
+  end;
+end;
+
+constructor TRcGraph.Create(AWs: TMcpWorkspace; AA: TMcpAnalysis);
+begin
+  inherited Create;
+  FWs := AWs;
+  FA := AA;
+  FUnitOf := TDictionary<Integer, Integer>.Create;
+  FDeclOf := TDictionary<string, Integer>.Create;
+  Build;
+end;
+
+destructor TRcGraph.Destroy;
+begin
+  FDeclOf.Free;
+  FUnitOf.Free;
+  inherited;
+end;
+
+function TRcGraph.UnitCount: Integer;
+begin
+  Result := Length(FMids);
+end;
+
+function TRcGraph.UnitMid(AU: Integer): Integer;
+begin
+  Result := FMids[AU];
+end;
+
+function TRcGraph.UnitOfMid(AMid: Integer): Integer;
+begin
+  if not FUnitOf.TryGetValue(AMid, Result) then
+    Result := -1;
+end;
+
+function TRcGraph.DeclsOf(AU: Integer): TArray<Integer>;
+begin
+  Result := FUnitDecls[AU];
+end;
+
+function TRcGraph.DeclUnit(AD: Integer): Integer;
+begin
+  Result := FDeclUnit[AD];
+end;
+
+function TRcGraph.DeclName(AD: Integer): string;
+begin
+  Result := FDeclName[AD];
+end;
+
+function TRcGraph.DeclHasBody(AD: Integer): Boolean;
+begin
+  Result := FDeclBody[AD];
+end;
+
+function TRcGraph.AddDecl(AU: Integer; const AName: string): Integer;
+var
+  LKey: string;
+begin
+  LKey := IntToStr(AU) + '|' + LowerCase(AName);
+  if FDeclOf.TryGetValue(LKey, Result) then
+    Exit;
+  Result := Length(FDeclUnit);
+  FDeclOf.Add(LKey, Result);
+  FDeclUnit := FDeclUnit + [AU];
+  FDeclName := FDeclName + [AName];
+  FDeclBody := FDeclBody + [False];
+  FUnitDecls[AU] := FUnitDecls[AU] + [Result];
+end;
+
+function TRcGraph.DeclAt(AU, ATok: Integer; ABody: Boolean): Integer;
+var
+  LLo, LHi, LMidI: Integer;
+  LR: TArray<TRcRange>;
+begin
+  Result := -1;
+  LR := FRanges[AU];
+  LLo := 0;
+  LHi := High(LR);
+  // The last range starting at or before ATok.
+  while LLo <= LHi do
+  begin
+    LMidI := (LLo + LHi) shr 1;
+    if LR[LMidI].First <= ATok then
+    begin
+      if (ATok <= LR[LMidI].Last) and (ABody or not LR[LMidI].Body) then
+        Result := LR[LMidI].Decl;
+      LLo := LMidI + 1;
+    end
+    else
+      LHi := LMidI - 1;
+  end;
+end;
+
+function TRcGraph.DeclOfSym(AU, ASym: Integer): Integer;
+var
+  LM: TPasSemaModel;
+  LNode: Integer;
+begin
+  Result := -1;
+  LM := FA.Proj.Model(FMids[AU]);
+  if (ASym < 0) or (ASym >= LM.SymCount) then
+    Exit;
+  LNode := LM.Symbols[ASym].DeclNode;
+  if (LNode < 0) or (LNode > High(LM.Tree.Nodes)) then
+    Exit;
+  Result := DeclAt(AU, LM.Tree.Nodes[LNode].FirstToken, False);
+end;
+
+procedure TRcGraph.Build;
+var
+  LM: TPasSemaModel;
+  LIface, LC, LI, LD, LS, LNode, LImpl: Integer;
+  LRanges: TList<TRcRange>;
+  LRange: TRcRange;
+  LSyms: TList<Integer>;
+  LBodies: TDictionary<Integer, Boolean>;
+  LBinds, LEdges: TList<Int64>;
+  LStack: TStack<Integer>;
+  LMid: Integer;
+
+  procedure AddItem(AU, ANode: Integer);
+  var
+    LName: string;
+  begin
+    LName := RcItemName(LM, ANode);
+    if LName = '' then
+      Exit;
+    LRange.First := LM.Tree.Nodes[ANode].FirstToken;
+    LRange.Last := LM.Tree.Nodes[ANode].LastToken;
+    LRange.Root := ANode;
+    LRange.Decl := AddDecl(AU, LName);
+    LRange.Body := False;
+    LRanges.Add(LRange);
+  end;
+
+  procedure AddBody(ASym, ADecl: Integer);
+  begin
+    LImpl := FA.Nav.RoutineImplNode(LMid, ASym);
+    if (LImpl = NIL_NODE) or not LBodies.TryAdd(LImpl, True) then
+      Exit;
+    LRange.First := LM.Tree.Nodes[LImpl].FirstToken;
+    LRange.Last := LM.Tree.Nodes[LImpl].LastToken;
+    LRange.Root := LImpl;
+    LRange.Decl := ADecl;
+    LRange.Body := True;
+    LRanges.Add(LRange);
+    FDeclBody[ADecl] := True;
+  end;
+
+  // The methods of type ASym whose bodies are part of it: every one of a
+  // generic type, an inline one of any - nested types' too.
+  procedure AddMembers(ASym, ADecl: Integer; AAll: Boolean; ADepth: Integer);
+  var
+    LScope: Integer;
+    LMembers: TList<Integer>;
+  begin
+    LScope := LM.Symbols[ASym].MemberScope;
+    if (LScope = NIL_SCOPE) or (ADepth > 8) then
+      Exit;
+    LMembers := TList<Integer>.Create;
+    try
+      LM.EnumScopeDeep(LScope,
+        procedure(AMember, AIn: Integer)
+        begin
+          if AIn = LScope then
+            LMembers.Add(AMember);
+        end);
+      for var LMem in LMembers do
+        case LM.Symbols[LMem].Kind of
+          skRoutine:
+            if AAll or (sfInline in LM.Symbols[LMem].Flags) then
+              AddBody(LMem, ADecl);
+          skType:
+            AddMembers(LMem, ADecl, AAll or (sfGeneric in
+              LM.Symbols[LMem].Flags), ADepth + 1);
+        end;
+    finally
+      LMembers.Free;
+    end;
+  end;
+
+  procedure Pack(APairs: TList<Int64>; ACount: Integer;
+    var AStart, AItems: TArray<Integer>);
+  var
+    LArr: TArray<Int64>;
+    LN, LFrom: Integer;
+  begin
+    LArr := APairs.ToArray;
+    TArray.Sort<Int64>(LArr);
+    AStart := nil;
+    SetLength(AStart, ACount + 1);
+    AItems := nil;
+    SetLength(AItems, Length(LArr));
+    LN := 0;
+    for var LIdx := 0 to High(LArr) do
+    begin
+      if (LIdx > 0) and (LArr[LIdx] = LArr[LIdx - 1]) then
+        Continue;
+      LFrom := Integer(LArr[LIdx] shr 32);
+      Inc(AStart[LFrom + 1]);
+      AItems[LN] := Integer(LArr[LIdx] and $FFFFFFFF);
+      Inc(LN);
+    end;
+    SetLength(AItems, LN);
+    for var LIdx := 1 to ACount do
+      Inc(AStart[LIdx], AStart[LIdx - 1]);
+  end;
+
+begin
+  for LMid := 0 to FA.Proj.ModelCount - 1 do
+  begin
+    if not FWs.IsOwnFile(FA.Proj.ModelFile(LMid)) or
+       not FA.Proj.EnsureHydrated(LMid) or
+       (ModuleChild(FA.Proj.Model(LMid), nkInterfaceSec) = NIL_NODE) then
+      Continue;
+    FUnitOf.Add(LMid, Length(FMids));
+    FMids := FMids + [LMid];
+  end;
+  SetLength(FRanges, Length(FMids));
+  SetLength(FUnitDecls, Length(FMids));
+  LRanges := TList<TRcRange>.Create;
+  LSyms := TList<Integer>.Create;
+  LBodies := TDictionary<Integer, Boolean>.Create;
+  LBinds := TList<Int64>.Create;
+  LEdges := TList<Int64>.Create;
+  LStack := TStack<Integer>.Create;
+  try
+    // The declarations of each interface, and the bodies part of them.
+    for var LU := 0 to High(FMids) do
+    begin
+      LMid := FMids[LU];
+      LM := FA.Proj.Model(LMid);
+      LRanges.Clear;
+      LIface := ModuleChild(LM, nkInterfaceSec);
+      LC := LM.Tree.Nodes[LIface].FirstChild;
+      while LC <> NIL_NODE do
+      begin
+        case LM.Tree.Nodes[LC].Kind of
+          nkTypeSec, nkConstSec, nkVarSec:
+            begin
+              LI := LM.Tree.Nodes[LC].FirstChild;
+              while LI <> NIL_NODE do
+              begin
+                if LM.Tree.Nodes[LI].Kind in [nkTypeDecl, nkConstDecl,
+                  nkVarDecl] then
+                  AddItem(LU, LI);
+                LI := LM.Tree.Nodes[LI].NextSibling;
+              end;
+            end;
+          nkRoutine:
+            AddItem(LU, LC);
+        end;
+        LC := LM.Tree.Nodes[LC].NextSibling;
+      end;
+      FRanges[LU] := LRanges.ToArray;
+      TArray.Sort<TRcRange>(FRanges[LU], TComparer<TRcRange>.Construct(
+        function(const L, R: TRcRange): Integer
+        begin
+          Result := L.First - R.First;
+        end));
+      if (LM.InterfaceScope < 0) or (LM.InterfaceScope >= LM.Scopes.Count) then
+        Continue;
+      LSyms.Clear;
+      LM.EnumScopeDeep(LM.InterfaceScope,
+        procedure(ASym, AScope: Integer)
+        begin
+          if (LM.Scopes[AScope].Kind = sckUnit) and
+             (LM.Symbols[ASym].Kind in [skRoutine, skType]) then
+            LSyms.Add(ASym);
+        end);
+      LBodies.Clear;
+      for LS in LSyms do
+      begin
+        LD := DeclOfSym(LU, LS);
+        if LD < 0 then
+          Continue;
+        if LM.Symbols[LS].Kind = skRoutine then
+        begin
+          if (sfInline in LM.Symbols[LS].Flags) or RcGenericRoutine(LM, LS) then
+            AddBody(LS, LD);
+        end
+        else
+          AddMembers(LS, LD, sfGeneric in LM.Symbols[LS].Flags, 0);
+      end;
+      if LRanges.Count > Length(FRanges[LU]) then
+      begin
+        FRanges[LU] := LRanges.ToArray;
+        TArray.Sort<TRcRange>(FRanges[LU], TComparer<TRcRange>.Construct(
+          function(const L, R: TRcRange): Integer
+          begin
+            Result := L.First - R.First;
+          end));
+      end;
+    end;
+
+    // Who binds each, and what takes each in: another unit's names...
+    for var LU := 0 to High(FMids) do
+    begin
+      LMid := FMids[LU];
+      LM := FA.Proj.Model(LMid);
+      for var LPair in LM.ExtRefMap do
+      begin
+        LI := UnitOfMid(LPair.Value.UnitId);
+        if (LI < 0) or (LI = LU) then
+          Continue;
+        LS := DeclOfSym(LI, LPair.Value.Sym);
+        if LS < 0 then
+          Continue;
+        LBinds.Add((Int64(LS) shl 32) or Cardinal(LU));
+        LD := DeclAt(LU, LM.Tree.Nodes[LPair.Key].FirstToken, True);
+        if LD >= 0 then
+          LEdges.Add((Int64(LS) shl 32) or Cardinal(LD));
+      end;
+      // ... and the unit's own, inside its declarations and their bodies.
+      for var LR in FRanges[LU] do
+      begin
+        LStack.Clear;
+        LStack.Push(LR.Root);
+        while LStack.Count > 0 do
+        begin
+          LNode := LStack.Pop;
+          if (LNode <= High(LM.RefMap)) and (LM.RefMap[LNode] <> NIL_SYM) then
+          begin
+            LS := DeclOfSym(LU, LM.RefMap[LNode]);
+            if (LS >= 0) and (LS <> LR.Decl) then
+              LEdges.Add((Int64(LS) shl 32) or Cardinal(LR.Decl));
+          end;
+          LC := LM.Tree.Nodes[LNode].FirstChild;
+          while LC <> NIL_NODE do
+          begin
+            LStack.Push(LC);
+            LC := LM.Tree.Nodes[LC].NextSibling;
+          end;
+        end;
+      end;
+    end;
+    Pack(LBinds, Length(FDeclUnit), FBindStart, FBind);
+    Pack(LEdges, Length(FDeclUnit), FNextStart, FNext);
+  finally
+    LStack.Free;
+    LEdges.Free;
+    LBinds.Free;
+    LBodies.Free;
+    LSyms.Free;
+    LRanges.Free;
+  end;
+end;
+
+procedure TRcGraph.Cascade(const AStart: TArray<Integer>;
+  out AVia: TArray<Integer>; out ABound: TArray<TArray<Integer>>);
+var
+  LQueue: TList<Integer>;
+  LAt, LD: Integer;
+begin
+  AVia := nil;
+  SetLength(AVia, Length(FDeclUnit));
+  for var LI := 0 to High(AVia) do
+    AVia[LI] := -2;
+  ABound := nil;
+  SetLength(ABound, Length(FMids));
+  LQueue := TList<Integer>.Create;
+  try
+    for LD in AStart do
+      if AVia[LD] = -2 then
+      begin
+        AVia[LD] := -1;
+        LQueue.Add(LD);
+      end;
+    LAt := 0;
+    while LAt < LQueue.Count do
+    begin
+      LD := LQueue[LAt];
+      for var LE := FBindStart[LD] to FBindStart[LD + 1] - 1 do
+        ABound[FBind[LE]] := ABound[FBind[LE]] + [LD];
+      for var LE := FNextStart[LD] to FNextStart[LD + 1] - 1 do
+        if AVia[FNext[LE]] = -2 then
+        begin
+          AVia[FNext[LE]] := LD;
+          LQueue.Add(FNext[LE]);
+        end;
+      Inc(LAt);
+    end;
+  finally
+    LQueue.Free;
+  end;
+end;
+
+// Tarjan's components over the declarations, iteratively; a component is
+// complete only after every one it reaches, so its units are its own and
+// theirs.
+procedure TRcGraph.ComputeBits;
+var
+  LN, LWords, LCounter, LV, LW, LComp: Integer;
+  LIndex, LLow, LEdgeAt: TArray<Integer>;
+  LOnStack: TArray<Boolean>;
+  LStack, LCall: TList<Integer>;
+  LBits: TArray<UInt64>;
+  LMembers: TList<Integer>;
+begin
+  if FBits <> nil then
+    Exit;
+  LN := Length(FDeclUnit);
+  LWords := (Length(FMids) + 63) shr 6;
+  SetLength(FScc, LN);
+  SetLength(LIndex, LN);
+  SetLength(LLow, LN);
+  SetLength(LEdgeAt, LN);
+  SetLength(LOnStack, LN);
+  for var LI := 0 to LN - 1 do
+  begin
+    LIndex[LI] := -1;
+    FScc[LI] := -1;
+  end;
+  LCounter := 0;
+  LStack := TList<Integer>.Create;
+  LCall := TList<Integer>.Create;
+  LMembers := TList<Integer>.Create;
+  try
+    for var LRoot := 0 to LN - 1 do
+    begin
+      if LIndex[LRoot] >= 0 then
+        Continue;
+      LCall.Add(LRoot);
+      LIndex[LRoot] := LCounter;
+      LLow[LRoot] := LCounter;
+      Inc(LCounter);
+      LEdgeAt[LRoot] := FNextStart[LRoot];
+      LStack.Add(LRoot);
+      LOnStack[LRoot] := True;
+      while LCall.Count > 0 do
+      begin
+        LV := LCall.Last;
+        if LEdgeAt[LV] < FNextStart[LV + 1] then
+        begin
+          LW := FNext[LEdgeAt[LV]];
+          Inc(LEdgeAt[LV]);
+          if LIndex[LW] < 0 then
+          begin
+            LIndex[LW] := LCounter;
+            LLow[LW] := LCounter;
+            Inc(LCounter);
+            LEdgeAt[LW] := FNextStart[LW];
+            LStack.Add(LW);
+            LOnStack[LW] := True;
+            LCall.Add(LW);
+          end
+          else if LOnStack[LW] then
+            LLow[LV] := Min(LLow[LV], LIndex[LW]);
+          Continue;
+        end;
+        LCall.Delete(LCall.Count - 1);
+        if LCall.Count > 0 then
+          LLow[LCall.Last] := Min(LLow[LCall.Last], LLow[LV]);
+        if LLow[LV] <> LIndex[LV] then
+          Continue;
+        // LV roots a component: pop it, then its units.
+        LComp := Length(FBits);
+        LMembers.Clear;
+        repeat
+          LW := LStack.Last;
+          LStack.Delete(LStack.Count - 1);
+          LOnStack[LW] := False;
+          FScc[LW] := LComp;
+          LMembers.Add(LW);
+        until LW = LV;
+        LBits := nil;
+        SetLength(LBits, LWords);
+        for var LM2 in LMembers do
+        begin
+          SetBit(LBits, FDeclUnit[LM2]);
+          for var LE := FBindStart[LM2] to FBindStart[LM2 + 1] - 1 do
+            SetBit(LBits, FBind[LE]);
+          for var LE := FNextStart[LM2] to FNextStart[LM2 + 1] - 1 do
+            if FScc[FNext[LE]] <> LComp then
+              for var LX := 0 to LWords - 1 do
+                LBits[LX] := LBits[LX] or FBits[FScc[FNext[LE]]][LX];
+        end;
+        FBits := FBits + [LBits];
+      end;
+    end;
+  finally
+    LMembers.Free;
+    LCall.Free;
+    LStack.Free;
+  end;
+end;
+
+function TRcGraph.DeclBits(AD: Integer): TArray<UInt64>;
+begin
+  ComputeBits;
+  Result := FBits[FScc[AD]];
+end;
+
+// The own units of AA's program ARoot reaches, as AG's unit bits.
+function RcProgramBits(AG: TRcGraph; AL: TLintAnalysis;
+  ARoot: Integer): TArray<UInt64>;
+var
+  LReach: TArray<Boolean>;
+begin
+  Result := nil;
+  SetLength(Result, (AG.UnitCount + 63) shr 6);
+  LReach := AL.FullReach(ARoot, nil);
+  for var LU := 0 to AG.UnitCount - 1 do
+    if LReach[AG.UnitMid(LU)] then
+      SetBit(Result, LU);
+end;
+
+function ProgramNameOf(AA: TMcpAnalysis; ARoot: Integer): string;
+begin
+  Result := ChangeFileExt(ExtractFileName(AA.Proj.ModelFile(ARoot)), '');
+end;
+
+// 'uShapes.TShape' - a declaration named from another unit.
+function RcQualified(AG: TRcGraph; AD, AHome: Integer): string;
+begin
+  Result := AG.DeclName(AD);
+  if AG.DeclUnit(AD) <> AHome then
+    Result := UnitNameOfFile(AG.A.Proj.ModelFile(AG.UnitMid(AG.DeclUnit(AD))))
+      + '.' + Result;
+end;
+
+// The cascade of the declarations AStarts holds per analysis (nil: not in
+// it), rendered: AWhat names what changes. A unit several analyses hold is
+// built in each configuration: the units recompiled are those of every one,
+// a row per file with what it binds in any; a declaration's count is the
+// largest in one.
+function RcCascadeText(AWs: TMcpWorkspace; AGraphs: TObjectList<TRcGraph>;
+  ALints: TObjectList<TLintAnalysis>; const AStarts: TArray<TArray<Integer>>;
+  const AWhat, ANote: string; AUnitMode: Boolean; ALimit: Integer): string;
+var
+  LHome, LN, LTotal, LShown, LQuiet: Integer;
+  LG: TRcGraph;
+  LVia: TArray<Integer>;
+  LBound: TArray<TArray<Integer>>;
+  LProgs: TDictionary<string, string>;
+  LProgCount, LDeclCount, LSpreadCount: TDictionary<string, Integer>;
+  LFiles: TDictionary<string, TArray<string>>;   // file -> what it binds
+  LPBits: TArray<UInt64>;
+  LName, LHomeFile, LKey: string;
+  LParts, LKeys, LBinds: TArray<string>;
+  LSb: TStringBuilder;
+
+  function Recompiled(AG: TRcGraph; const ABound: TArray<TArray<Integer>>;
+    const AVia: TArray<Integer>; AU: Integer): Boolean;
+  begin
+    Result := ABound[AU] <> nil;
+    if not Result then
+      for var LD in AG.DeclsOf(AU) do
+        if AVia[LD] = -1 then
+          Exit(True);
+  end;
+
+  // 'a 3, b 2 and 4 more', the largest first.
+  function Ranked(ACounts: TDictionary<string, Integer>): TArray<string>;
+  var
+    LArr: TArray<TPair<string, Integer>>;
+  begin
+    LArr := ACounts.ToArray;
+    TArray.Sort<TPair<string, Integer>>(LArr,
+      TComparer<TPair<string, Integer>>.Construct(
+      function(const L, R: TPair<string, Integer>): Integer
+      begin
+        Result := R.Value - L.Value;
+        if Result = 0 then
+          Result := CompareText(L.Key, R.Key);
+      end));
+    Result := nil;
+    for var LP in LArr do
+      Result := Result + [Format('%s %d', [LP.Key, LP.Value])];
+  end;
+
+  procedure KeepMax(ACounts: TDictionary<string, Integer>; const AKey: string;
+    AValue: Integer);
+  var
+    LOld: Integer;
+  begin
+    if not ACounts.TryGetValue(AKey, LOld) or (AValue > LOld) then
+      ACounts.AddOrSetValue(AKey, AValue);
+  end;
+
+begin
+  LHomeFile := '';
+  LQuiet := 0;
+  LProgs := TDictionary<string, string>.Create;
+  LProgCount := TDictionary<string, Integer>.Create;
+  LDeclCount := TDictionary<string, Integer>.Create;
+  LSpreadCount := TDictionary<string, Integer>.Create;
+  LFiles := TDictionary<string, TArray<string>>.Create;
+  LSb := TStringBuilder.Create;
+  try
+    for var LGi := 0 to AGraphs.Count - 1 do
+    begin
+      if AStarts[LGi] = nil then
+        Continue;
+      LG := AGraphs[LGi];
+      LHome := LG.DeclUnit(AStarts[LGi][0]);
+      LHomeFile := LG.A.Proj.ModelFile(LG.UnitMid(LHome));
+      LG.Cascade(AStarts[LGi], LVia, LBound);
+      // A row per unit recompiled, with the changed declarations it binds.
+      for var LU := 0 to LG.UnitCount - 1 do
+      begin
+        if (LU = LHome) or (LBound[LU] = nil) then
+          Continue;
+        LKey := LG.A.Proj.ModelFile(LG.UnitMid(LU));
+        if not LFiles.TryGetValue(LowerCase(LKey), LBinds) then
+          LBinds := [LKey];
+        for var LD in LBound[LU] do
+          if not MatchText(RcQualified(LG, LD, LHome), LBinds) then
+            LBinds := LBinds + [RcQualified(LG, LD, LHome)];
+        LFiles.AddOrSetValue(LowerCase(LKey), LBinds);
+      end;
+      // Per program of the analysis reaching the unit changed: how many of
+      // its own units recompile, of how many.
+      for var LRoot in ALints[LGi].Roots do
+      begin
+        LPBits := RcProgramBits(LG, ALints[LGi], LRoot);
+        if not BitSet(LPBits, LHome) then
+          Continue;
+        LN := 0;
+        for var LU := 0 to LG.UnitCount - 1 do
+          if BitSet(LPBits, LU) and Recompiled(LG, LBound, LVia, LU) then
+            Inc(LN);
+        LName := ProgramNameOf(LG.A, LRoot);
+        if not LProgCount.TryGetValue(LName, LTotal) or (LN - 1 > LTotal) then
+        begin
+          LProgCount.AddOrSetValue(LName, LN - 1);
+          LProgs.AddOrSetValue(LName, Format('%s %d of its %d', [LName, LN - 1,
+            BitsCount(LPBits) - 1]));
+        end;
+      end;
+      // A unit's declarations, by what a change to each recompiles.
+      if AUnitMode then
+        for var LD in AStarts[LGi] do
+          KeepMax(LDeclCount, LG.DeclName(LD), BitsCount(LG.DeclBits(LD)) - 1);
+      // The declarations of other units that change with it and are bound.
+      for var LD := 0 to High(LVia) do
+        if (LVia[LD] >= 0) and (LG.DeclUnit(LD) <> LHome) then
+        begin
+          LN := 0;
+          for var LU := 0 to LG.UnitCount - 1 do
+            for var LB in LBound[LU] do
+              if LB = LD then
+                Inc(LN);
+          if LN > 0 then
+            KeepMax(LSpreadCount, Format('%s (takes in %s)', [RcQualified(LG,
+              LD, LHome), RcQualified(LG, LVia[LD], LG.DeclUnit(LD))]), LN);
+        end;
+    end;
+
+    LKeys := LProgs.Keys.ToArray;
+    TArray.Sort<string>(LKeys, TComparer<string>.Construct(
+      function(const L, R: string): Integer
+      begin
+        Result := LProgCount[R] - LProgCount[L];
+        if Result = 0 then
+          Result := CompareText(L, R);
+      end));
+    LParts := nil;
+    for var LK in LKeys do
+      LParts := LParts + [LProgs[LK]];
+    LName := UnitNameOfFile(LHomeFile);
+    if LFiles.Count = 0 then
+      LSb.AppendLine(Format('%s recompiles no own unit but %s - none binds '
+        + 'what changes', [AWhat, LName]))
+    else
+      LSb.AppendLine(Format('%s recompiles %s besides %s%s', [AWhat,
+        Plural(LFiles.Count, 'own unit'), LName, IfThen(LParts <> nil,
+        ' - ' + NamedList(LParts, MAX_METRIC_NAMED), '')]));
+    if ANote <> '' then
+      LSb.AppendLine(ANote);
+    if LDeclCount.Count > 1 then
+    begin
+      for var LP in LDeclCount.ToArray do
+        if LP.Value <= 0 then
+        begin
+          LDeclCount.Remove(LP.Key);
+          Inc(LQuiet);
+        end;
+      if LDeclCount.Count > 0 then
+        LSb.AppendLine(Format('by declaration, the units a change to each '
+          + 'recompiles: %s%s', [NamedList(Ranked(LDeclCount),
+          MAX_METRIC_NAMED), IfThen(LQuiet > 0, Format('; %d recompile no '
+          + 'other unit', [LQuiet]), '')]));
+    end;
+    if LSpreadCount.Count > 0 then
+      LSb.AppendLine('it spreads through declarations of other units taking '
+        + 'it in, with the units binding each: ' + NamedList(Ranked(
+        LSpreadCount), MAX_METRIC_NAMED));
+    LKeys := LFiles.Keys.ToArray;
+    TArray.Sort<string>(LKeys);
+    LShown := 0;
+    for var LK in LKeys do
+    begin
+      if LShown >= ALimit then
+        Break;
+      LBinds := LFiles[LK];
+      LSb.AppendLine(Format('  %s - binds %s', [AWs.RelPath(LBinds[0]),
+        NamedList(Copy(LBinds, 1, MaxInt), 3)]));
+      Inc(LShown);
+    end;
+    if (LShown < Length(LKeys)) and (ALimit > 0) then
+      LSb.AppendLine(Format('  ... %d more (raise `limit`)',
+        [Length(LKeys) - LShown]));
+    Result := LSb.ToString.TrimRight;
+  finally
+    LSb.Free;
+    LFiles.Free;
+    LSpreadCount.Free;
+    LDeclCount.Free;
+    LProgCount.Free;
+    LProgs.Free;
+  end;
+end;
+
+function MetricRecompile(AWs: TMcpWorkspace; AArgs: TJSONObject;
+  AGraphs: TObjectList<TRcGraph>; ALints: TObjectList<TLintAnalysis>;
+  ALimit: Integer): string;
+type
+  TRcRank = record
+    FilePath, Progs, Through: string;
+    Count: Integer;
+  end;
+var
+  LTarget: TTarget;
+  LFile, LNote, LWhat, LName: string;
+  LStarts: TArray<TArray<Integer>>;
+  LG: TRcGraph;
+  LU, LD, LMid, LN, LShown, LQuiet, LMax: Integer;
+  LAny, LIsSym, LBody: Boolean;
+  LM: TPasSemaModel;
+  LGid: TDictionary<string, Integer>;
+  LGFiles: TList<string>;
+  LUnitGid: TArray<Integer>;
+  LAcc: TDictionary<Integer, TArray<UInt64>>;
+  LProgsOf, LDeclsOf: TObjectDictionary<Integer, TDictionary<string, Integer>>;
+  LCounts: TDictionary<string, Integer>;
+  LRank: TRcRank;
+  LBits, LPBits, LAnd, LAll: TArray<UInt64>;
+  LArr: TArray<TRcRank>;
+  LParts: TArray<string>;
+  LDecls: TArray<TPair<string, Integer>>;
+  LSb: TStringBuilder;
+begin
+  SetLength(LStarts, AGraphs.Count);
+  LTarget := Default(TTarget);
+  LIsSym := False;
+  LFile := '';
+  if (ArgStr(AArgs, 'symbol') <> '') or ((ArgStr(AArgs, 'file') <> '') and
+     (ArgInt(AArgs, 'line', 0) > 0)) then
+  begin
+    LTarget := ResolveOneOrOverloads(AWs, AArgs)[0];
+    LIsSym := LTarget.Kind = tkSymbol;
+    if LTarget.Kind = tkUnit then
+      LFile := LTarget.DeclFile
+    else if not LIsSym then
+      raise EToolError.Create(LTarget.Name + ' is not a declaration of the '
+        + 'group''s code - `recompile` follows a change of an own unit''s '
+        + 'declaration');
+  end
+  else if ArgStr(AArgs, 'file') <> '' then
+    LFile := ArgFile(AWs, AArgs);
+
+  if LIsSym then
+  begin
+    LAny := False;
+    LBody := False;
+    for var LGi := 0 to AGraphs.Count - 1 do
+    begin
+      LG := AGraphs[LGi];
+      LMid := LTarget.Ids[LG.A.Index].Mid;
+      if LMid < 0 then
+        Continue;
+      LU := LG.UnitOfMid(LMid);
+      if LU < 0 then
+        Continue;
+      LD := LG.DeclOfSym(LU, LTarget.Ids[LG.A.Index].Sym);
+      if LD < 0 then
+        Continue;
+      LStarts[LGi] := [LD];
+      LAny := True;
+      LM := LG.A.Proj.Model(LMid);
+      LName := LG.DeclName(LD);
+      LBody := (LM.Symbols[LTarget.Ids[LG.A.Index].Sym].Kind = skRoutine) and
+        not LG.DeclHasBody(LD);
+    end;
+    if not LAny then
+    begin
+      if not LTarget.Own then
+        raise EToolError.Create(Format('%s is declared in %s, not in the '
+          + 'group''s own code - its .dcu is prebuilt, and a change to it is '
+          + 'not the project''s build', [LTarget.Name, AWs.RelPath(
+          LTarget.DeclFile)]));
+      Exit(Format('%s (%s:%d) is not declared in an interface: a change to '
+        + 'it recompiles %s alone', [LTarget.Name, AWs.RelPath(
+        LTarget.DeclFile), LTarget.DeclLine, ExtractFileName(
+        LTarget.DeclFile)]));
+    end;
+    LWhat := Format('a change to %s (%s:%d)', [LTarget.Name, AWs.RelPath(
+      LTarget.DeclFile), LTarget.DeclLine]);
+    LNote := '';
+    if not SameText(LName, LTarget.Name) and not SameText(LName,
+      Copy(LTarget.Name, LastDelimiter('.', LTarget.Name) + 1, MaxInt)) then
+      LNote := Format('%s is part of %s: dcc tracks the declaration a unit '
+        + 'binds, so a change to it is a change to %s', [LTarget.Name, LName,
+        LName]);
+    if LBody then
+      LNote := LNote + IfThen(LNote <> '', '; ', '') + 'that is its header: '
+        + 'a change to its body recompiles ' + ExtractFileName(
+        LTarget.DeclFile) + ' alone';
+    Exit(RcCascadeText(AWs, AGraphs, ALints, LStarts, LWhat, LNote, False,
+      ALimit));
+  end;
+
+  if LFile <> '' then
+  begin
+    LAny := False;
+    LParts := nil;
+    for var LGi := 0 to AGraphs.Count - 1 do
+    begin
+      LG := AGraphs[LGi];
+      LU := LG.UnitOfMid(LG.A.Proj.ModelIdOf(LFile));
+      if (LU < 0) or (LG.DeclsOf(LU) = nil) then
+        Continue;
+      LStarts[LGi] := LG.DeclsOf(LU);
+      LAny := True;
+      if LParts = nil then
+        for LD in LG.DeclsOf(LU) do
+          if LG.DeclHasBody(LD) then
+            LParts := LParts + [LG.DeclName(LD)];
+    end;
+    if not LAny then
+    begin
+      if not AWs.IsOwnFile(LFile) then
+        raise EToolError.Create(AWs.RelPath(LFile) + ' is not in the group''s '
+          + 'own code - its .dcu is prebuilt');
+      raise EToolError.Create(AWs.RelPath(LFile) + ' is no unit whose '
+        + 'interface declares anything an analysis holds - a program''s, '
+        + 'a package''s and an include''s declarations are bound by no other '
+        + 'unit');
+    end;
+    LNote := 'a change in its implementation recompiles it alone';
+    if LParts <> nil then
+      LNote := LNote + ', except in the bodies of its inline routines and generic types, '
+        + 'part of their declarations: ' + NamedList(LParts, MAX_METRIC_NAMED);
+    Exit(RcCascadeText(AWs, AGraphs, ALints, LStarts, Format('a change to '
+      + 'the interface of %s', [AWs.RelPath(LFile)]), LNote, True, ALimit));
+  end;
+
+  // Every own unit, ranked by what a change to its interface recompiles: in
+  // every configuration holding it, by file; a program's and a
+  // declaration's count the largest in one.
+  LGid := TDictionary<string, Integer>.Create;
+  LGFiles := TList<string>.Create;
+  LAcc := TDictionary<Integer, TArray<UInt64>>.Create;
+  LProgsOf := TObjectDictionary<Integer, TDictionary<string, Integer>>.Create(
+    [doOwnsValues]);
+  LDeclsOf := TObjectDictionary<Integer, TDictionary<string, Integer>>.Create(
+    [doOwnsValues]);
+  LSb := TStringBuilder.Create;
+  try
+    for var LGi := 0 to AGraphs.Count - 1 do
+      for LU := 0 to AGraphs[LGi].UnitCount - 1 do
+      begin
+        LFile := AGraphs[LGi].A.Proj.ModelFile(AGraphs[LGi].UnitMid(LU));
+        if LGid.TryAdd(LowerCase(LFile), LGFiles.Count) then
+          LGFiles.Add(LFile);
+      end;
+    for var LGi := 0 to AGraphs.Count - 1 do
+    begin
+      LG := AGraphs[LGi];
+      LG.ComputeBits;
+      SetLength(LUnitGid, LG.UnitCount);
+      for LU := 0 to LG.UnitCount - 1 do
+        LUnitGid[LU] := LGid[LowerCase(LG.A.Proj.ModelFile(LG.UnitMid(LU)))];
+      for LU := 0 to LG.UnitCount - 1 do
+      begin
+        LBits := nil;
+        SetLength(LBits, (LG.UnitCount + 63) shr 6);
+        SetBit(LBits, LU);
+        if not LDeclsOf.TryGetValue(LUnitGid[LU], LCounts) then
+        begin
+          LCounts := TDictionary<string, Integer>.Create;
+          LDeclsOf.Add(LUnitGid[LU], LCounts);
+        end;
+        for LD in LG.DeclsOf(LU) do
+        begin
+          LPBits := LG.DeclBits(LD);
+          for var LX := 0 to High(LBits) do
+            LBits[LX] := LBits[LX] or LPBits[LX];
+          LN := BitsCount(LPBits) - 1;
+          if (LN > 0) and (not LCounts.TryGetValue(LG.DeclName(LD), LMax) or
+             (LN > LMax)) then
+            LCounts.AddOrSetValue(LG.DeclName(LD), LN);
+        end;
+        // In the group's file numbering.
+        if not LAcc.TryGetValue(LUnitGid[LU], LAll) then
+          SetLength(LAll, (LGFiles.Count + 63) shr 6);
+        for var LV := 0 to LG.UnitCount - 1 do
+          if BitSet(LBits, LV) then
+            SetBit(LAll, LUnitGid[LV]);
+        LAcc.AddOrSetValue(LUnitGid[LU], LAll);
+        if not LProgsOf.TryGetValue(LUnitGid[LU], LCounts) then
+        begin
+          LCounts := TDictionary<string, Integer>.Create;
+          LProgsOf.Add(LUnitGid[LU], LCounts);
+        end;
+        for var LRoot in ALints[LGi].Roots do
+        begin
+          LPBits := RcProgramBits(LG, ALints[LGi], LRoot);
+          if not BitSet(LPBits, LU) then
+            Continue;
+          LAnd := Copy(LBits);
+          for var LX := 0 to High(LAnd) do
+            LAnd[LX] := LAnd[LX] and LPBits[LX];
+          LN := BitsCount(LAnd) - 1;
+          if not LCounts.TryGetValue(ProgramNameOf(LG.A, LRoot), LMax) or
+             (LN > LMax) then
+            LCounts.AddOrSetValue(ProgramNameOf(LG.A, LRoot), LN);
+        end;
+      end;
+    end;
+    LArr := nil;
+    for var LPair in LAcc do
+    begin
+      LRank := Default(TRcRank);
+      LRank.FilePath := LGFiles[LPair.Key];
+      LRank.Count := BitsCount(LPair.Value) - 1;
+      LDecls := LDeclsOf[LPair.Key].ToArray;
+      TArray.Sort<TPair<string, Integer>>(LDecls,
+        TComparer<TPair<string, Integer>>.Construct(
+        function(const L, R: TPair<string, Integer>): Integer
+        begin
+          Result := R.Value - L.Value;
+          if Result = 0 then
+            Result := CompareText(L.Key, R.Key);
+        end));
+      LParts := nil;
+      for var LP in LDecls do
+        LParts := LParts + [Format('%s %d', [LP.Key, LP.Value])];
+      LRank.Through := NamedList(LParts, 2);
+      LDecls := LProgsOf[LPair.Key].ToArray;
+      TArray.Sort<TPair<string, Integer>>(LDecls,
+        TComparer<TPair<string, Integer>>.Construct(
+        function(const L, R: TPair<string, Integer>): Integer
+        begin
+          Result := R.Value - L.Value;
+          if Result = 0 then
+            Result := CompareText(L.Key, R.Key);
+        end));
+      LParts := nil;
+      for var LP in LDecls do
+        LParts := LParts + [Format('%s %d', [LP.Key, LP.Value])];
+      LRank.Progs := string.Join(', ', LParts);
+      LArr := LArr + [LRank];
+    end;
+    TArray.Sort<TRcRank>(LArr, TComparer<TRcRank>.Construct(
+      function(const L, R: TRcRank): Integer
+      begin
+        Result := R.Count - L.Count;
+        if Result = 0 then
+          Result := CompareText(L.FilePath, R.FilePath);
+      end));
+    LQuiet := 0;
+    for var LR in LArr do
+      if LR.Count = 0 then
+        Inc(LQuiet);
+    LSb.AppendLine(Format('%s of %s recompile other own units when their '
+      + 'interface changes (dcc''s Make recompiles a unit when a declaration '
+      + 'it binds changes); %d recompile none - by how many, per program:',
+      [IntToStr(Length(LArr) - LQuiet), Plural(Length(LArr), 'own unit'),
+      LQuiet]));
+    LShown := 0;
+    for var LR in LArr do
+    begin
+      if (LShown >= ALimit) or (LR.Count = 0) then
+        Break;
+      LSb.AppendLine(Format('%s: %d%s%s', [AWs.RelPath(LR.FilePath), LR.Count,
+        IfThen(LR.Progs <> '', ' (' + LR.Progs + ')', ''), IfThen(
+        LR.Through <> '', ' - most through ' + LR.Through, '')]));
+      Inc(LShown);
+    end;
+    if (LShown < Length(LArr) - LQuiet) and (ALimit > 0) then
+      LSb.AppendLine(Format('... %d more (raise `limit`; `file` for one '
+        + 'unit''s cascade)', [Length(LArr) - LQuiet - LShown]));
+    Result := LSb.ToString.TrimRight;
+  finally
+    LSb.Free;
+    LDeclsOf.Free;
+    LProgsOf.Free;
+    LAcc.Free;
+    LGFiles.Free;
+    LGid.Free;
+  end;
+end;
+
+type
+  // A `uses` cycle of one analysis: its own units as model ids.
+  TCycle = record
+    A: Integer;
+    Mids: TArray<Integer>;
+    Key: string;
+    Files: TArray<string>;    // lower case, sorted
+    Progs: TArray<string>;    // the programs linking it
+  end;
+
+  // The own units of one analysis and the `uses` entries among them.
+  TCyGraph = record
+    Mids: TArray<Integer>;
+    Index: TDictionary<Integer, Integer>;
+    Outs: TArray<TArray<Integer>>;
+    Impl: TArray<TArray<Boolean>>;
+  end;
+
+function CyBuild(AWs: TMcpWorkspace; AA: TMcpAnalysis): TCyGraph;
+var
+  LM: TPasSemaModel;
+  LImplSec, LImplTok, LT: Integer;
+begin
+  Result := Default(TCyGraph);
+  Result.Index := TDictionary<Integer, Integer>.Create;
+  for var LMid := 0 to AA.Proj.ModelCount - 1 do
+    if AWs.IsOwnFile(AA.Proj.ModelFile(LMid)) and
+       AA.Proj.EnsureHydrated(LMid) and
+       (ModuleChild(AA.Proj.Model(LMid), nkInterfaceSec) <> NIL_NODE) then
+    begin
+      Result.Index.Add(LMid, Length(Result.Mids));
+      Result.Mids := Result.Mids + [LMid];
+    end;
+  SetLength(Result.Outs, Length(Result.Mids));
+  SetLength(Result.Impl, Length(Result.Mids));
+  for var LU := 0 to High(Result.Mids) do
+  begin
+    LM := AA.Proj.Model(Result.Mids[LU]);
+    LImplSec := ModuleChild(LM, nkImplementationSec);
+    if LImplSec = NIL_NODE then
+      LImplTok := MaxInt
+    else
+      LImplTok := LM.Tree.Nodes[LImplSec].FirstToken;
+    for var LE in LM.UsesList do
+      if (LE.UnitId >= 0) and (LE.NameNode <> NIL_NODE) and
+         Result.Index.TryGetValue(LE.UnitId, LT) and (LT <> LU) then
+      begin
+        Result.Outs[LU] := Result.Outs[LU] + [LT];
+        Result.Impl[LU] := Result.Impl[LU] + [LM.Tree.Nodes[
+          LE.NameNode].FirstToken >= LImplTok];
+      end;
+  end;
+end;
+
+function CyEdgeKey(AFromMid, AToMid: Integer): Int64;
+begin
+  Result := (Int64(AFromMid) shl 32) or Cardinal(AToMid);
+end;
+
+// The components of two or more units among AIn (nil: all), the edges in
+// ASkip (by model ids) left out, largest first.
+function CySccs(const AG: TCyGraph; AIn: TDictionary<Integer, Boolean>;
+  ASkip: TDictionary<Int64, Boolean>): TArray<TArray<Integer>>;
+var
+  LN, LCounter, LV, LW: Integer;
+  LIndex, LLow, LEdgeAt: TArray<Integer>;
+  LOnStack: TArray<Boolean>;
+  LStack, LCall: TList<Integer>;
+  LComp: TArray<Integer>;
+
+  // The next edge of LV to follow, -1 past the last.
+  function NextOf(AV: Integer): Integer;
+  begin
+    Result := -1;
+    while LEdgeAt[AV] <= High(AG.Outs[AV]) do
+    begin
+      Result := AG.Outs[AV][LEdgeAt[AV]];
+      Inc(LEdgeAt[AV]);
+      if ((AIn = nil) or AIn.ContainsKey(Result)) and ((ASkip = nil) or
+         not ASkip.ContainsKey(CyEdgeKey(AG.Mids[AV], AG.Mids[Result]))) then
+        Exit;
+      Result := -1;
+    end;
+  end;
+
+begin
+  Result := nil;
+  LN := Length(AG.Mids);
+  SetLength(LIndex, LN);
+  SetLength(LLow, LN);
+  SetLength(LEdgeAt, LN);
+  SetLength(LOnStack, LN);
+  for var LI := 0 to LN - 1 do
+    LIndex[LI] := -1;
+  LCounter := 0;
+  LStack := TList<Integer>.Create;
+  LCall := TList<Integer>.Create;
+  try
+    for var LRoot := 0 to LN - 1 do
+    begin
+      if (LIndex[LRoot] >= 0) or ((AIn <> nil) and
+         not AIn.ContainsKey(LRoot)) then
+        Continue;
+      LIndex[LRoot] := LCounter;
+      LLow[LRoot] := LCounter;
+      Inc(LCounter);
+      LStack.Add(LRoot);
+      LOnStack[LRoot] := True;
+      LCall.Add(LRoot);
+      while LCall.Count > 0 do
+      begin
+        LV := LCall.Last;
+        LW := NextOf(LV);
+        if LW >= 0 then
+        begin
+          if LIndex[LW] < 0 then
+          begin
+            LIndex[LW] := LCounter;
+            LLow[LW] := LCounter;
+            Inc(LCounter);
+            LStack.Add(LW);
+            LOnStack[LW] := True;
+            LCall.Add(LW);
+          end
+          else if LOnStack[LW] then
+            LLow[LV] := Min(LLow[LV], LIndex[LW]);
+          Continue;
+        end;
+        LCall.Delete(LCall.Count - 1);
+        if LCall.Count > 0 then
+          LLow[LCall.Last] := Min(LLow[LCall.Last], LLow[LV]);
+        if LLow[LV] <> LIndex[LV] then
+          Continue;
+        LComp := nil;
+        repeat
+          LW := LStack.Last;
+          LStack.Delete(LStack.Count - 1);
+          LOnStack[LW] := False;
+          LComp := LComp + [LW];
+        until LW = LV;
+        if Length(LComp) > 1 then
+          Result := Result + [LComp];
+      end;
+    end;
+  finally
+    LCall.Free;
+    LStack.Free;
+  end;
+  TArray.Sort<TArray<Integer>>(Result, TComparer<TArray<Integer>>.Construct(
+    function(const L, R: TArray<Integer>): Integer
+    begin
+      Result := Length(R) - Length(L);
+    end));
+end;
+
+// The shortest cycle through AFrom inside AIn, as unit indexes from AFrom
+// back to it; nil when there is none.
+function CyShortest(const AG: TCyGraph; AIn: TDictionary<Integer, Boolean>;
+  AFrom: Integer): TArray<Integer>;
+var
+  LParent: TDictionary<Integer, Integer>;
+  LQueue: TList<Integer>;
+  LAt, LV, LLast: Integer;
+begin
+  Result := nil;
+  LParent := TDictionary<Integer, Integer>.Create;
+  LQueue := TList<Integer>.Create;
+  try
+    LQueue.Add(AFrom);
+    LParent.Add(AFrom, -1);
+    LAt := 0;
+    LLast := -1;
+    while (LAt < LQueue.Count) and (LLast < 0) do
+    begin
+      LV := LQueue[LAt];
+      for var LW in AG.Outs[LV] do
+      begin
+        if not AIn.ContainsKey(LW) then
+          Continue;
+        if LW = AFrom then
+        begin
+          LLast := LV;
+          Break;
+        end;
+        if LParent.TryAdd(LW, LV) then
+          LQueue.Add(LW);
+      end;
+      Inc(LAt);
+    end;
+    if LLast < 0 then
+      Exit;
+    Result := [AFrom];
+    LV := LLast;
+    while LV <> AFrom do
+    begin
+      Result := [LV] + Result;
+      LV := LParent[LV];
+    end;
+    Result := [AFrom] + Result;
+  finally
+    LQueue.Free;
+    LParent.Free;
+  end;
+end;
+
+function MetricCycles(AWs: TMcpWorkspace; AArgs: TJSONObject;
+  ALints: TObjectList<TLintAnalysis>; ALimit: Integer): string;
+var
+  LGraphs: TArray<TCyGraph>;
+  LCycles: TList<TCycle>;
+  LCycle, LKeptOne: TCycle;
+  LKept: TList<TCycle>;
+  LOwnSet: TDictionary<string, Boolean>;
+  LFileCycle: TDictionary<string, Integer>;
+  LOnShown: TDictionary<Int64, Integer>;
+  LFile, LPath, LEntry, LF2: string;
+  LFileMid, LOwn, LOnCycles, LShown, LHub, LTotal, LImpl, LButs, LAt,
+    LN: Integer;
+  LParts, LFiles, LCands: TArray<string>;
+  LIn: TDictionary<Integer, Boolean>;
+  LSkip: TDictionary<Int64, Boolean>;
+  LRows: TList<TLintRow>;
+  LEnclosing: TEnclosing;
+  LSb: TStringBuilder;
+  LLeft: TArray<TArray<Integer>>;
+  LUnused: TArray<string>;
+  LDegs: TArray<TPair<Integer, Integer>>;
+  LG: TCyGraph;
+
+  function UnitName(const AG: TCyGraph; AU: Integer; AA: TMcpAnalysis): string;
+  begin
+    Result := UnitNameOfFile(AA.Proj.ModelFile(AG.Mids[AU]));
+  end;
+
+  function IsImpl(const AG: TCyGraph; AFrom, ATo: Integer): Boolean;
+  begin
+    Result := False;
+    for var LI := 0 to High(AG.Outs[AFrom]) do
+      if (AG.Outs[AFrom][LI] = ATo) and AG.Impl[AFrom][LI] then
+        Exit(True);
+  end;
+
+begin
+  LFile := '';
+  if ArgStr(AArgs, 'file') <> '' then
+    LFile := ArgFile(AWs, AArgs);
+  SetLength(LGraphs, ALints.Count);
+  LCycles := TList<TCycle>.Create;
+  LKept := nil;
+  LOwnSet := nil;
+  LFileCycle := nil;
+  LOnShown := nil;
+  LIn := TDictionary<Integer, Boolean>.Create;
+  LSkip := TDictionary<Int64, Boolean>.Create;
+  LRows := TList<TLintRow>.Create;
+  LEnclosing := TEnclosing.Create(AWs);
+  LSb := TStringBuilder.Create;
+  try
+    LOwnSet := TDictionary<string, Boolean>.Create;
+    for var LAi := 0 to ALints.Count - 1 do
+    begin
+      LGraphs[LAi] := CyBuild(AWs, ALints[LAi].A);
+      for var LMid in LGraphs[LAi].Mids do
+        LOwnSet.AddOrSetValue(LowerCase(ALints[LAi].A.Proj.ModelFile(LMid)),
+          True);
+      LFileMid := -1;
+      if LFile <> '' then
+        LFileMid := ALints[LAi].A.Proj.ModelIdOf(LFile);
+      for var LComp in CySccs(LGraphs[LAi], nil, nil) do
+      begin
+        LCycle := Default(TCycle);
+        LCycle.A := LAi;
+        LParts := nil;
+        for var LU in LComp do
+        begin
+          LCycle.Mids := LCycle.Mids + [LGraphs[LAi].Mids[LU]];
+          LParts := LParts + [LowerCase(ALints[LAi].A.Proj.ModelFile(
+            LGraphs[LAi].Mids[LU]))];
+        end;
+        if (LFile <> '') and ((LFileMid < 0) or
+           not MatchText(LowerCase(LFile), LParts)) then
+          Continue;
+        TArray.Sort<string>(LParts);
+        LCycle.Key := string.Join('|', LParts);
+        LCycle.Files := LParts;
+        // The programs of the analysis linking it.
+        for var LRoot in ALints[LAi].Roots do
+          if ALints[LAi].FullReach(LRoot, nil)[LCycle.Mids[0]] then
+            LCycle.Progs := LCycle.Progs + [ProgramNameOf(ALints[LAi].A,
+              LRoot)];
+        LCycles.Add(LCycle);
+      end;
+    end;
+    LOwn := LOwnSet.Count;
+    if (LFile <> '') and not AWs.IsOwnFile(LFile) then
+      raise EToolError.Create(AWs.RelPath(LFile) + ' is not in the group''s '
+        + 'own code - its `uses` are not the project''s to change');
+    // Largest first; a cycle another analysis has whole or within a larger
+    // one is that one, seen from another configuration: its programs are
+    // added to it.
+    LCycles.Sort(TComparer<TCycle>.Construct(
+      function(const L, R: TCycle): Integer
+      begin
+        Result := Length(R.Mids) - Length(L.Mids);
+        if Result = 0 then
+          Result := CompareText(L.Key, R.Key);
+      end));
+    LKept := TList<TCycle>.Create;
+    LFileCycle := TDictionary<string, Integer>.Create;
+    for LCycle in LCycles do
+    begin
+      if not LFileCycle.TryGetValue(LCycle.Files[0], LAt) then
+        LAt := -1
+      else
+        for var LF in LCycle.Files do
+          if not LFileCycle.TryGetValue(LF, LN) or (LN <> LAt) then
+          begin
+            LAt := -1;
+            Break;
+          end;
+      if LAt >= 0 then
+      begin
+        LKeptOne := LKept[LAt];
+        for var LP in LCycle.Progs do
+          if not MatchText(LP, LKeptOne.Progs) then
+            LKeptOne.Progs := LKeptOne.Progs + [LP];
+        LKept[LAt] := LKeptOne;
+        Continue;
+      end;
+      for var LF in LCycle.Files do
+        LFileCycle.TryAdd(LF, LKept.Count);
+      LKept.Add(LCycle);
+    end;
+    LCycles.Clear;
+    LCycles.AddRange(LKept);
+    LOnCycles := LFileCycle.Count;
+    if LCycles.Count = 0 then
+    begin
+      if LFile <> '' then
+        Exit(Format('%s is on no `uses` cycle', [AWs.RelPath(LFile)]));
+      Exit(Format('no `uses` cycle among the %s', [Plural(LOwn,
+        'own unit')]));
+    end;
+    // What lint finds unused on the cycles shown: the binding walk first,
+    // then PasTree's rule (what an inline call or the designer needs) only
+    // for the files where that walk found an entry on a cycle - the rule is
+    // the cost, 20 s for a thousand files on the client group.
+    LOnShown := TDictionary<Int64, Integer>.Create;
+    LFiles := nil;
+    for var LI := 0 to Min(LCycles.Count, Max(ALimit, 1)) - 1 do
+      for var LMid in LCycles[LI].Mids do
+      begin
+        LOnShown.AddOrSetValue((Int64(LCycles[LI].A) shl 32) or LMid, LI);
+        LF2 := ALints[LCycles[LI].A].A.Proj.ModelFile(LMid);
+        if not MatchText(LF2, LFiles) then
+          LFiles := LFiles + [LF2];
+      end;
+    for var LF in LFiles do
+      LintUses(AWs, LF, ALints, LEnclosing, True, False, False, LRows);
+    LCands := nil;
+    for var LRow in LRows do
+      for var LEd in LRow.Edges do
+        if LOnShown.TryGetValue((Int64(LEd.A) shl 32) or LEd.From, LAt) and
+           LOnShown.TryGetValue((Int64(LEd.A) shl 32) or LEd.Target, LN) and
+           (LAt = LN) and not MatchText(LRow.FilePath, LCands) then
+          LCands := LCands + [LRow.FilePath];
+    LRows.Clear;
+    for var LL in ALints do
+      LL.AskTree(LCands);
+    for var LF in LCands do
+      LintUses(AWs, LF, ALints, LEnclosing, True, False, True, LRows);
+    LSb.AppendLine(Format('%s among the %s, %s on %s (-> an interface '
+      + '`uses`, ~> an implementation one: dcc refuses a cycle through '
+      + 'interfaces alone, F2047):', [Plural(LCycles.Count, '`uses` cycle'),
+      Plural(LOwn, 'own unit'), Plural(LOnCycles, 'unit'), IfThen(
+      LCycles.Count = 1, 'it', 'them')]));
+    LShown := 0;
+    for LCycle in LCycles do
+    begin
+      if LShown >= ALimit then
+        Break;
+      Inc(LShown);
+      LG := LGraphs[LCycle.A];
+      LIn.Clear;
+      for var LMid in LCycle.Mids do
+        LIn.Add(LG.Index[LMid], True);
+      // Its units, the most connected first; its entries.
+      LDegs := nil;
+      LTotal := 0;
+      LImpl := 0;
+      for var LMid in LCycle.Mids do
+        LDegs := LDegs + [TPair<Integer, Integer>.Create(LG.Index[LMid], 0)];
+      for var LI := 0 to High(LDegs) do
+        for var LE := 0 to High(LG.Outs[LDegs[LI].Key]) do
+          if LIn.ContainsKey(LG.Outs[LDegs[LI].Key][LE]) then
+          begin
+            Inc(LTotal);
+            if LG.Impl[LDegs[LI].Key][LE] then
+              Inc(LImpl);
+            LDegs[LI].Value := LDegs[LI].Value + 1;
+            for var LJ := 0 to High(LDegs) do
+              if LDegs[LJ].Key = LG.Outs[LDegs[LI].Key][LE] then
+                LDegs[LJ].Value := LDegs[LJ].Value + 1;
+          end;
+      TArray.Sort<TPair<Integer, Integer>>(LDegs,
+        TComparer<TPair<Integer, Integer>>.Construct(
+        function(const L, R: TPair<Integer, Integer>): Integer
+        begin
+          Result := R.Value - L.Value;
+          if Result = 0 then
+            Result := CompareText(ALints[LCycle.A].A.Proj.ModelFile(
+              LG.Mids[L.Key]), ALints[LCycle.A].A.Proj.ModelFile(
+              LG.Mids[R.Key]));
+        end));
+      LParts := nil;
+      for var LD in LDegs do
+        LParts := LParts + [UnitName(LG, LD.Key, ALints[LCycle.A].A)];
+      LSb.AppendLine(Format('cycle of %d units%s, %d `uses` %s among them '
+        + '(%d in implementation): %s', [Length(LCycle.Mids), IfThen(
+        LCycle.Progs <> nil, ' in ' + NamedList(LCycle.Progs,
+        MAX_METRIC_NAMED), ''), LTotal, IfThen(LTotal = 1, 'entry',
+        'entries'), LImpl, NamedList(LParts,
+        IfThen(LFile <> '', Max(ALimit, MAX_METRIC_NAMED),
+        MAX_METRIC_NAMED))]));
+      // The shortest cycle through the unit asked, or the most connected.
+      LHub := LDegs[0].Key;
+      if LFile <> '' then
+        LHub := LG.Index[ALints[LCycle.A].A.Proj.ModelIdOf(LFile)];
+      LPath := '';
+      var LWay := CyShortest(LG, LIn, LHub);
+      for var LI := 0 to High(LWay) do
+      begin
+        if LI > 0 then
+          LPath := LPath + IfThen(IsImpl(LG, LWay[LI - 1], LWay[LI]), ' ~> ',
+            ' -> ');
+        LPath := LPath + UnitName(LG, LWay[LI], ALints[LCycle.A].A);
+      end;
+      LSb.AppendLine(Format('  shortest through %s: %s', [UnitName(LG, LHub,
+        ALints[LCycle.A].A), LPath]));
+      // Its entries lint finds unused, and the cycles left without those
+      // that have no `but`.
+      LUnused := nil;
+      LButs := 0;
+      LSkip.Clear;
+      for var LRow in LRows do
+        for var LEd in LRow.Edges do
+          if (LEd.A = LCycle.A) and LIn.ContainsKey(LG.Index[LEd.From]) and
+             LG.Index.ContainsKey(LEd.Target) and
+             LIn.ContainsKey(LG.Index[LEd.Target]) then
+          begin
+            LEntry := LRow.Text;
+            if LEntry.Contains(' - ') then
+              LEntry := Copy(LEntry, 1, LEntry.IndexOf(' - '));
+            LEntry := Format('%s:%d %s', [AWs.RelPath(LRow.FilePath),
+              LRow.Line, LEntry]);
+            if LRow.Doubt then
+            begin
+              Inc(LButs);
+              LEntry := LEntry + ' (with a `but`)';
+            end
+            else
+              LSkip.AddOrSetValue(CyEdgeKey(LEd.From, LEd.Target), True);
+            if not MatchText(LEntry, LUnused) then
+              LUnused := LUnused + [LEntry];
+            Break;
+          end;
+      if LUnused = nil then
+      begin
+        LSb.AppendLine('  lint finds no entry of it unused');
+        Continue;
+      end;
+      LEntry := '';
+      if LSkip.Count > 0 then
+      begin
+        LLeft := CySccs(LG, LIn, LSkip);
+        if LLeft = nil then
+          LEntry := ' - without those with no `but`, no cycle is left'
+        else if Length(LLeft[0]) = Length(LCycle.Mids) then
+          LEntry := ' - without those with no `but`, the cycle stays whole'
+        else
+        begin
+          LParts := nil;
+          for var LU in LLeft[0] do
+            LParts := LParts + [UnitName(LG, LU, ALints[LCycle.A].A)];
+          LEntry := Format(' - without those with no `but`, the largest '
+            + 'cycle left is %d units%s', [Length(LLeft[0]), IfThen(
+            Length(LLeft[0]) <= MAX_METRIC_NAMED, ': ' + NamedList(LParts,
+            MAX_METRIC_NAMED), '')]);
+        end;
+      end;
+      LSb.AppendLine(Format('  unused (lint): %s%s', [NamedList(LUnused,
+        MAX_METRIC_NAMED), LEntry]));
+    end;
+    if (LShown < LCycles.Count) and (ALimit > 0) then
+      LSb.AppendLine(Format('... %d more (raise `limit`; `file` for the '
+        + 'cycle of one unit)', [LCycles.Count - LShown]));
+    Result := LSb.ToString.TrimRight;
+  finally
+    for var LI := 0 to High(LGraphs) do
+      LGraphs[LI].Index.Free;
+    LSb.Free;
+    LEnclosing.Free;
+    LRows.Free;
+    LSkip.Free;
+    LIn.Free;
+    LOnShown.Free;
+    LFileCycle.Free;
+    LOwnSet.Free;
+    LKept.Free;
+    LCycles.Free;
+  end;
+end;
+
+function ToolMetrics(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
+var
+  LMetric: string;
+  LLints: TObjectList<TLintAnalysis>;
+  LGraphs: TObjectList<TRcGraph>;
+  LLimit: Integer;
+begin
+  LMetric := LowerCase(ArgStr(AArgs, 'metric').Trim);
+  if LMetric = '' then
+    raise EToolError.Create('give `metric`: recompile (what a change to a '
+      + 'unit or a declaration recompiles) or cycles (the `uses` cycles)');
+  if not MatchText(LMetric, METRIC_NAMES) then
+    raise EToolError.CreateFmt('unknown metric `%s` - the metrics: %s',
+      [LMetric, string.Join(', ', METRIC_NAMES)]);
+  LLints := TObjectList<TLintAnalysis>.Create;
+  LGraphs := TObjectList<TRcGraph>.Create;
+  try
+    for var LA in AWs.Analyses do
+      if LA.Proj <> nil then
+        LLints.Add(TLintAnalysis.Create(AWs, LA));
+    if LMetric = METRIC_CYCLES then
+      Exit(MetricCycles(AWs, AArgs, LLints, EnsureRange(ArgInt(AArgs, 'limit',
+        20), 0, 100000)));
+    if (ArgStr(AArgs, 'symbol') <> '') or (ArgStr(AArgs, 'file') <> '') then
+      LLimit := ArgInt(AArgs, 'limit', 100)
+    else
+      LLimit := ArgInt(AArgs, 'limit', 50);
+    for var LL in LLints do
+      LGraphs.Add(TRcGraph.Create(AWs, LL.A));
+    Result := MetricRecompile(AWs, AArgs, LGraphs, LLints, EnsureRange(LLimit,
+      0, 100000));
+  finally
+    LGraphs.Free;
+    LLints.Free;
+  end;
+end;
+
 { ---- impact ---------------------------------------------------------------------- }
 
 const
@@ -15210,7 +16909,34 @@ const
     + 'relative to the group contains this or matches it as a wildcard '
     + '(client\\*, *Form.pas)"},'
     + '"limit":{"type":"integer","description":"Max rows (default 100; 0: '
-    + 'the counts alone)"}}}}' +
+    + 'the counts alone)"}}}},' +
+
+    '{"name":"metrics","description":"What the code costs the build. '
+    + 'recompile: what dcc''s Make recompiles when an interface changes - a '
+    + 'unit recompiles when a declaration it binds changes, not when a unit '
+    + 'it lists does; a declaration changes with one it takes in (a '
+    + 'constant''s value, a field''s, a parameter''s or an ancestor''s type), '
+    + 'and the bodies of inline routines and generic types are part of '
+    + 'theirs. With `symbol`: the units a change to that declaration '
+    + 'recompiles, per program, each with what it binds, and the declarations '
+    + 'of other units it spreads through; with `file`: the same for a change '
+    + 'anywhere in that unit''s interface, and its declarations by reach; '
+    + 'with neither: the own units ranked by it - where a change costs a '
+    + 'rebuild of most of the program. cycles: the `uses` cycles among the '
+    + 'own units, largest first, the shortest way round, and the entries on '
+    + 'it `lint` finds unused - removed, the cycle may break.",'
+    + '"inputSchema":{"type":"object","properties":{'
+    + '"metric":{"type":"string","description":"recompile or cycles"},'
+    + '"symbol":{"type":"string","description":"recompile: a declaration '
+    + '(TFoo, Unit.TFoo, TFoo.Bar - a member counts as its type)"},'
+    + '"file":{"type":"string","description":"recompile: the unit whose '
+    + 'interface changes (with `line` + `name`: a declaration there); cycles: '
+    + 'the cycle of this unit"},'
+    + '"line":{"type":"integer","description":"With `file` and `name`"},'
+    + '"name":{"type":"string","description":"With `file` and `line`"},'
+    + '"limit":{"type":"integer","description":"Max rows: units (default 50 '
+    + 'ranked, 100 for one cascade), cycles (default 20); 0: the header '
+    + 'alone"}},"required":["metric"]}}' +
     ']';
 
 function ToolDefinitions: TJSONArray;
@@ -15251,7 +16977,9 @@ begin
     + 'interface methods it implements and their implementations, each '
     + 'header, and every call, `defines` whether a line between {$IFDEF}s '
     + 'is compiled and which define decides it, `lint` the `uses` entries '
-    + 'a unit does not need or needs only in its implementation. Their rows '
+    + 'a unit does not need or needs only in its implementation, `metrics` '
+    + 'what a change recompiles (`recompile`: the units binding what changed) '
+    + 'and the `uses` cycles. Their rows '
     + 'name the routine or type they sit '
     + 'in, which usually answers the question without opening the file. '
     + 'A header counts every row, cut or not: `limit: 0` asks whether and '
@@ -15342,6 +17070,8 @@ begin
       Result := ToolDefines(AWs, AArgs)
     else if AName = 'lint' then
       Result := ToolLint(AWs, AArgs)
+    else if AName = 'metrics' then
+      Result := ToolMetrics(AWs, AArgs)
     else
       raise EToolError.Create('unknown tool: ' + AName);
   except

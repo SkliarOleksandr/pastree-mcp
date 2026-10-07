@@ -1259,7 +1259,7 @@ end;
 // INTERNAL_FILE in a member's build directory: the key of an internal error
 // the builds of a compile stopped at, a rebuild among them, and when. The
 // compiler fails on this code: the next compile that stops at it builds no
-// more. A note without REBUILT_TOO (0.28 wrote one after two Makes) is not
+// more. A note without REBUILT_TOO (0.29.0 and before wrote one after two Makes) is not
 // read: the compile retries as usual.
 const
   REBUILT_TOO = 'rebuild';
