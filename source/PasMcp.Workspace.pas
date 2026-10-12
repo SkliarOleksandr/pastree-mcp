@@ -150,6 +150,8 @@ type
     procedure LoadMembers;
     procedure AssignAnalyses;
     procedure BuildAnalysis(AAnalysis: TMcpAnalysis; ADonor: TPasSemaProject);
+    // A navigator over AAnalysis.Proj, set up as every tool expects it.
+    procedure NewNavigator(AAnalysis: TMcpAnalysis);
     procedure RecordStamps(AAnalysis: TMcpAnalysis);
     // After a module run: stamps the own files it took in that have none yet
     // - a unit a changed uses clause added, an include a changed unit now
@@ -1025,7 +1027,8 @@ begin
     // resolves is E2003 too, and PasTree's corpus runs report zero false ones.
     LProj.ReportUnresolvedMembers := True;
     if (ADonor <> nil) and not LProj.AdoptParseDonor(ADonor) then
-      Log('%s: parse donor refused (configuration changed)', [LPrefix]);
+      Log('%s: parse donor refused (configuration changed, or its last run '
+        + 'did not complete) - every unit is parsed again', [LPrefix]);
     LSW := TStopwatch.StartNew;
     LLast := 0;
     LProj.AnalyzeStaged(AAnalysis.Roots, [], nil,
@@ -1058,14 +1061,22 @@ begin
   finally
     LKeep.Free;
   end;
-  AAnalysis.Nav := TPasNavigator.Create(LProj);
-  AAnalysis.Nav.LibraryPaths := FLibDirs;
+  NewNavigator(AAnalysis);
   Log('%s: %d units (%d own) in %.1f s, %s held; stages %s', [LPrefix,
     LProj.ModelCount, AAnalysis.OwnModels, AAnalysis.LastBuildMs / 1000,
     MemoryText(AllocatedBytes), LProj.StageTimings]);
+  // An unreadable file (held open exclusively) or an analyzer defect: its
+  // importers get F1027 naming the exception (PasTree 0.95.7).
   if Length(LProj.LoadFailures) > 0 then
     for var LFail in LProj.LoadFailures do
-      Log('%s: INTERNAL parse failure (analyzer defect): %s', [LPrefix, LFail]);
+      Log('%s: a unit could not be analyzed: %s', [LPrefix, LFail]);
+end;
+
+procedure TMcpWorkspace.NewNavigator(AAnalysis: TMcpAnalysis);
+begin
+  FreeAndNil(AAnalysis.Nav);
+  AAnalysis.Nav := TPasNavigator.Create(AAnalysis.Proj);
+  AAnalysis.Nav.LibraryPaths := FLibDirs;
 end;
 
 procedure TMcpWorkspace.ClearAnalyses;
@@ -1165,6 +1176,25 @@ begin
   for var LPair in FConfigStamps do
     if not StampOf(LPair.Key, LStamp) or not SameStamp(LStamp, LPair.Value) then
       Result := Result + [LPair.Key];
+end;
+
+// ` (<reason>)` from the `module=refused:<reason>;` a refused module run
+// leaves in StageTimings, or '' when it left none (the run raised).
+function ModuleRefusalText(const ATimings: string): string;
+const
+  cTag = 'module=refused:';
+var
+  LAt, LEnd: Integer;
+begin
+  Result := '';
+  LAt := Pos(cTag, ATimings);
+  if LAt = 0 then
+    Exit;
+  Inc(LAt, Length(cTag));
+  LEnd := Pos(';', ATimings, LAt);
+  if LEnd = 0 then
+    LEnd := Length(ATimings) + 1;
+  Result := ' (' + Copy(ATimings, LAt, LEnd - LAt) + ')';
 end;
 
 procedure TMcpWorkspace.RebuildAnalysis(AAnalysis: TMcpAnalysis;
@@ -1280,7 +1310,11 @@ begin
           end;
           if not LOk or LA.Proj.NeedsFullRebuild then
           begin
-            LNeedRebuild := 'the module path refused ' + RelPath(LFile);
+            // PasTree leaves the reason in StageTimings as
+            // `module=refused:<reason>;` (incomplete-run, needs-full-rebuild,
+            // in-path-changed(<unit>), implicit-unit(<unit>), ...).
+            LNeedRebuild := 'the module path refused ' + RelPath(LFile) +
+              ModuleRefusalText(LA.Proj.StageTimings);
             Break;
           end;
           Inc(LA.ModuleRuns);
@@ -1308,10 +1342,9 @@ begin
           RebuildOwners;
           RecordFormStamps;
         end;
-        // The models changed under the navigator's per-model caches.
-        FreeAndNil(LA.Nav);
-        LA.Nav := TPasNavigator.Create(LA.Proj);
-        LA.Nav.LibraryPaths := FLibDirs;
+        // The models changed under the navigator's per-model caches (and
+        // since PasTree 0.96.0 a navigator kept across a run raises).
+        NewNavigator(LA);
       end;
       for var LFile in LAdded do
       begin
@@ -1436,7 +1469,15 @@ begin
         LMissing.Free;
       end;
       for var LFail in LA.Proj.LoadFailures do
-        LSb.AppendLine('  INTERNAL parse failure: ' + LFail);
+        LSb.AppendLine('  could not be analyzed (an unreadable file or an '
+          + 'analyzer defect): ' + LFail);
+      // A library unit demoted to save memory is read back on demand; one
+      // whose file changed or went since cannot be (PasTree 0.97.0).
+      if LA.Proj.HydrateFailures > 0 then
+        LSb.AppendLine(Format('  %d unit text(s) could not be read back - '
+          + 'changed on disk since the analysis, the last %s',
+          [LA.Proj.HydrateFailures,
+          RelPath(LA.Proj.ModelFile(LA.Proj.LastHydrateFailure))]));
     end;
     LSb.AppendLine('memory held: ' + MemoryText(AllocatedBytes));
     Result := LSb.ToString.TrimRight;

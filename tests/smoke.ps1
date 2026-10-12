@@ -124,7 +124,7 @@ Check 'source lines limit' (Block $b 'source {"symbol":"RunB", "lines":"28-"') @
 Check 'source lines outside' (Block $b 'source {"symbol":"RunB", "lines":"100-120"}') @('RunB (procedure) implemented at AppB\uAppB.pas:26-32', '(`lines` 100-120 is outside it)') @('26  procedure')
 Check 'source lines bad' (Block $b 'source {"symbol":"RunB", "lines":"31-29"}') @('`lines` 31-29: give file line numbers as the answers number them')
 Check 'source lines overloads' (Block $b 'source {"symbol":"TBase.Add", "lines"') @('TBase.Add - 2 overloads:', '(line 77 of it', '77    Inc(FCount, AValue);', '(`lines` 77 is outside it)') @('76  ', '82  ')
-Check 'source external overloads' (Block $b 'source {"symbol":"Winapi.Windows.SendMessage"}') @('SendMessage - 2 overloads:', '(external - `function SendMessage(hWnd: HWND; Msg: UINT; wParam: WPARAM;', '(external - `function SendMessage(hWnd: HWND; Msg: UINT; wParam: INT_PTR;')
+Check 'source external overloads' (Block $b 'source {"symbol":"Winapi.Windows.SendMessage"}') @('SendMessage - 2 overloads:', "external minuser name 'SendMessageW';", 'function SendMessage(hWnd: HWND; Msg: UINT; wParam: WPARAM; lParam: LPARAM): LRESULT; external', 'function SendMessage(hWnd: HWND; Msg: UINT; wParam: INT_PTR; lParam: LPARAM): LRESULT; external')
 # members: by the type declaring each, under its visibility section. Seen from
 # TDerived's own methods: its ancestor's private field (same unit) but not the
 # strict private one; an override, and the property republished, once at the
@@ -403,6 +403,11 @@ Check 'rename_plan unit dproj' (Block $b 'rename_plan {"symbol":"uMembers"') @('
 Check 'rename_plan overloads refused' (Block $b 'rename_plan {"symbol":"TQuiet.Hush"') @('`TQuiet.Hush` names 2 overloads of one routine - pass `file` + `line` + `name`')
 Check 'rename_plan one overload' (Block $b 'rename_plan {"file":"AppA/uMembers.pas"') @('to Quieten - ', '[declaration]  procedure Quieten(const S: string); overload;') @('procedure Quieten(A: Integer)')
 Check 'rename_plan nothing uses it' (Block $b 'rename_plan {"symbol":"TfrmMain.NeverBound"') @('to Unbound - 2 edits in 1 files', '  23:15  [declaration]  procedure Unbound(Sender: TObject);')
+# The name written in a branch not compiled: a plan of the live uses and the
+# lines to check, each a row with its line - PasTree's AInactive (0.97.0
+# refused the whole plan instead), in its own unit and in a unit using it.
+Check 'rename_plan inactive' (Block $b 'rename_plan {"symbol":"TCountBox.BoxCount"') @('to BoxTotal - 4 edits in 1 files', '  118:37  if ''BoxCount'' = '''' then Result := BoxTotal else Result := 0;', 'lines to check - not in the plan: in branches this configuration does not compile the old name is written 1 more time, none resolved', "AppB\uBoxes.pas`n  122:13  Result := BoxCount + 1;") @('refused')
+Check 'rename_plan inactive other unit' (Block $b 'rename_plan {"symbol":"NeverCalled"') @('to NeverRun - 2 edits in 1 files', "it reads:`nAppB\uLint.pas`n  44:5  NeverCalled;") @('refused')
 Check 'rename_plan same name' (Block $b 'rename_plan {"symbol":"TCircle.Radius"') @('refused: The new name is the same as the old one. - nothing is planned')
 Check 'rename_plan reserved word' (Block $b 'rename_plan {"symbol":"TCircle","new_name":"begin"') @('"begin" is not a valid identifier. - nothing is planned')
 Check 'rename_plan library' (Block $b 'rename_plan {"symbol":"TStringList"') @('is a library source (RTL/VCL or third-party) - its identifiers cannot be renamed from here. - nothing is planned')
@@ -516,7 +521,7 @@ Check 'metrics recompile nothing' (Block $b 'metrics {"metric":"recompile","symb
 Check 'metrics recompile unit nothing' (Block $b 'metrics {"metric":"recompile","file":"AppB/uRcN.pas"}') @('a change to the interface of AppB\uRcN.pas recompiles no own unit but uRcN')
 # uShapes is in both of AppA's and AppB's builds: the units of each.
 Check 'metrics recompile shared' (Block $b 'metrics {"metric":"recompile","file":"Shared/uShapes.pas"}') @('recompiles 2 own units besides uShapes - AppA 1 of its 3 and AppB 1 of its 34', '  AppA\uAppA.pas - binds TShape and TCircle', '  AppB\uAppB.pas - binds TCircle, TSquare and TotalArea')
-Check 'metrics recompile ranked' (Block $b 'metrics {"metric":"recompile","limit":1}') @('16 of 43 own units recompile other own units when their interface changes', 'AppB\uRcA.pas: 8 (AppB 8) - most through RcA 3, TRcRec 2 and 4 more', '... 15 more (raise `limit`')
+Check 'metrics recompile ranked' (Block $b 'metrics {"metric":"recompile","limit":1}') @('17 of 43 own units recompile other own units when their interface changes', 'AppB\uRcA.pas: 8 (AppB 8) - most through RcA 3, TRcRec 2 and 4 more', '... 16 more (raise `limit`')
 Check 'metrics recompile cut' (Block $b 'metrics {"metric":"recompile","file":"AppB/uRcA.pas","limit":2}') @('  AppB\uRcD.pas - binds TRcRec', '  ... 6 more (raise `limit`)') @('uRcE.pas')
 Check 'metrics recompile program' (Block $b 'metrics {"metric":"recompile","file":"AppB/AppB.dpr"}') @('AppB\AppB.dpr is no unit whose interface declares anything')
 Check 'metrics recompile library' (Block $b 'metrics {"metric":"recompile","symbol":"Winapi.Windows.SendMessage"}') @('not in the group''s own code - its .dcu is prebuilt')

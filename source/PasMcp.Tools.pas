@@ -809,6 +809,17 @@ function ResolveName(AWs: TMcpWorkspace; const AQuery, AKind: string;
   AOwnOnly: Boolean; ALimit: Integer; out AMore: Integer;
   AClimb: Boolean = True): TArray<TTarget>; forward;
 
+// Model AMid with its text, or an error naming its file: a library unit
+// demoted after the build is read back from disk, and one whose file changed
+// or went since cannot be - its tree is not there to read (PasTree 0.93.35).
+procedure RequireText(AWs: TMcpWorkspace; AA: TMcpAnalysis; AMid: Integer);
+begin
+  if not AA.Proj.EnsureHydrated(AMid) then
+    raise EToolError.CreateFmt('%s changed on disk since the analysis and '
+      + 'cannot be read back - nothing to answer from it',
+      [AWs.RelPath(AA.Proj.ModelFile(AMid))]);
+end;
+
 // file + line + (name | column) -> what is there.
 function ResolvePosition(AWs: TMcpWorkspace; AArgs: TJSONObject): TTarget;
 var
@@ -882,7 +893,7 @@ begin
       Continue;
     end;
     LInClosure := True;
-    LA.Proj.EnsureHydrated(LMid);
+    RequireText(AWs, LA, LMid);
     if LA.Nav.SymbolAt(LMid, LLine, LCol, LTMid, LTSym, LText) then
       LFound := FillSymbolTarget(AWs, LA, LTMid, LTSym, Result)
     else if LA.Nav.UnitAt(LMid, LLine, LCol, LTMid, LText) then
@@ -4879,8 +4890,9 @@ var
   LId: TSymId;
   LSb: TStringBuilder;
   LLimit, LCompiled, LRows, LFileCount, LFormEdits, LShown, LRowLine: Integer;
-  LInactive: TArray<string>;
-  LDeclMids: TArray<Integer>;
+  LInactive: TList<TPasInactiveUse>;
+  LOneInactive: TArray<TPasInactiveUse>;
+  LInArr: TArray<TPasInactiveUse>;
   LVarX: TSemaXType;
   LArr: TArray<TPasRenameEdit>;
 
@@ -4911,6 +4923,7 @@ begin
   LEdits := TList<TPasRenameEdit>.Create;
   LCarried := TList<TPasCarriedRename>.Create;
   LFamily := TList<TPasRenameFamilyMember>.Create;
+  LInactive := TList<TPasInactiveUse>.Create;
   LSeen := TDictionary<string, Boolean>.Create;
   LSb := TStringBuilder.Create;
   try
@@ -4924,19 +4937,31 @@ begin
       LOneCarried := nil;
       LOneFamily := nil;
       if LT.Kind = tkUnit then
-        LOk := LA.Nav.PlanUnitRename(LId.Mid, LNew, LOne, LFileName, LErr)
+        LOk := LA.Nav.PlanUnitRename(LId.Mid, LNew, LOne, LFileName,
+          LOneInactive, LErr)
       else
         LOk := LA.Nav.PlanRename(LId.Mid, LId.Sym, LNew, LOne, LOneCarried,
-          LOneFamily, LErr);
+          LOneFamily, LOneInactive, LErr);
+      // The name written in a branch these defines leave out: PasTree lists
+      // it beside the plan (never a refusal since 0.98.0); a library's
+      // include file is not the group's to edit.
+      for var LU in LOneInactive do
+        if AWs.IsOwnFile(LU.FilePath) and LSeen.TryAdd(Format(
+           'inactive:%s:%d:%d', [LowerCase(LU.FilePath), LU.Line, LU.Col]),
+           True) then
+          LInactive.Add(LU);
       for var LF in LOneFamily do
         if LSeen.TryAdd('family:' + LowerCase(LF.TypeName + '.' + LF.Name),
            True) then
           LFamily.Add(LF);
+      // PasTree's own refusals of what a plan cannot read end in "nothing
+      // planned." - said once.
       if not LOk then
-        raise EToolError.Create(Format('rename of %s to %s refused%s: %s - '
-          + 'nothing is planned',
+        raise EToolError.Create(Format('rename of %s to %s refused%s: %s%s',
           [LT.Name, LNew, IfThen(AWs.Analyses.Count > 1,
-          ' (analysis ' + IntToStr(LA.Index) + ')', ''), LErr]));
+          ' (analysis ' + IntToStr(LA.Index) + ')', ''), LErr,
+          IfThen(EndsText('nothing planned.', LErr), '',
+          ' - nothing is planned')]));
       for var LE in LOne do
         if LSeen.TryAdd(Format('%s:%d:%d', [LowerCase(LE.FilePath), LE.Line,
            LE.Col]), True) then
@@ -5069,20 +5094,43 @@ begin
     if LCompiled > 0 then
       LSb.AppendLine(Format('(+%d in compiled units without source, not '
         + 'planned)', [LCompiled]));
+    // Every place, as rows: the agent renames each by hand or leaves a
+    // namesake - a count and a few file:line names left it searching.
+    if LInactive.Count > 0 then
+    begin
+      LInArr := LInactive.ToArray;
+      TArray.Sort<TPasInactiveUse>(LInArr,
+        TComparer<TPasInactiveUse>.Construct(
+        function(const L, R: TPasInactiveUse): Integer
+        begin
+          Result := CompareText(L.FilePath, R.FilePath);
+          if Result = 0 then
+            Result := L.Line - R.Line;
+          if Result = 0 then
+            Result := L.Col - R.Col;
+        end));
+      LSb.AppendLine(Format('lines to check - not in the plan: in branches '
+        + 'this configuration does not compile the old name is written %s, '
+        + 'none resolved (a namesake, or a use to rename by hand - left, the '
+        + 'build that compiles the branch breaks); line:column, the line as '
+        + 'it reads:', [Plural(Length(LInArr), 'more time')]));
+      LFile := '';
+      for var LIdx := 0 to Min(High(LInArr), LLimit - 1) do
+      begin
+        if not SameText(LInArr[LIdx].FilePath, LFile) then
+        begin
+          LFile := LInArr[LIdx].FilePath;
+          LSb.AppendLine(AWs.RelPath(LFile));
+        end;
+        LSb.AppendLine(Format('  %d:%d  %s', [LInArr[LIdx].Line,
+          LInArr[LIdx].Col, LInArr[LIdx].LineText.Trim]));
+      end;
+      if Length(LInArr) > LLimit then
+        LSb.AppendLine(Format('... %d more lines to check (raise `limit`)',
+          [Length(LInArr) - LLimit]));
+    end;
     if LT.Kind = tkSymbol then
     begin
-      LDeclMids := nil;
-      for var LOneId in LT.Ids do
-        LDeclMids := LDeclMids + [LOneId.Mid];
-      LInactive := InactiveMentions(AWs, LowerCase(Copy(LT.Name,
-        LastDelimiter('.', LT.Name) + 1, MaxInt)), LDeclMids);
-      if Length(LInactive) > 0 then
-        LSb.AppendLine(Format('(lines to check - in branches this '
-          + 'configuration does not compile the name is written on %s more, '
-          + 'none resolved, so not in the plan: %s%s)',
-          [Plural(Length(LInactive), 'line'), String.Join(', ',
-          Copy(LInactive, 0, 8)), IfThen(Length(LInactive) > 8, ', ...',
-          '')]));
       // A module's class or its variable: other forms reach its components
       // through its root's Name, which this rename leaves.
       if (LT.Head = 'class') or (LT.Head = 'var') then
@@ -5112,6 +5160,7 @@ begin
   finally
     LSb.Free;
     LSeen.Free;
+    LInactive.Free;
     LCarried.Free;
     LFamily.Free;
     LEdits.Free;
@@ -9460,7 +9509,7 @@ begin
     if AMid >= 0 then
     begin
       AA := LA;
-      LA.Proj.EnsureHydrated(AMid);
+      RequireText(AWs, LA, AMid);
       Exit(True);
     end;
   end;
@@ -10266,7 +10315,7 @@ begin
           LA := LCand;
           LMid := LI;
           LFound := True;
-          LA.Proj.EnsureHydrated(LMid);
+          RequireText(AWs, LA, LMid);
           Break;
         end;
       if LFound then
@@ -11246,7 +11295,7 @@ begin
       LMid := LA.Proj.ModelIdOf(AFile);
       if LMid < 0 then
         Continue;
-      LA.Proj.EnsureHydrated(LMid);
+      RequireText(AWs, LA, LMid);
       LM := LA.Proj.Model(LMid);
       if ModuleChild(LM, nkInterfaceSec) = NIL_NODE then
         Exit;   // a program, a library, a package: its uses are its contents
@@ -11306,11 +11355,11 @@ begin
       end;
       // A name bound to a unit not in `uses` came through one that is: an
       // alias of it there (`TModalResult = System.UITypes.TModalResult` in
-      // Vcl.Controls), which the index binds through to what it names. And
-      // a name of the interface bound to a unit of the implementation `uses`
-      // - which dcc does not search there; PasTree does (0.91.1) when both
-      // declare the name - is one of an interface unit. Every listed unit
-      // declaring the name, of the interface for a name there, is credited.
+      // Vcl.Controls), which the index binds through to what it names. Every
+      // listed unit declaring the name, of the interface for a name there,
+      // is credited. (A name of the interface bound to a unit of the
+      // implementation `uses` came here too until PasTree 0.93.20 stopped
+      // searching those units for the interface, as dcc does.)
       for var LPair in LOrphans do
       begin
         LName := LA.Proj.Model(LPair.Value.UnitId).Symbols[

@@ -191,6 +191,8 @@ rename_plan {"symbol":"uShapes","new_name":"uShapesNew"}
 rename_plan {"symbol":"TQuiet.Hush","new_name":"Quieten"}
 rename_plan {"file":"AppA/uMembers.pas","line":158,"name":"Hush","new_name":"Quieten"}
 rename_plan {"symbol":"TfrmMain.NeverBound","new_name":"Unbound"}
+rename_plan {"symbol":"TCountBox.BoxCount","new_name":"BoxTotal"}
+rename_plan {"symbol":"NeverCalled","new_name":"NeverRun"}
 rename_plan {"symbol":"TCircle.Radius","new_name":"Radius"}
 rename_plan {"symbol":"Integer","new_name":"Int"}
 rename_plan {"symbol":"TCircle","new_name":"begin"}

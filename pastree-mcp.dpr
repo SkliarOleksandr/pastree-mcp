@@ -29,6 +29,10 @@ program pastree_mcp;
 }
 
 {$APPTYPE CONSOLE}
+// 16 MB per thread, PasTree's pool workers and the executor included - only
+// the program can set it (PasTree README, "The stack every host should
+// reserve"): a long operator chain in generated code overflows the default.
+{$MAXSTACKSIZE $01000000}
 
 uses
   System.SysUtils,
