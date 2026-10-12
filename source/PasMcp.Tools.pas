@@ -6471,47 +6471,87 @@ begin
   end;
 end;
 
+function RoutineImpl(AA: TMcpAnalysis; AMid, ASym: Integer; out AImplMid,
+  ARoutine: Integer): Boolean; forward;
+
+type
+  // A bare `inherited` (no name after it; `inherited.X` included) and the
+  // method it runs.
+  TBareInherited = record
+    FileId, Line, Col: Integer;   // the keyword
+    MemMid, MemSym: Integer;
+  end;
+
+// The bare `inherited` calls under node ARoot of model AMid - ANested: in
+// its nested routines too - each with what it runs: PasTree's
+// BareInheritedTarget (0.98.1), the one GotoBareInherited reads - the
+// enclosing METHOD's name and declared arity, a helper's extended type. A
+// bare `inherited` has no name node, so no reference search finds it.
+function BareInheritedCalls(AA: TMcpAnalysis; AMid, ARoot: Integer;
+  ANested: Boolean): TArray<TBareInherited>;
+var
+  LM: TPasSemaModel;
+  LStack: TStack<Integer>;
+  LN, LChild, LCtx: Integer;
+  LCall: TBareInherited;
+begin
+  Result := nil;
+  LM := AA.Proj.Model(AMid);
+  LStack := TStack<Integer>.Create;
+  try
+    LStack.Push(ARoot);
+    while LStack.Count > 0 do
+    begin
+      LN := LStack.Pop;
+      if not ANested and (LN <> ARoot) and
+         (LM.Tree.Nodes[LN].Kind = nkRoutine) then
+        Continue;
+      LChild := LM.Tree.Nodes[LN].FirstChild;
+      while LChild <> NIL_NODE do
+      begin
+        LStack.Push(LChild);
+        LChild := LM.Tree.Nodes[LChild].NextSibling;
+      end;
+      if (LM.Tree.Nodes[LN].Kind = nkInherited) and
+         (LM.Tree.Nodes[LN].FirstChild = NIL_NODE) and
+         AA.Proj.BareInheritedTarget(AMid, LN, LCall.MemMid, LCall.MemSym,
+           LCtx) and
+         VisPos(LM, LM.Tree.NodeLeftmostVis(LN), LCall.FileId, LCall.Line,
+           LCall.Col) then
+        Result := Result + [LCall];
+    end;
+  finally
+    LStack.Free;
+  end;
+end;
+
 // A bare `inherited;` in override (ADMid, ADSym) that calls the node's
 // routine: no name node, so no reference search finds it.
 procedure TCallerWalk.SearchBareInherited(AA: TMcpAnalysis;
   const ANode: TCallNode; ADMid, ADSym: Integer);
 var
-  LHit, LRow: TPasRefHit;
-  LDm, LRoutine, LFileId, LLine, LCol: Integer;
-  LNavT, LTo: TPasNavTarget;
+  LRow: TPasRefHit;
+  LImplMid, LRoutine: Integer;
   LM: TPasSemaModel;
   LCaller: string;
+  LId: TSymId;
 begin
-  if not AA.Nav.DeclHit(ADMid, ADSym, LHit) then
+  LId := ANode.T.Ids[AA.Index];
+  if (LId.Mid < 0) or (LId.Sym < 0) or
+     not RoutineImpl(AA, ADMid, ADSym, LImplMid, LRoutine) then
     Exit;
-  LDm := AA.Nav.ModelIdOf(LHit.FilePath);
-  if (LDm < 0) or not AA.Proj.EnsureHydrated(LDm) or
-     not AA.Nav.GotoImplementation(LDm, LHit.Line, LHit.Col, LNavT) or
-     not AA.Proj.EnsureHydrated(LNavT.UnitId) then
-    Exit;
-  LM := AA.Proj.Model(LNavT.UnitId);
-  if FileIdOf(LM, LNavT.FilePath) <> 0 then
-    Exit;   // GotoBareInherited reads the main file only
-  LRoutine := RoutineNodeAt(LM, 0, LNavT.Line, LNavT.Col);
-  if LRoutine = NIL_NODE then
-    Exit;
+  LM := AA.Proj.Model(LImplMid);
   LCaller := '';
-  for var LVis := LM.Tree.NodeLeftmostVis(LRoutine) to
-      LM.Tree.Nodes[LRoutine].LastToken - 1 do
-    if (LM.Tree.Source.VisibleToken(LVis).Kind = tkInherited) and
-       (LM.Tree.Source.VisibleToken(LVis + 1).Kind <> tkIdentifier) and
-       VisPos(LM, LVis, LFileId, LLine, LCol) and (LFileId = 0) and
-       AA.Nav.GotoBareInherited(LNavT.UnitId, LLine, LCol, LTo) and
-       SameText(LTo.FilePath, ANode.T.DeclFile) and
-       (LTo.Line = ANode.T.DeclLine) and (LTo.Col = ANode.T.DeclCol) then
+  for var LCall in BareInheritedCalls(AA, LImplMid, LRoutine, True) do
+    if (LCall.MemMid = LId.Mid) and (LCall.MemSym = LId.Sym) then
     begin
       if LCaller = '' then
         LCaller := CallerOfSym(AA, ADMid, ADSym);
       LRow := Default(TPasRefHit);
-      LRow.FilePath := LNavT.FilePath;
-      LRow.Line := LLine;
-      LRow.Col := LCol;
-      LRow.Snippet := LM.Tree.Source.Files[0].LineText(LLine);
+      LRow.FilePath := LM.Tree.Source.FileNames[LCall.FileId];
+      LRow.Line := LCall.Line;
+      LRow.Col := LCall.Col;
+      LRow.Snippet := LM.Tree.Source.Files[LCall.FileId].LineText(LCall.Line);
       AddRow(LRow, ANode, '', '', LCaller, True);
     end;
 end;
@@ -6568,9 +6608,6 @@ begin
   end;
 end;
 
-function RoutineImpl(AA: TMcpAnalysis; AMid, ASym: Integer; out AImplMid,
-  ARoutine: Integer): Boolean; forward;
-
 // A family root's own bare `inherited;` calls (change_plan): each that runs
 // another root is a row under that root. Each body is read once -
 // SearchBareInherited reads every override's body for every root, which over
@@ -6578,12 +6615,11 @@ function RoutineImpl(AA: TMcpAnalysis; AMid, ASym: Integer; out AImplMid,
 procedure TCallerWalk.SearchOwnBareInherited(AA: TMcpAnalysis;
   ANode: Integer);
 var
-  LImplMid, LRoutine, LFileId, LLine, LCol, LTo: Integer;
+  LImplMid, LRoutine, LTo: Integer;
   LM: TPasSemaModel;
-  LNavT: TPasNavTarget;
   LRow: TPasRefHit;
   LCaller: string;
-  LId: TSymId;
+  LId, LToId: TSymId;
 begin
   LId := FNodes[ANode].T.Ids[AA.Index];
   if (LId.Mid < 0) or (LId.Sym < 0) or
@@ -6591,24 +6627,31 @@ begin
     Exit;
   LM := AA.Proj.Model(LImplMid);
   LCaller := '';
-  for var LVis := LM.Tree.NodeLeftmostVis(LRoutine) to
-      LM.Tree.Nodes[LRoutine].LastToken - 1 do
-    if (LM.Tree.Source.VisibleToken(LVis).Kind = tkInherited) and
-       (LM.Tree.Source.VisibleToken(LVis + 1).Kind <> tkIdentifier) and
-       VisPos(LM, LVis, LFileId, LLine, LCol) and (LFileId = 0) and
-       AA.Nav.GotoBareInherited(LImplMid, LLine, LCol, LNavT) and
-       FNodeOf.TryGetValue(SiteKey(LNavT.FilePath, LNavT.Line, LNavT.Col),
-       LTo) and (LTo >= 0) and (FNodes[LTo].Level = 0) then
-    begin
-      if LCaller = '' then
-        LCaller := CallerOfSym(AA, LId.Mid, LId.Sym);
-      LRow := Default(TPasRefHit);
-      LRow.FilePath := LM.Tree.Source.FileNames[0];
-      LRow.Line := LLine;
-      LRow.Col := LCol;
-      LRow.Snippet := LM.Tree.Source.Files[0].LineText(LLine);
-      AddRow(LRow, FNodes[LTo], '', 'bare inherited', LCaller, True);
-    end;
+  for var LCall in BareInheritedCalls(AA, LImplMid, LRoutine, True) do
+  begin
+    // The root it runs, if it runs one.
+    LTo := -1;
+    for var LI := 0 to FNodes.Count - 1 do
+      if FNodes[LI].Level = 0 then
+      begin
+        LToId := FNodes[LI].T.Ids[AA.Index];
+        if (LToId.Mid = LCall.MemMid) and (LToId.Sym = LCall.MemSym) then
+        begin
+          LTo := LI;
+          Break;
+        end;
+      end;
+    if LTo < 0 then
+      Continue;
+    if LCaller = '' then
+      LCaller := CallerOfSym(AA, LId.Mid, LId.Sym);
+    LRow := Default(TPasRefHit);
+    LRow.FilePath := LM.Tree.Source.FileNames[LCall.FileId];
+    LRow.Line := LCall.Line;
+    LRow.Col := LCall.Col;
+    LRow.Snippet := LM.Tree.Source.Files[LCall.FileId].LineText(LCall.Line);
+    AddRow(LRow, FNodes[LTo], '', 'bare inherited', LCaller, True);
+  end;
 end;
 
 // The roots of a family (change_plan), in one analysis: their references in
@@ -9099,14 +9142,13 @@ function TCalleeWalk.Walk(const ANode: TCallNode): Integer;
 var
   LA: TMcpAnalysis;
   LIM, LBM: TPasSemaModel;
-  LRMid, LRSym, LIMid, LRoutine, LBody, LBlock, LN, LChild, LBMid, LBSym,
-    LFileId, LLine, LCol, LAMid, LASym, LE, LP, LTMid: Integer;
+  LRMid, LRSym, LIMid, LRoutine, LBody, LN, LChild, LBMid, LBSym,
+    LFileId, LLine, LCol, LAMid, LASym, LE, LP: Integer;
   LStack: TStack<Integer>;
   LExt: TPasExtRef;
   LUse: TCalleeUse;
   LRef: TRefUse;
   LX: TSemaXType;
-  LTo: TPasNavTarget;
   LName: string;
 begin
   Result := -1;
@@ -9228,35 +9270,17 @@ begin
       end;
     end;
 
-    // A bare `inherited;` names nothing: GotoBareInherited says what it runs
-    // - statically, as every inherited call.
-    LBlock := NIL_NODE;
-    LChild := LIM.Tree.Nodes[LBody].FirstChild;
-    while LChild <> NIL_NODE do
+    // A bare `inherited;` names nothing: PasTree says what it runs -
+    // statically, as every inherited call. Not in a nested routine: the walk
+    // above leaves those out too.
+    for var LCall in BareInheritedCalls(LA, LIMid, LBody, False) do
     begin
-      if LIM.Tree.Nodes[LChild].Kind = nkBlock then
-        LBlock := LChild;
-      LChild := LIM.Tree.Nodes[LChild].NextSibling;
+      Inc(Result);
+      LUse.Line := LCall.Line;
+      LUse.Via := '';
+      LUse.Call := True;
+      AddUse(LA, LCall.MemMid, LCall.MemSym, LUse);
     end;
-    if LBlock <> NIL_NODE then
-      for var LVis := LIM.Tree.NodeLeftmostVis(LBlock) to
-          LIM.Tree.Nodes[LBlock].LastToken - 1 do
-        if (LIM.Tree.Source.VisibleToken(LVis).Kind = tkInherited) and
-           (LIM.Tree.Source.VisibleToken(LVis + 1).Kind <> tkIdentifier) and
-           VisPos(LIM, LVis, LFileId, LLine, LCol) and (LFileId = 0) and
-           LA.Nav.GotoBareInherited(LIMid, LLine, LCol, LTo) then
-        begin
-          LTMid := LA.Nav.ModelIdOf(LTo.FilePath);
-          if (LTMid < 0) or not LA.Proj.EnsureHydrated(LTMid) or
-             not LA.Nav.SymbolAt(LTMid, LTo.Line, LTo.Col, LAMid, LASym,
-             LName) then
-            Continue;
-          Inc(Result);
-          LUse.Line := LLine;
-          LUse.Via := '';
-          LUse.Call := True;
-          AddUse(LA, LAMid, LASym, LUse);
-        end;
   finally
     LStack.Free;
   end;
