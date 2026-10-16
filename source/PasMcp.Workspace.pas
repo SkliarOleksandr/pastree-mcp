@@ -74,6 +74,10 @@ type
     Config: string;
     SearchPaths: TArray<string>;
     Defines: TArray<string>;
+    // dcc's `-$` switches the .dproj's DCC_* properties become, in the DCC
+    // task's order (TPasDProj.Switches), and its -CC (DCC_ConsoleTarget).
+    Switches: TArray<string>;
+    ConsoleTarget: Boolean;
     Namespaces: TArray<string>;
     Aliases: TArray<TPasUnitAlias>;
     Files: TArray<string>;   // the .pas files the project lists
@@ -94,6 +98,8 @@ type
     Platform: TPasPlatform;
     SearchPaths: TArray<string>;
     Defines: TArray<string>;
+    Switches: TArray<string>;   // the creating member's, as Defines
+    ConsoleTarget: Boolean;
     Namespaces: TArray<string>;
     Aliases: TArray<TPasUnitAlias>;
     Pins: TDictionary<string, string>;   // unit name lower -> file
@@ -230,6 +236,7 @@ uses
   System.Generics.Defaults,
   Winapi.Windows,
   PasTree.Types,
+  PasTree.Preprocessor,
   PasMcp.Log,
   PasMcp.Version,
   PasMcp.GroupProj;
@@ -624,6 +631,8 @@ begin
           LM.Config := LD.Config;
           LM.SearchPaths := LD.SearchPaths;
           LM.Defines := LD.Defines;
+          LM.Switches := LD.Switches;
+          LM.ConsoleTarget := LD.ConsoleTarget;
           LM.Namespaces := LD.Namespaces;
           LM.Aliases := LD.UnitAliases;
           for var LF in LD.Files do
@@ -684,7 +693,9 @@ var
       for var LA2 in AM.Aliases do
         LAl := LAl + LowerCase(LA2.Alias + '=' + LA2.UnitName) + ';';
       Result := Result + '|' + SortedLower(AM.Defines) + '|' +
-        LowerCase(string.Join(';', AM.Namespaces)) + '|' + LAl;
+        LowerCase(string.Join(';', AM.Namespaces)) + '|' + LAl + '|' +
+        UpperCase(string.Join(' ', AM.Switches)) + '|' +
+        BoolToStr(AM.ConsoleTarget, True);
     end;
   end;
 
@@ -758,6 +769,8 @@ begin
         LA.Index := FAnalyses.Count;
         LA.Platform := FMembers[LIdx].Platform;
         LA.Defines := FMembers[LIdx].Defines;
+        LA.Switches := FMembers[LIdx].Switches;
+        LA.ConsoleTarget := FMembers[LIdx].ConsoleTarget;
         LA.ProjectDir := TPath.GetDirectoryName(FMembers[LIdx].ProjectFile);
         FAnalyses.Add(LA);
         LKeys.Add(LA.Index, LKey);
@@ -768,6 +781,15 @@ begin
           + 'analyzed with [%s]', [FMembers[LIdx].Name, LA.Index,
           string.Join(';', FMembers[LIdx].Defines), string.Join(';',
           LA.Defines)]);
+      if (LA.Members <> nil) and
+         ((not SameText(string.Join(' ', LA.Switches),
+           string.Join(' ', FMembers[LIdx].Switches))) or
+          (LA.ConsoleTarget <> FMembers[LIdx].ConsoleTarget)) then
+        Log('  %s shares analysis %d but its switches differ: its own [%s%s], '
+          + 'analyzed with [%s%s]', [FMembers[LIdx].Name, LA.Index,
+          string.Join(' ', FMembers[LIdx].Switches),
+          IfThen(FMembers[LIdx].ConsoleTarget, ' -CC', ''),
+          string.Join(' ', LA.Switches), IfThen(LA.ConsoleTarget, ' -CC', '')]);
       LA.Members := LA.Members + [LIdx];
       FMembers[LIdx].Analysis := LA.Index;
       LA.Roots := LA.Roots + [FMembers[LIdx].MainSource];
@@ -1006,10 +1028,12 @@ var
 begin
   LPrefix := Format('analysis %d (%s)', [AAnalysis.Index,
     AAnalysis.MemberNames(Self)]);
-  Log('%s: %s, %d roots, %d search paths, %d defines [%s]', [LPrefix,
-    PlatformName(AAnalysis.Platform), Length(AAnalysis.Roots),
-    Length(AAnalysis.SearchPaths), Length(AAnalysis.Defines),
-    string.Join(';', AAnalysis.Defines)]);
+  Log('%s: %s, %d roots, %d search paths, %d defines [%s], switches [%s], '
+    + '-CC %s', [LPrefix, PlatformName(AAnalysis.Platform),
+    Length(AAnalysis.Roots), Length(AAnalysis.SearchPaths),
+    Length(AAnalysis.Defines), string.Join(';', AAnalysis.Defines),
+    string.Join(' ', AAnalysis.Switches),
+    IfThen(AAnalysis.ConsoleTarget, 'on', 'off')]);
   if FStudio.Found then
     LProj := TPasSemaProject.Create(AAnalysis.Platform, AAnalysis.SearchPaths,
       AAnalysis.Defines, FStudio.CompilerVersion)
@@ -1021,6 +1045,11 @@ begin
     for var LAl in AAnalysis.Aliases do
       LProj.AddUnitAlias(LAl.Alias, LAl.UnitName);
     LProj.SetProjectDir(AAnalysis.ProjectDir);
+    // The state every unit starts in: without it a Release config's
+    // `{$IFOPT D+}` code was compiled for the index and a console program's
+    // units had no CONSOLE (PasTree 0.106.0).
+    LProj.SwitchStart := PasStartOptState(AAnalysis.Switches);
+    LProj.ConsoleTarget := AAnalysis.ConsoleTarget;
     for var LPin in AAnalysis.Pins.Values do
       LProj.PinUnitFile(LPin);
     // The same switch pastree-lsp turns on: a member after a dot that nothing

@@ -1,9 +1,9 @@
 unit uFlags;
 
-// Conditional compilation for `defines`: a project define (FIXTURE_A, in
-// AppA's .dproj only - AppB shares its analysis), a unit's own $DEFINE and
-// $UNDEF from an include, nesting, an $IF expression, a branch nothing
-// selects.
+// Conditional compilation for `defines`: a project define and switch ($R+;
+// FIXTURE_A, in AppA's .dproj only - AppB shares its analysis), a unit's own
+// $DEFINE and $UNDEF from an include, nesting, an $IF expression, a branch
+// nothing selects, `$IFOPT R+` before and after the unit's own `$R-`.
 
 interface
 
@@ -33,6 +33,15 @@ begin
   {$IFDEF FIXTURE_A}
   Result := Result + '+deep';
   {$ENDIF}
+{$ENDIF}
+{$IFOPT R+}
+  Result := Result + '+range';
+{$ELSE}
+  Result := Result + '+norange';
+{$ENDIF}
+{$R-}
+{$IFOPT R+}
+  Result := Result + '+still';
 {$ENDIF}
 end;
 

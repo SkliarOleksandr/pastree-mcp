@@ -236,6 +236,8 @@ defines {"file":"Shared/uFlags.pas","line":34}
 defines {"file":"Shared/Flags.inc","line":6}
 defines {"file":"Shared/uFlags.pas"}
 defines {"file":"Shared/uFlags.pas","limit":1}
+defines {"file":"Shared/uFlags.pas","line":40}
+defines {"file":"Shared/uFlags.pas","line":44}
 defines {"file":"Shared/uShapes.pas"}
 defines {"file":"Shared/uShapes.pas","line":5}
 defines {"name":"FIXTURE_A"}

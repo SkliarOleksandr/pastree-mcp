@@ -145,8 +145,9 @@ Check 'members empty' (Block $b 'members {"symbol":"TEmpty"}') @('TEmpty (AppA\u
 Check 'members not a type' (Block $b 'members {"symbol":"RunA"}') @('RunA is a procedure - `members` takes a type')
 Check 'members joined' (Block $b 'members {"symbol":"TWideBox"}') @("  public`n    71  function Configure(const AFirstName: string; ASecondValue: Integer; const AThirdName: string = 'third'; AFourthFlag: Boolean = False): Boolean;`n", '74  procedure Many(const AAlphaName, ABetaName, AGammaName: string; ADeltaCount, AEpsilonCount, AZetaCount: Integer; const AEtaText, AThetaText, ...); virtual;')
 # A field whose type is written in place has no members: said, not an error.
+# `string[6]` is typed ShortString since PasTree 0.101.0, and said so.
 Check 'members in-place array' (Block $b 'members {"symbol":"TBufRec.Buf"}') @('TBufRec.Buf (field) is `array[0..3] of Byte` - a type written in place, with no members')
-Check 'members in-place string' (Block $b 'members {"symbol":"TBufRec.Code"}') @('TBufRec.Code (field) is `string[6]` - a type written in place, with no members')
+Check 'members in-place string' (Block $b 'members {"symbol":"TBufRec.Code"}') @('TBufRec.Code (field) is a ShortString: no members')
 # "AppA\tuAppA.pas" in JSON is a tab, not a backslash: say so, not "invalid characters in path".
 Check 'control character' (Block $b 'outline {"file":"AppA') @('`file` holds a control character (#9)')
 Check 'references' (Block $b 'references {"symbol":"TShape.Area"}') @('1 references in 1 files', "  RunA`n    22  Writeln(LShape.Describe")
@@ -287,7 +288,7 @@ Check 'impact nothing' (Block $b 'impact {}') @('give `diff`')
 # session did not change is counted, not listed. The second compiles only the
 # program - uMembers is not recompiled, so its warning is not reported again,
 # and not gone either.
-Check 'compile' (Block $b 'compile {"member":"AppA"}') @('compile AppA (Win32 Debug): built in', '342 lines compiled', 'AppA-Win32-Debug\exe\AppA.exe', 'first build here: every unit compiled', 'warnings - none in files changed this session (1 elsewhere, not listed)')
+Check 'compile' (Block $b 'compile {"member":"AppA"}') @('compile AppA (Win32 Debug): built in', '351 lines compiled', 'AppA-Win32-Debug\exe\AppA.exe', 'first build here: every unit compiled', 'warnings - none in files changed this session (1 elsewhere, not listed)')
 Check 'compile again' (Block $b 'compile {"member":"AppA", "limit"') @('compile AppA (Win32 Debug): built in', '13 lines compiled', 'no errors, warnings or hints') @('first build here')
 Check 'compile bare dpr' (Block $b 'compile {"member":"AppB"}') @('compile AppB (Win32): built in', 'AppB-Win32\exe\AppB.exe', 'first build here', 'no errors, warnings or hints')
 # The forms member: dcc converts its text form files to binary as it links
@@ -295,7 +296,7 @@ Check 'compile bare dpr' (Block $b 'compile {"member":"AppB"}') @('compile AppB 
 Check 'compile forms' (Block $b 'compile {"member":"AppF"}') @('compile AppF (Win32): built in', 'AppF-Win32\exe\AppF.exe', 'no errors, warnings or hints')
 Check 'compile file' (Block $b 'compile {"file"') @('compile - 2 members, those compiling Shared\uShapes.pas', '  AppA (Win32 Debug): built in', '  AppB (Win32): built in', 'no errors, warnings or hints')
 # A rebuild recompiles uMembers: its warning again, known, so not new.
-Check 'compile rebuild' (Block $b 'compile {"member":"AppA", "rebuild"') @('342 lines compiled', "warnings - 1 in the group's files:`nAppA\uMembers.pas", '  37  W1055 PUBLISHED caused RTTI', "to be added to type 'TDerived' (in TDerived)`n        published") @('[new]')
+Check 'compile rebuild' (Block $b 'compile {"member":"AppA", "rebuild"') @('351 lines compiled', "warnings - 1 in the group's files:`nAppA\uMembers.pas", '  37  W1055 PUBLISHED caused RTTI', "to be added to type 'TDerived' (in TDerived)`n        published") @('[new]')
 Check 'compile no member' (Block $b 'compile {"member":"NoSuch"}') @('no member named NoSuch - the group has: AppA, AppB, AppF')
 Check 'compile bad show' (Block $b 'compile {"show"') @('`show` is new, warnings or all')
 Check 'compile nothing changed' (Block $b 'compile {}') @('no file has changed since the server started - name the `member` to build (the group has: AppA, AppB, AppF)')
@@ -399,7 +400,7 @@ Check 'rename_plan handler' (Block $b 'rename_plan {"symbol":"TfrmMain.btnSaveCl
 # (PasTree 0.87.0), and so is a member's .dproj entry (uMembers): left, each
 # names a file the rename removed - F2613, and an index of a missing unit.
 Check 'rename_plan unit' (Block $b 'rename_plan {"symbol":"uShapes"') @('to uShapesNew - 5 edits in 4 files', "AppB\AppB.dpr`n  8:3, 25 (uShapes.pas -> uShapesNew.pas)  uShapesNew in '..\Shared\uShapesNew.pas',", '  1:6  [declaration]  unit uShapesNew;', '(the unit''s file must be called uShapesNew.pas for it to compile')
-Check 'rename_plan unit dproj' (Block $b 'rename_plan {"symbol":"uMembers"') @('to uMembership - 4 edits in 3 files', "AppA\AppA.dpr`n  7:3, 16 (uMembers.pas -> uMembership.pas)  uMembership in 'uMembership.pas';", "AppA\AppA.dproj`n  14:32 (uMembers.pas -> uMembership.pas)  <DCCReference Include=`"uMembership.pas`"/>")
+Check 'rename_plan unit dproj' (Block $b 'rename_plan {"symbol":"uMembers"') @('to uMembership - 4 edits in 3 files', "AppA\AppA.dpr`n  7:3, 16 (uMembers.pas -> uMembership.pas)  uMembership in 'uMembership.pas';", "AppA\AppA.dproj`n  15:32 (uMembers.pas -> uMembership.pas)  <DCCReference Include=`"uMembership.pas`"/>")
 Check 'rename_plan overloads refused' (Block $b 'rename_plan {"symbol":"TQuiet.Hush"') @('`TQuiet.Hush` names 2 overloads of one routine - pass `file` + `line` + `name`')
 Check 'rename_plan one overload' (Block $b 'rename_plan {"file":"AppA/uMembers.pas"') @('to Quieten - ', '[declaration]  procedure Quieten(const S: string); overload;') @('procedure Quieten(A: Integer)')
 Check 'rename_plan nothing uses it' (Block $b 'rename_plan {"symbol":"TfrmMain.NeverBound"') @('to Unbound - 2 edits in 1 files', '  23:15  [declaration]  procedure Unbound(Sender: TObject);')
@@ -468,8 +469,13 @@ Check 'defines else' (Block $b 'defines {"file":"Shared/uFlags.pas","line":21}')
 Check 'defines nested' (Block $b 'defines {"file":"Shared/uFlags.pas","line":25,"name":"FIXTURE_OFF"}') @('Shared\uFlags.pas:25 is compiled', 'here: FIXTURE_OFF not defined - its $DEFINE at Shared\Flags.inc:6 does not reach here', "outermost first:`n  23 {`$IFDEF FIXTURE_LOCAL}: taken - FIXTURE_LOCAL defined at Shared\Flags.inc:2`n  24 {`$IFNDEF FIXTURE_OFF}: taken")
 Check 'defines not reached' (Block $b 'defines {"file":"Shared/uFlags.pas","line":34}') @('Shared\uFlags.pas:34 is not compiled', '  31 {$IFDEF FIXTURE_NEVER}: not taken - FIXTURE_NEVER not defined - nothing in the group defines it', '  33 {$IFDEF FIXTURE_A}: not reached')
 Check 'defines include' (Block $b 'defines {"file":"Shared/Flags.inc","line":6}') @('Shared\Flags.inc:6 is not compiled, a directive line', '(an include file: read as Shared\uFlags.pas reads it)', '  5 {$IFDEF FIXTURE_NEVER}: not taken')
-Check 'defines file' (Block $b 'defines {"file":"Shared/uFlags.pas"}') @('Shared\uFlags.pas: 5 lines not compiled, in 2 branches', '  line 21: 18 {$IFDEF FIXTURE_A}, its {$ELSE} at 20: not taken', '  lines 32-35: 31 {$IFDEF FIXTURE_NEVER}: not taken') @('more (raise')
-Check 'defines file cut' (Block $b 'defines {"file":"Shared/uFlags.pas","limit":1}') @('in 2 branches', '  line 21: ', '... 1 more (raise `limit`)') @('lines 32-35')
+Check 'defines file' (Block $b 'defines {"file":"Shared/uFlags.pas"}') @('Shared\uFlags.pas: 7 lines not compiled, in 4 branches', '  line 21: 18 {$IFDEF FIXTURE_A}, its {$ELSE} at 20: not taken', '  lines 32-35: 31 {$IFDEF FIXTURE_NEVER}: not taken', '  line 40: 37 {$IFOPT R+}, its {$ELSE} at 39: not taken - $R+ by the project', '  line 44: 43 {$IFOPT R+}: not taken - $R- at Shared\uFlags.pas:42') @('more (raise')
+Check 'defines file cut' (Block $b 'defines {"file":"Shared/uFlags.pas","limit":1}') @('in 4 branches', '  line 21: ', '... 3 more (raise `limit`)') @('lines 32-35')
+# $IFOPT: AppA's .dproj sets range checking (DCC_RangeChecking), AppB has no
+# .dproj and shares the analysis - said as for a define; then the unit's $R-.
+# The options in effect follow the symbols: those set, the rest dcc's defaults.
+Check 'defines ifopt project' (Block $b 'defines {"file":"Shared/uFlags.pas","line":40}') @('Shared\uFlags.pas:40 is not compiled', '  37 {$IFOPT R+}, its {$ELSE} at 39: not taken - $R+ by the project', "    (AppB starts with `$R-, the analysis takes AppA's switches - built as AppB, it is `$R- here)", "  options set by the project: R+ - the rest at dcc's default") @("  options all")
+Check 'defines ifopt unit' (Block $b 'defines {"file":"Shared/uFlags.pas","line":44}') @('Shared\uFlags.pas:44 is not compiled', '  43 {$IFOPT R+}: not taken - $R- at Shared\uFlags.pas:42', "  options set in Shared\uFlags.pas: R- 42 - the rest at dcc's default") @('AppB starts', 'options set by the project')
 Check 'defines file none' (Block $b 'defines {"file":"Shared/uShapes.pas"}') @('Shared\uShapes.pas: 0 lines not compiled')
 Check 'defines no block' (Block $b 'defines {"file":"Shared/uShapes.pas","line":5}') @('Shared\uShapes.pas:5 is compiled', 'no conditional block around it', 'in effect here:') @('by $DEFINE')
 Check 'defines name' (Block $b 'defines {"name":"FIXTURE_A"}') @('FIXTURE_A (conditional symbol) - 5 directives in 2 files of the group', 'analysis 0: AppA, AppB, AppF; Win32: defined by the project - AppB does not define FIXTURE_A', "Shared\uFlags.pas`n  18  {`$IFDEF FIXTURE_A} - its branch compiled`n  33  {`$IFDEF FIXTURE_A} - not reached")
@@ -555,7 +561,8 @@ Check 'strict overrides' (Block $b 'related {"relation":"overrides"') @('overrid
 Check 'strict callers' (Block $b 'callers {"symbol":"TCircle.Area", "depth":3}') @('3 calls in 3 routines; depth 2: 2 in 2; depth 3: 1 in 1', '22  [via TShape.Area]', '75  [via IShape.Area]', '10  [-> RunA, main block]', '13  [-> RunB, main block]')
 # Each analysis its own answer; what they agree on said once.
 Check 'strict defines' (Block $b 'defines {"file":"Shared/uFlags.pas","line":21}') @('Shared\uFlags.pas:21 is not compiled (analysis 0: AppA; Win32)', 'Shared\uFlags.pas:21 is compiled (analysis 1: AppB, AppF; Win32)', ': taken - FIXTURE_A not defined - the project of AppA defines it, analyzed apart', 'in effect here (analysis 0: AppA; Win32):', 'in effect here (analysis 1: AppB, AppF; Win32):') @('AppB does not define')
-Check 'strict defines agree' (Block $b 'defines {"file":"Shared/uFlags.pas","line":34}') @('Shared\uFlags.pas:34 is not compiled (analysis 0: AppA; Win32; analysis 1: AppB, AppF; Win32)')
+Check 'strict defines ifopt' (Block $b 'defines {"file":"Shared/uFlags.pas","line":40}') @('Shared\uFlags.pas:40 is not compiled (analysis 0: AppA; Win32)', 'Shared\uFlags.pas:40 is compiled (analysis 1: AppB, AppF; Win32)', ": taken - `$R- dcc's default", "in effect here (analysis 1: AppB, AppF; Win32):", "  options all at dcc's default: A8 B- C+ D+ G+ H+ I+ J- L+ M- O+ P+ Q- R- S- T- U- V+ W- X+ Y+ Z1 SCOPEDENUMS OFF RTTI INHERIT VARPROPSETTER OFF") @("AppB starts")
+Check 'strict defines agree'(Block $b 'defines {"file":"Shared/uFlags.pas","line":34}') @('Shared\uFlags.pas:34 is not compiled (analysis 0: AppA; Win32; analysis 1: AppB, AppF; Win32)')
 Check 'strict defines name' (Block $b 'defines {"name":"FIXTURE_A"}') @('analysis 0: AppA; Win32: defined by the project', 'analysis 1: AppB, AppF; Win32: not defined by the project', '  18  {$IFDEF FIXTURE_A} - its branch compiled in analysis 0, its branch not compiled in analysis 1')
 Check 'strict members' (Block $b 'members {"symbol":"TDerived"}') @('8 members', '19  FCount: Integer;')
 # The implementations of one call, merged from both analyses: TBigCircle is

@@ -4145,11 +4145,212 @@ begin
     end;
 end;
 
+// The switch an `{$IFOPT X+}` tests, its letter upper case; False for any
+// other directive.
+function IfOptSwitch(const ATS: TPasTokenStream; ATok: Integer;
+  out ALetter, ASign: Char): Boolean;
+var
+  LText: string;
+  LP: Integer;
+begin
+  Result := False;
+  if DirectiveWord(ATS, ATok) <> 'IFOPT' then
+    Exit;
+  LText := ATS.TokenText(ATok);
+  LP := Pos('IFOPT', UpperCase(LText)) + 5;
+  while (LP <= Length(LText)) and CharInSet(LText[LP], [' ', #9]) do
+    Inc(LP);
+  if (LP + 1 > Length(LText)) or
+     not CharInSet(UpCase(LText[LP]), ['A'..'Z']) or
+     not CharInSet(LText[LP + 1], ['+', '-']) then
+    Exit;
+  ALetter := UpCase(LText[LP]);
+  ASign := LText[LP + 1];
+  Result := True;
+end;
+
+// An option as a switch reads: `R+`, `A8`; a long-form-only one by its name
+// and value (`SCOPEDENUMS OFF`).
+function OptionShort(ALetter: Char; const AName, AValue: string): string;
+begin
+  if ALetter = #0 then
+    Result := AName + ' ' + AValue
+  else if AValue = 'ON' then
+    Result := ALetter + '+'
+  else if AValue = 'OFF' then
+    Result := ALetter + '-'
+  else
+    Result := ALetter + AValue;
+end;
+
+// What set an option's value: the directive (file:line), the project's
+// switches, dcc's default.
+function OptionOriginText(AWs: TMcpWorkspace;
+  const ASite: TPasOptionSite): string;
+begin
+  case ASite.Origin of
+    ooUnit:
+      Result := Format('at %s:%d', [AWs.RelPath(ASite.Hit.FilePath),
+        ASite.Hit.Line]);
+    ooProject:
+      Result := 'by the project';
+  else
+    Result := 'dcc''s default';
+  end;
+end;
+
+// The options of ASites (by option) as one line: those the project set,
+// then those a directive set, by file and line (`in common.inc: O- 7,
+// R+ 16`), the rest said to be dcc's defaults; every option when nothing
+// set any.
+function OptionsSetText(AWs: TMcpWorkspace;
+  const ASites: TArray<TPasOptionSite>): string;
+var
+  LProject, LAll, LParts: TArray<string>;
+  LUnit: TArray<TPasOptionSite>;
+  LFile, LLine: string;
+begin
+  LProject := nil;
+  LAll := nil;
+  LUnit := nil;
+  for var LS in ASites do
+    if LS.Name <> '' then
+    begin
+      LAll := LAll + [OptionShort(LS.Letter, LS.Name, LS.Value)];
+      case LS.Origin of
+        ooProject:
+          LProject := LProject + [OptionShort(LS.Letter, LS.Name, LS.Value)];
+        ooUnit:
+          LUnit := LUnit + [LS];
+      end;
+    end;
+  if (Length(LProject) = 0) and (Length(LUnit) = 0) then
+    Exit('all at dcc''s default: ' + String.Join(' ', LAll));
+  TArray.Sort<TPasOptionSite>(LUnit, TComparer<TPasOptionSite>.Construct(
+    function(const L, R: TPasOptionSite): Integer
+    begin
+      Result := CompareText(L.Hit.FilePath, R.Hit.FilePath);
+      if Result = 0 then
+        Result := L.Hit.Line - R.Hit.Line;
+      if Result = 0 then
+        Result := Ord(L.Option) - Ord(R.Option);
+    end));
+  LParts := nil;
+  if Length(LProject) > 0 then
+    LParts := LParts + ['by the project: ' + String.Join(' ', LProject)];
+  LFile := '';
+  LLine := '';
+  for var LS in LUnit do
+  begin
+    if not SameText(LS.Hit.FilePath, LFile) then
+    begin
+      if LLine <> '' then
+        LParts := LParts + [LLine];
+      LFile := LS.Hit.FilePath;
+      LLine := 'in ' + AWs.RelPath(LFile) + ': ';
+    end
+    else
+      LLine := LLine + ', ';
+    LLine := LLine + Format('%s %d', [OptionShort(LS.Letter, LS.Name,
+      LS.Value), LS.Hit.Line]);
+  end;
+  if LLine <> '' then
+    LParts := LParts + [LLine];
+  Result := 'set ' + String.Join('; ', LParts) + ' - the rest at dcc''s default';
+end;
+
+// The options in effect at AOffset of file AFi of model AMid (OptionsAt),
+// indexed by option. OptionsAt reads a position of the unit's main file: an
+// include's place is the `$I` it was read through, where PasTree counts every
+// switch of the include.
+function OptionsAtPlace(AA: TMcpAnalysis; AMid, AFi, AOffset: Integer;
+  out ASites: TArray<TPasOptionSite>): Boolean;
+var
+  LM: TPasSemaModel;
+  LOff, LLine, LCol: Integer;
+  LAll: TArray<TPasOptionSite>;
+begin
+  ASites := nil;
+  LM := AA.Proj.Model(AMid);
+  LOff := -1;
+  for var LS in CondStops(LM, AFi, AOffset) do
+    if LS.Fi = 0 then
+      LOff := LS.Offset;
+  if LOff < 0 then
+    Exit(False);
+  LM.Tree.Source.Files[0].OffsetToLineCol(LOff, LLine, LCol);
+  LAll := AA.Nav.OptionsAt(AMid, LLine, LCol);
+  SetLength(ASites, Ord(High(TPasOption)) + 1);
+  for var LS in LAll do
+    ASites[Ord(LS.Option)] := LS;
+  Result := Length(LAll) > 0;
+end;
+
+// Of AMembers, those whose own switches give option ALetter another start
+// value than the analysis': a shared analysis is built with its first
+// member's switches (as with its defines).
+function MemberOptionNote(AWs: TMcpWorkspace; AA: TMcpAnalysis;
+  AOption: TPasOption; ALetter: Char; const AMembers: TArray<Integer>): string;
+var
+  LHave, LOwn: string;
+  LDiffer: TArray<string>;
+begin
+  Result := '';
+  if Length(AA.Members) = 0 then
+    Exit;
+  LHave := PasOptionValue(PasStartOptState(AA.Switches), AOption);
+  LDiffer := nil;
+  LOwn := '';
+  for var LMi in AMembers do
+    if PasOptionValue(PasStartOptState(AWs.Members[LMi].Switches), AOption) <>
+       LHave then
+    begin
+      LDiffer := LDiffer + [AWs.Members[LMi].Name];
+      if LOwn = '' then
+        LOwn := PasOptionValue(PasStartOptState(AWs.Members[LMi].Switches),
+          AOption);
+    end;
+  if Length(LDiffer) > 0 then
+    Result := Format('%s start%s with $%s, the analysis takes %s''s switches - '
+      + 'built as %s, it is $%s here', [String.Join(', ', LDiffer),
+      IfThen(Length(LDiffer) = 1, 's', ''), OptionShort(ALetter, '', LOwn),
+      AWs.Members[AA.Members[0]].Name, LDiffer[0],
+      OptionShort(ALetter, '', LOwn)]);
+end;
+
+// Why an `{$IFOPT}` block went as it did: the option's value at the
+// directive and what set it.
+function IfOptWhy(AWs: TMcpWorkspace; AA: TMcpAnalysis; AMid, AFi: Integer;
+  const ATS: TPasTokenStream; ATok: Integer; const AMembers: TArray<Integer>;
+  var ANotes: TArray<string>): string;
+var
+  LLetter, LSign: Char;
+  LSites: TArray<TPasOptionSite>;
+  LOpt: TPasOption;
+  LNote: string;
+begin
+  Result := '';
+  if not IfOptSwitch(ATS, ATok, LLetter, LSign) then
+    Exit;
+  LOpt := TPasOption(Ord(LLetter) - Ord('A'));
+  if (PAS_OPTION_NAMES[LOpt] = '') or
+     not OptionsAtPlace(AA, AMid, AFi, ATS.Tokens[ATok].Start, LSites) then
+    Exit(Format('$%s%s: no such switch', [LLetter, LSign]));
+  Result := Format('$%s %s', [OptionShort(LLetter, '', LSites[Ord(LOpt)].Value),
+    OptionOriginText(AWs, LSites[Ord(LOpt)])]);
+  if LSites[Ord(LOpt)].Origin <> ooUnit then
+  begin
+    LNote := MemberOptionNote(AWs, AA, LOpt, LLetter, AMembers);
+    if LNote <> '' then
+      ANotes := ANotes + [LNote];
+  end;
+end;
+
 // A branch as a row: its block's opening directive, the branch's own when
 // it is an $ELSE or $ELSEIF, and whether it is compiled, with why.
-function BranchText(AWs: TMcpWorkspace; AA: TMcpAnalysis; LM: TPasSemaModel;
-  AFi: Integer; const ABranches: TArray<TCondBranch>; AIdx: Integer;
-  const ABase: TBaseDefines; const AMembers: TArray<Integer>;
+function BranchText(AWs: TMcpWorkspace; AA: TMcpAnalysis; AMid: Integer;
+  LM: TPasSemaModel; AFi: Integer; const ABranches: TArray<TCondBranch>;
+  AIdx: Integer; const ABase: TBaseDefines; const AMembers: TArray<Integer>;
   out ANotes: TArray<string>): string;
 var
   LTS: TPasTokenStream;
@@ -4174,6 +4375,9 @@ begin
   else
     Result := Result + ': not taken';
   LWhy := nil;
+  LNote := IfOptWhy(AWs, AA, AMid, AFi, LTS, LB.Head, AMembers, ANotes);
+  if LNote <> '' then
+    LWhy := LWhy + [LNote];
   LDefs := DefinesBefore(LM, CondStops(LM, AFi, LTS.Tokens[LB.Head].Start));
   try
     for var LName in BranchNames(LM, AFi, ABranches, AIdx) do
@@ -4274,6 +4478,7 @@ var
   LNotes, LUnitDefs, LUndone, LProject, LPlatform, LParts: TArray<string>;
   LLineText, LNote: string;
   LMembers: TArray<Integer>;
+  LOpts: TArray<TPasOptionSite>;
 begin
   if not CondModelOf(AWs, AA, AFile, LMid, LFi) then
     Exit('');
@@ -4330,8 +4535,8 @@ begin
           LSb.Append('  ');
           if LP.Fi <> LFi then
             LSb.Append(AWs.RelPath(LM.Tree.Source.FileNames[LP.Fi]) + ':');
-          LSb.AppendLine(BranchText(AWs, AA, LM, LP.Fi, LBr, LP.Branch, LBase,
-            LMembers, LNotes));
+          LSb.AppendLine(BranchText(AWs, AA, LMid, LM, LP.Fi, LBr, LP.Branch,
+            LBase, LMembers, LNotes));
           for var LN in LNotes do
             LSb.AppendLine('    (' + LN + ')');
         end;
@@ -4393,6 +4598,13 @@ begin
       if Length(LUndone) > 0 then
         LSb.AppendLine('  undefined by a unit''s $UNDEF: ' + String.Join(', ',
           LUndone));
+      // The compiler options (an agent asking whether range checking is on,
+      // or why a record has the size it has): those the project or the code
+      // set, the code's by the file of their directive as the $DEFINEs are
+      // (on the client group one include sets 13); every one only when
+      // nothing set any.
+      if OptionsAtPlace(AA, LMid, LFi, LOffset, LOpts) then
+        LSb.AppendLine('  options ' + OptionsSetText(AWs, LOpts));
     finally
       LDefs.Free;
     end;
@@ -4461,8 +4673,8 @@ begin
         LRows.Append(Format('  line %d: ', [LFrom]))
       else
         LRows.Append(Format('  lines %d-%d: ', [LFrom, LTo]));
-      LRows.AppendLine(BranchText(AWs, AA, LM, LFi, LBr, LI, LBase, LMembers,
-        LNotes));
+      LRows.AppendLine(BranchText(AWs, AA, LMid, LM, LFi, LBr, LI, LBase,
+        LMembers, LNotes));
       for var LN in LNotes do
         LRows.AppendLine('    (' + LN + ')');
     end;
@@ -16942,11 +17154,15 @@ const
     '{"name":"defines","description":"Conditional compilation, as the '
     + 'analyzed configuration compiles it - before editing code between '
     + '{$IFDEF}s, whether the branch you edit is the one that is built. '
-    + '`file` + `line`: whether the line is compiled, each {$IF}/{$IFDEF} '
-    + 'around it with whether its branch is taken and why (the unit $DEFINE '
-    + 'or $UNDEF at file:line, the project, the platform, or nothing - and '
-    + 'then a $DEFINE of it that does not reach there), and the symbols in '
-    + 'effect there. `file` alone: its lines not compiled, by branch. `name`: '
+    + '`file` + `line`: whether the line is compiled, each {$IF}/{$IFDEF}/'
+    + '{$IFOPT} around it with whether its branch is taken and why (the unit '
+    + '$DEFINE or $UNDEF at file:line, the project, the platform, or nothing '
+    + '- and then a $DEFINE of it that does not reach there; for {$IFOPT} '
+    + 'the switch''s value and the directive, project setting or dcc default '
+    + 'that set it), the symbols in effect there, and the compiler options in '
+    + 'effect there ($R+, $A8, ...: range and overflow checks, alignment, '
+    + 'RTTI) with what set those not at dcc''s default. `file` alone: its '
+    + 'lines not compiled, by branch. `name`: '
     + 'where a symbol is defined in each analysis and every directive of the '
     + 'group naming it - a test with whether its branch is compiled. A '
     + 'project of the group analyzed with another member''s defines is said: '
