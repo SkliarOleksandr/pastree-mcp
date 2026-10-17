@@ -20,14 +20,22 @@ exactly the uses the compiler would bind, one line each.
   one module at a time, so line numbers in answers match the files the agent
   just edited - and the answer names them, so an edit made by someone else
   shows.
+- **The library read interface-only.** The RTL, the VCL and the third-party
+  libraries of the installed RAD Studio are analyzed for their declarations,
+  not their bodies (light mode) - the own code exactly as before. A tool that
+  needs a library body - `source` of a library routine, `callees` of one,
+  `lint` - analyzes that unit in full first and says so; an answer that may
+  miss calls made inside library bodies says that too.
 - **Built for an agent.** Symbols are addressed by name (`TFoo.Bar`) or by file,
   line and identifier - no column counting; a unit by its name or its file. Answers are compact text:
   relative paths, grouped by file and by the routine each row sits in,
   capped.
 
 Measured on the client group (9 projects, 7,700 units, Win32 + Win64, RAD
-Studio 13): the whole group loads in **9 s / 2.7 GB** under the default policy,
-or **16 s / 4.3 GB** under the exact one. Typical calls take 60-500 ms.
+Studio 13): the whole group loads in **3.9 s / 1.5 GB** under the default policy,
+or **6.5 s / 2.2 GB** under the exact one (with `--no-light`, every library
+body analyzed too: 6.9 s / 2.8 GB and 12.5 s / 4.6 GB). Typical calls take
+60-500 ms.
 
 ## Tools
 
@@ -130,6 +138,8 @@ them over grep. A new session is needed after registering or rebuilding.
 | `--platform <p>` | per project | Override every member's platform: `Win32`, `Win64` |
 | `--config <c>` | per project | Build configuration: `Debug`, `Release` |
 | `--groups <p>` | `shared` | `shared`: one analysis per platform. `strict`: one per distinct configuration. See SPEC.md |
+| `--light <dir>` | none | A directory tree whose units are read interface-only, besides the installed library (registry library and browsing paths, Studio sources); repeats. Relative to the project's directory. Under the group directory its units count as library, not own (SPEC 9.9) |
+| `--no-light` | off | Analyze every library unit in full, bodies included - as before 0.31.0 |
 | `--build-dir <dir>` | `%TEMP%\pastree-mcp` | Where `compile` builds: a directory per group, member and configuration, kept between sessions so a build is incremental |
 | `--log <file\|none>` | beside the project | `<project>-pastree-mcp.log`, truncated per run. A file another server holds is not shared: this one logs to `<name>-<pid>.log` beside it and says so on stderr; `status` names the file written |
 

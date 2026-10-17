@@ -25,7 +25,9 @@ program pastree_mcp;
   --studio <BDS version>,
   --platform <Win32|Win64>, --config <Debug|Release>, --groups <shared|strict>,
   --build-dir <dir> (where `compile` builds; default %TEMP%\pastree-mcp),
-  --log <file|none>, --version.
+  --light <dir> (repeats: a directory tree whose units are read
+  interface-only, besides the installed library), --no-light (every unit in
+  full), --log <file|none>, --version.
 }
 
 {$APPTYPE CONSOLE}
@@ -61,6 +63,8 @@ type
 var
   GProject, GStudio, GPlatform, GConfig, GLog: string;
   GAlso: TArray<string>;
+  GLight: TArray<string>;
+  GNoLight: Boolean;
   GPolicy: TMcpGroupPolicy;
   GCalls: TArray<TCall>;
   GWs: TMcpWorkspace;
@@ -172,6 +176,10 @@ begin
       GProject := Next
     else if SameText(ParamStr(LIdx), '--also') then
       GAlso := GAlso + [Next]
+    else if SameText(ParamStr(LIdx), '--light') then
+      GLight := GLight + [Next]
+    else if SameText(ParamStr(LIdx), '--no-light') then
+      GNoLight := True
     else if SameText(ParamStr(LIdx), '--studio') then
       GStudio := Next
     else if SameText(ParamStr(LIdx), '--platform') then
@@ -294,6 +302,7 @@ begin
     Log('project %s', [GProject]);
     GWs := TMcpWorkspace.Create(GProject, GStudio, GPlatform, GConfig, GPolicy,
       GAlso);
+    GWs.SetLight(not GNoLight, GLight);
     if Length(GCalls) > 0 then
       RunCli
     else

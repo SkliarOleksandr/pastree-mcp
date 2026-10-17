@@ -76,6 +76,9 @@ param(
     [string]$Exe,           # default out\pastree-mcp.exe beside tests\
     [string]$Groups = 'shared',
     [string]$BuildDir,      # passed as --build-dir (a compile call in -Calls)
+    # more server options, e.g. '--no-light' or '--light,ThirdParty\Lib' for
+    # the full-vs-light comparison (SPEC 9.9); comma-separated
+    [string[]]$ServerArgs = @(),
     [int]$CallTimeout = 180,
     [int]$LoadTimeout = 600,
     [int]$MaxRestarts = 20,
@@ -109,6 +112,7 @@ function Invoke-Calls([string[]]$List, [string]$Tag) {
         [IO.File]::WriteAllLines("$base.calls", [string[]]$List[$k..($List.Count - 1)], $utf8Bom)
         $argList = @('--project', "`"$Project`"", '--groups', $Groups, '--log', "`"$base.log`"", '--script', "`"$base.calls`"")
         if ($BuildDir) { $argList += @('--build-dir', "`"$BuildDir`"") }
+        foreach ($sa in $ServerArgs) { $argList += "`"$sa`"" }
         $p = Start-Process -FilePath $Exe -ArgumentList $argList -NoNewWindow -PassThru `
             -RedirectStandardOutput "$base.out" -RedirectStandardError "$base.err"
         $null = $p.Handle     # else 5.1 forgets ExitCode once the process is gone

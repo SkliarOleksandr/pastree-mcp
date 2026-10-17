@@ -113,6 +113,17 @@ type
     LastBuildMs: Int64;
     Builds: Integer;
     ModuleRuns: Integer;
+    // Light mode: the directory trees whose units this analysis reads
+    // interface-only (TPasSemaProject.LightPaths) - see AssignLightTrees.
+    LightTrees: TArray<string>;
+    // Promotions asked of PasTree (PromoteUnits): accepted, the time they
+    // took, and the refused ones as `Unit (reason)`.
+    Promoted: Integer;
+    PromoteMs: Int64;
+    PromoteRefused: TArray<string>;
+    // `lint`'s promotions (LintPromotions) were done at this Builds/ModuleRuns
+    // - asked again only once the analysis changed.
+    LintPrepared: string;
     constructor Create;
     destructor Destroy; override;
     function MemberNames(const AWorkspace: TObject): string;
@@ -128,6 +139,14 @@ type
     FExtraRoots: TArray<string>;
     FStudioWanted: string;
     FStudio: TMcpStudio;
+    // Light mode (SPEC 9.9): on unless --no-light. FLightDirs: the trees
+    // --light names, full paths. FLightNotOwn: those of them under the group
+    // directory or an --also root and outside every analysis' project
+    // directory (which PasTree never reads light) - library, not own.
+    FLightOn: Boolean;
+    FLightDirs: TArray<string>;
+    FLightNotOwn: TArray<string>;
+    FPromoteNote: string;   // see TakePromoteNote
     FPlatformOverride: string;
     FConfig: string;
     FPolicy: TMcpGroupPolicy;
@@ -170,12 +189,30 @@ type
     function ChangedConfigFiles: TArray<string>;
     procedure ClearAnalyses;
     procedure RebuildOwners;
+    procedure AssignLightTrees;
+    procedure AppendLightStatus(ASb: TStringBuilder; AA: TMcpAnalysis);
   public
     // AExtra: projects outside the group to index with it, as its members are
     // (the client group's tests are a project no .groupproj lists).
     constructor Create(const AProjectFile, AStudio, APlatform, AConfig: string;
       APolicy: TMcpGroupPolicy; const AExtra: TArray<string> = nil);
     destructor Destroy; override;
+    // Light mode: AOn False is --no-light; ADirs the --light trees, relative
+    // to the project's directory or absolute. Before Load.
+    procedure SetLight(AOn: Boolean; const ADirs: TArray<string>);
+    property LightOn: Boolean read FLightOn;
+    // Turns the light units AFiles of AAnalysis into fully analyzed ones
+    // (TPasSemaProject.PromoteUnit) and recreates its navigator; a promotion
+    // asking for a rebuild (`promote-needs-rebuild`) gets one, with the old
+    // project as parse donor, which loads the unit full. A file that is not
+    // a light unit is skipped. Returns how many were promoted; ARebuilt: the
+    // analysis was rebuilt, so its model ids changed; ANote: what was done,
+    // for the answer ('' = nothing), the refusals named.
+    function PromoteUnits(AAnalysis: TMcpAnalysis; const AFiles: TArray<string>;
+      out ARebuilt: Boolean; out ANote: string): Integer;
+    // The notes of the promotions since the last call, '; '-joined, and
+    // clears them: every answer a promotion went into says so (CallTool).
+    function TakePromoteNote: string;
     // Reads the group and analyzes it. Never raises: a failure lands in
     // LoadError and Ready is set either way, so no caller waits forever.
     procedure Load;
@@ -281,6 +318,16 @@ begin
   end;
 end;
 
+function UnitNameOfPath(const APath: string): string;
+begin
+  Result := ChangeFileExt(ExtractFileName(APath), '');
+end;
+
+function Plural(ACount: Integer; const AWord: string): string;
+begin
+  Result := Format('%d %s%s', [ACount, AWord, IfThen(ACount = 1, '', 's')]);
+end;
+
 function SortedLower(const AItems: TArray<string>): string;
 var
   LList: TStringList;
@@ -355,6 +402,7 @@ begin
   FPlatformOverride := APlatform;
   FConfig := AConfig;
   FPolicy := APolicy;
+  FLightOn := True;
   FAnalyses := TObjectList<TMcpAnalysis>.Create(True);
   FConfigStamps := TDictionary<string, TMcpFileStamp>.Create;
   FListed := TDictionary<string, Boolean>.Create;
@@ -443,12 +491,84 @@ end;
 
 function TMcpWorkspace.IsOwnFile(const APath: string): Boolean;
 begin
-  Result := StartsText(IncludeTrailingPathDelimiter(FRoot), APath) or
-    FListed.ContainsKey(LowerCase(APath));
+  if FListed.ContainsKey(LowerCase(APath)) then
+    Exit(True);
+  // A tree --light names inside the group is somebody else's code.
+  if (FLightNotOwn <> nil) and PasUnderDirTrees(APath, FLightNotOwn) then
+    Exit(False);
+  Result := StartsText(IncludeTrailingPathDelimiter(FRoot), APath);
   if not Result then
     for var LDir in FExtraRoots do
       if StartsText(IncludeTrailingPathDelimiter(LDir), APath) then
         Exit(True);
+end;
+
+procedure TMcpWorkspace.SetLight(AOn: Boolean; const ADirs: TArray<string>);
+begin
+  FLightOn := AOn;
+  FLightDirs := nil;
+  for var LDir in ADirs do
+    FLightDirs := FLightDirs + [ExcludeTrailingPathDelimiter(FullPath(LDir))];
+end;
+
+// Light mode (SPEC 9.9): an analysis reads the units of the installed
+// library interface-only - the registry's library and browsing paths and the
+// Studio source trees, the directories the navigator calls library - and the
+// trees --light adds. Own code stays full: a library tree under the group
+// directory or an --also root (the in-repo patched copies of a library are
+// own, SPEC 4), or one holding either of them or a file a member lists, is
+// left out - PasTree exempts the listed files, the roots and the project
+// directory itself (D7), but not the rest of the group directory. An --light
+// tree is kept as named; under a project directory PasTree reads it full
+// all the same, which the log says.
+procedure TMcpWorkspace.AssignLightTrees;
+var
+  LOwnTrees, LTrees, LListed: TArray<string>;
+  LTree: string;
+  LDrop: Boolean;
+begin
+  LOwnTrees := PasNormalizeDirTrees([FRoot] + FExtraRoots);
+  LListed := nil;
+  for var LKey in FListed.Keys do
+    LListed := LListed + [LKey];
+  FLightNotOwn := nil;
+  for var LDir in PasNormalizeDirTrees(FLightDirs) do
+  begin
+    if not PasUnderDirTrees(LDir, LOwnTrees) then
+      Continue;
+    LDrop := False;
+    for var LA in FAnalyses do
+      if PasUnderDirTrees(LDir, PasNormalizeDirTrees([LA.ProjectDir])) then
+      begin
+        Log('--light %s lies under the project directory of analysis %d (%s) '
+          + '- PasTree never reads that directory light; its units stay own '
+          + 'and full', [LDir, LA.Index, LA.ProjectDir]);
+        LDrop := True;
+        Break;
+      end;
+    if not LDrop then
+      FLightNotOwn := FLightNotOwn + [LDir];
+  end;
+  for var LA in FAnalyses do
+  begin
+    LA.LightTrees := nil;
+    if not FLightOn then
+      Continue;
+    for LTree in PasNormalizeDirTrees(FStudio.LibraryPaths(LA.Platform)) do
+    begin
+      // Under the group (own by SPEC 4), or holding it or a listed file.
+      LDrop := PasUnderDirTrees(LTree, LOwnTrees);
+      for var LOwn in LOwnTrees do
+        LDrop := LDrop or StartsStr(LTree, LOwn);
+      for var LFile in LListed do
+        LDrop := LDrop or StartsStr(LTree, LFile);
+      if not LDrop and (IndexStr(LTree, LA.LightTrees) < 0) then
+        LA.LightTrees := LA.LightTrees + [LTree];
+    end;
+    for LTree in PasNormalizeDirTrees(FLightDirs) do
+      if IndexStr(LTree, LA.LightTrees) < 0 then
+        LA.LightTrees := LA.LightTrees + [LTree];
+  end;
 end;
 
 function TMcpWorkspace.IndexedUnitCount(out AOwn: Integer): Integer;
@@ -1052,6 +1172,9 @@ begin
     LProj.ConsoleTarget := AAnalysis.ConsoleTarget;
     for var LPin in AAnalysis.Pins.Values do
       LProj.PinUnitFile(LPin);
+    // Library units interface-only (SPEC 9.9). A donor below brings the
+    // units promoted before (PromotedFiles), which stay full.
+    LProj.LightPaths := AAnalysis.LightTrees;
     // The same switch pastree-lsp turns on: a member after a dot that nothing
     // resolves is E2003 too, and PasTree's corpus runs report zero false ones.
     LProj.ReportUnresolvedMembers := True;
@@ -1091,9 +1214,10 @@ begin
     LKeep.Free;
   end;
   NewNavigator(AAnalysis);
-  Log('%s: %d units (%d own) in %.1f s, %s held; stages %s', [LPrefix,
-    LProj.ModelCount, AAnalysis.OwnModels, AAnalysis.LastBuildMs / 1000,
-    MemoryText(AllocatedBytes), LProj.StageTimings]);
+  Log('%s: %d units (%d own, %d light, %d promoted) in %.1f s, %s held; '
+    + 'stages %s', [LPrefix, LProj.ModelCount, AAnalysis.OwnModels,
+    LProj.LightCount, Length(LProj.PromotedFiles), AAnalysis.LastBuildMs /
+    1000, MemoryText(AllocatedBytes), LProj.StageTimings]);
   // An unreadable file (held open exclusively) or an analyzer defect: its
   // importers get F1027 naming the exception (PasTree 0.95.7).
   if Length(LProj.LoadFailures) > 0 then
@@ -1163,6 +1287,14 @@ begin
       for var LMiss in FMissing do
         Log('group member missing on disk: %s', [LMiss]);
       AssignAnalyses;
+      AssignLightTrees;
+      if not FLightOn then
+        Log('light mode off (--no-light): library units are analyzed in full')
+      else
+        for var LA in FAnalyses do
+          Log('analysis %d: light mode, %d library trees read interface-only%s',
+            [LA.Index, Length(LA.LightTrees), IfThen(FLightDirs <> nil,
+            ' (--light: ' + string.Join('; ', FLightDirs) + ')', '')]);
       FLibDirs := nil;
       if FStudio.Found then
         FLibDirs := [FStudio.Root];
@@ -1243,6 +1375,99 @@ begin
   end;
   RebuildOwners;
   RecordFormStamps;
+end;
+
+function TMcpWorkspace.PromoteUnits(AAnalysis: TMcpAnalysis;
+  const AFiles: TArray<string>; out ARebuilt: Boolean;
+  out ANote: string): Integer;
+var
+  LSW, LOne: TStopwatch;
+  LMid: Integer;
+  LRebuild, LRefused: TArray<string>;
+  LWhy: string;
+begin
+  Result := 0;
+  ARebuilt := False;
+  ANote := '';
+  if (AAnalysis = nil) or (AAnalysis.Proj = nil) then
+    Exit;
+  LSW := TStopwatch.StartNew;
+  LRebuild := nil;
+  LRefused := nil;
+  for var LFile in AFiles do
+  begin
+    LMid := AAnalysis.Proj.ModelIdOf(LFile);
+    if (LMid < 0) or not AAnalysis.Proj.IsLight(LMid) then
+      Continue;
+    LOne := TStopwatch.StartNew;
+    try
+      if AAnalysis.Proj.PromoteUnit(LFile) then
+      begin
+        Inc(Result);
+        Log('analysis %d: promoted %s to a full analysis in %d ms', [
+          AAnalysis.Index, RelPath(LFile), LOne.ElapsedMilliseconds]);
+        Continue;
+      end;
+      LWhy := ModuleRefusalText(AAnalysis.Proj.StageTimings);
+    except
+      on E: Exception do
+        LWhy := Format(' (raised %s: %s)', [E.ClassName, E.Message]);
+    end;
+    Log('analysis %d: promotion of %s refused%s', [AAnalysis.Index,
+      RelPath(LFile), LWhy]);
+    // PasTree kept the file in PromotedFiles: a rebuild loads it full.
+    if Pos('promote-needs-rebuild', LWhy) > 0 then
+      LRebuild := LRebuild + [LFile]
+    else
+    begin
+      LRefused := LRefused + [UnitNameOfPath(LFile) + LWhy];
+      if IndexText(UnitNameOfPath(LFile) + LWhy, AAnalysis.PromoteRefused) < 0
+      then
+        AAnalysis.PromoteRefused := AAnalysis.PromoteRefused +
+          [UnitNameOfPath(LFile) + LWhy];
+    end;
+  end;
+  Inc(AAnalysis.Promoted, Result);
+  if LRebuild <> nil then
+  begin
+    RebuildAnalysis(AAnalysis, 'promoting ' + NamedFiles(Self, LRebuild) +
+      ' needs a rebuild (its $IF questions ask about units not loaded yet)');
+    ARebuilt := True;
+    Inc(Result, Length(LRebuild));
+    Inc(AAnalysis.Promoted, Length(LRebuild));
+  end
+  else if Result > 0 then
+    // The models changed under the navigator, as after a module run.
+    NewNavigator(AAnalysis);
+  Inc(AAnalysis.PromoteMs, LSW.ElapsedMilliseconds);
+  if Result > 0 then
+  begin
+    if Result <= 3 then
+    begin
+      LWhy := '';
+      for var LFile in AFiles do
+        if AAnalysis.Proj.ModelIdOf(LFile) >= 0 then
+          if not AAnalysis.Proj.IsLight(AAnalysis.Proj.ModelIdOf(LFile)) then
+            LWhy := LWhy + IfThen(LWhy <> '', ', ') + UnitNameOfPath(LFile);
+    end
+    else
+      LWhy := Plural(Result, 'library unit');
+    ANote := Format('light mode: %s read interface-only until now, analyzed '
+      + 'in full first (%d ms%s)', [LWhy, LSW.ElapsedMilliseconds,
+      IfThen(ARebuilt, ', the analysis rebuilt for it', '')]);
+  end;
+  if LRefused <> nil then
+    ANote := ANote + IfThen(ANote <> '', '; ', 'light mode: ') +
+      'not analyzed in full, its bodies not read: ' + string.Join(', ',
+      LRefused);
+  if ANote <> '' then
+    FPromoteNote := FPromoteNote + IfThen(FPromoteNote <> '', '; ') + ANote;
+end;
+
+function TMcpWorkspace.TakePromoteNote: string;
+begin
+  Result := FPromoteNote;
+  FPromoteNote := '';
 end;
 
 procedure TMcpWorkspace.EnsureFresh(out AReport: string);
@@ -1414,6 +1639,82 @@ begin
       AReport := AReport + '; ' + LForms;
 end;
 
+// The light-mode lines of `status` for one analysis: how many units are read
+// interface-only and promoted, and two hints for an --light the group may
+// want - directories of own units no member lists one of (an in-repo copy of
+// a library, read in full as own), and own units named as a library unit is
+// (a patched copy).
+procedure TMcpWorkspace.AppendLightStatus(ASb: TStringBuilder;
+  AA: TMcpAnalysis);
+const
+  MAX_HINTS = 5;
+var
+  LDirs: TDictionary<string, Integer>;   // dir -> unlisted own units, -1 = one listed
+  LShadows: TArray<string>;
+  LFile, LDir, LName: string;
+  LN: Integer;
+  LKeys: TArray<string>;
+begin
+  if not FLightOn then
+  begin
+    ASb.AppendLine('  light mode off (--no-light): library units analyzed in '
+      + 'full');
+    Exit;
+  end;
+  ASb.AppendLine(Format('  light mode: %d of %d units are library units read '
+    + 'interface-only (no bodies: calls and uses inside them are not seen); '
+    + '%d promoted to a full analysis on demand%s', [AA.Proj.LightCount,
+    AA.Proj.ModelCount, Length(AA.Proj.PromotedFiles), IfThen(
+    AA.PromoteRefused <> nil, ', refused: ' + string.Join(', ',
+    Copy(AA.PromoteRefused, 0, MAX_HINTS)) + IfThen(Length(AA.PromoteRefused) >
+    MAX_HINTS, ', ...'), '')]));
+  LDirs := TDictionary<string, Integer>.Create;
+  try
+    LShadows := nil;
+    for var LMid := 0 to AA.Proj.ModelCount - 1 do
+    begin
+      LFile := AA.Proj.ModelFile(LMid);
+      if not IsOwnFile(LFile) or not SameText(ExtractFileExt(LFile), '.pas') then
+        Continue;
+      LDir := ExtractFileDir(LFile);
+      if FListed.ContainsKey(LowerCase(LFile)) then
+        LDirs.AddOrSetValue(LDir, -1)
+      else
+      begin
+        if not LDirs.TryGetValue(LDir, LN) then
+          LN := 0;
+        if LN >= 0 then
+          LDirs.AddOrSetValue(LDir, LN + 1);
+        LName := ExtractFileName(LFile);
+        for var LTree in AA.LightTrees do
+          if TFile.Exists(LTree + LName) then
+          begin
+            LShadows := LShadows + [RelPath(LFile)];
+            Break;
+          end;
+      end;
+    end;
+    LKeys := nil;
+    for var LPair in LDirs do
+      if LPair.Value > 0 then
+        LKeys := LKeys + [Format('%s (%d)', [RelPath(LPair.Key), LPair.Value])];
+    TArray.Sort<string>(LKeys);
+    if LKeys <> nil then
+      ASb.AppendLine(Format('  own units in %d directories no member lists a '
+        + 'unit of, read in full: %s - if that is a library''s code, '
+        + '`--light <dir>` reads it interface-only', [Length(LKeys),
+        string.Join(', ', Copy(LKeys, 0, MAX_HINTS)) + IfThen(Length(LKeys) >
+        MAX_HINTS, ', ...')]));
+    if LShadows <> nil then
+      ASb.AppendLine(Format('  %d own unit(s) named as a unit of a library '
+        + 'directory (a patched copy?), read in full: %s', [Length(LShadows),
+        string.Join(', ', Copy(LShadows, 0, MAX_HINTS)) + IfThen(
+        Length(LShadows) > MAX_HINTS, ', ...')]));
+  finally
+    LDirs.Free;
+  end;
+end;
+
 function TMcpWorkspace.StatusText: string;
 var
   LSb: TStringBuilder;
@@ -1464,6 +1765,7 @@ begin
       LSb.AppendLine(Format('analysis %d: %d units (%d own), built %d time(s), '
         + 'last %.1f s, %d module run(s)', [LA.Index, LA.Proj.ModelCount,
         LA.OwnModels, LA.Builds, LA.LastBuildMs / 1000, LA.ModuleRuns]));
+      AppendLightStatus(LSb, LA);
       // Closure health: an unresolved `uses` is a missing library path, and it
       // silences its importers' diagnostics - the one thing worth knowing
       // before trusting "no references" or "no errors".
@@ -1474,7 +1776,9 @@ begin
         begin
           LM := LA.Proj.Model(LMid);
           for var LU := 0 to High(LM.UsesList) do
-            if LM.UsesList[LU].UnitId < 0 then
+            // UNIT_NOT_LOADED: a light unit's implementation `uses`, resolved
+            // and on purpose not loaded - not a missing unit.
+            if LM.UsesList[LU].UnitId = NIL_SYM then
             begin
               if not LMissing.TryGetValue(LM.UsesList[LU].NameFull, LN) then
                 LN := 0;

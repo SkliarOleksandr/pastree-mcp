@@ -1,0 +1,19 @@
+# tests\fixtures\light\App\LightApp.dproj, run by tests\smoke.ps1 twice: with
+# --light ..\lib (its library read interface-only) and with --no-light. The
+# order matters: a promotion lasts for the session, so the calls that show
+# what light mode does not see come before the ones that promote.
+status
+callers {"symbol":"TOwnWorker.DoWork"}
+references {"symbol":"LibRun"}
+related {"symbol":"TLibWorker","relation":"descendants"}
+unit_deps {"unit":"LibBase"}
+outline {"file":"../lib/LibHidden.pas"}
+outline {"file":"../lib/LibReg.pas","section":"interface"}
+diagnostics {"library":true,"limit":1}
+definition {"symbol":"RegisterLib"}
+source {"symbol":"LibRun"}
+callees {"symbol":"TLibWorker.DoWork"}
+callers {"symbol":"TOwnWorker.DoWork"}
+lint {"file":"uOwn.pas"}
+lint {"file":"uOwn.pas"}
+status

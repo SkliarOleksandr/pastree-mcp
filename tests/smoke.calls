@@ -275,3 +275,4 @@ metrics {"metric":"cycles"}
 metrics {"metric":"cycles","file":"AppB/uCycC.pas"}
 metrics {"metric":"cycles","file":"AppB/uRcA.pas"}
 metrics {"metric":"cycles","limit":0}
+references {"symbol":"System.SysUtils.IntToStr","limit":0}

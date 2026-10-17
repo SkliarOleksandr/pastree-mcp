@@ -199,12 +199,15 @@ path, so members in one analysis parse their shared closure once.
 - Under both, a member listing a DIFFERENT file for a unit name already pinned
   in an analysis gets a new one: an analysis can hold one `Foo.pas`.
 
-Measured on the client group (RAD Studio 13.0, 32 GB machine):
+Measured on the client group (RAD Studio 13.0, 32 GB machine; light mode,
+the default since 0.31.0, against `--no-light` - section 9.9):
 
 | Policy | Analyses | Units | Load | Held |
 | --- | --- | --- | --- | --- |
-| shared | 3 | 3958 + 2248 + 522 | 9.3 s | 2.7 GB |
-| strict | 8 | 3767 + 2126 + 1464 + ... | 15.9 s | 4.3 GB |
+| shared | 3 | 3163 + 1680 + 393 | 3.9 s | 1.5 GB |
+| shared, `--no-light` | 3 | 3973 + 2256 + 522 | 6.9 s | 2.8 GB |
+| strict | 9 | 3086 + 1666 + 1078 + ... | 6.5 s | 2.2 GB |
+| strict, `--no-light` | 9 | 3782 + 2134 + 1467 + ... | 12.5 s | 4.6 GB |
 
 Search paths of an analysis: every member's directory, every member's
 `DCC_UnitSearchPath`, then the installed library (registry `Search Path` and
@@ -216,8 +219,9 @@ index first, analysis 0 holding the largest member), else the first that
 reached it. Diagnostics come from the owner only.
 
 **Own vs library.** A file under the group directory, or listed by a member,
-is own. Everything else is library: not watched, demoted after every build,
-listed after own files.
+is own - but for one under a tree `--light` names, which is library. Everything
+else is library: not watched, demoted after every build, listed after own
+files, and read interface-only where it lies in a library tree (9.9).
 
 ## 5. Freshness
 
@@ -255,8 +259,9 @@ finds it), and library files changing (not watched on purpose).
 
 ## 6. Memory
 
-After every build `DemoteText` frees the text layer of every library unit and
-keeps own units warm. Library positions and snippets come back through
+Library units are read interface-only (light mode, 9.9): no bodies are held
+for them unless a tool promoted one. After every build `DemoteText` frees the
+text layer of every library unit and keeps own units warm. Library positions and snippets come back through
 `EnsureHydrated` when a query needs them; own units must stay warm because
 `AnalyzeModuleOnly` refuses a demoted model. Queries re-hydrate library units
 over time; the next build demotes them again. A periodic re-demotion is an
@@ -916,9 +921,10 @@ gap between the answers and the truth.
    by grep as well, so it has not yet said where the tools are enough and
    where an agent falls back - which is what this list should be ordered
    by.
-7. Light mode (9.9): library units analyzed interface-only, the memory and
-   time of every server - PasTree first (9.9.1),
-   this server's `--light` after; measured before it is built.
+7. Light mode (9.9; done, 0.31.0, on PasTree 0.117.1): library units read
+   interface-only by default - the client group in 3.9 s / 1.5 GB instead
+   of 6.9 s / 2.8 GB, every difference of the audit battery said in the
+   answer.
 8. `rename_plan` (done, 0.24.0), `change_plan` (done, 0.25.0) - the notes section 10 added to
    `references` are the rename's parts, collected by hand today (9.6).
 9. `mode: count | files` (9.2; done for `references`, 0.26.0) - the answers the limits cut are about widely
@@ -936,212 +942,150 @@ gap between the answers and the truth.
 `type_of`, several targets per call, `overview`, `implement_plan`,
 `scope_at` and `uses_for` go in when a measured session asks for them.
 
-### 9.9 Light mode
+### 9.9 Light mode (0.31.0)
 
-The server analyzes the whole `uses` closure completely, library bodies
-included: on the client group 2,253 of the 3,958 units of the main analysis
-are library and the process holds about 2.8 GB (`strict`: 1.6 GB and 7 s
-more). An agent asks about the project's own code; of the RTL, the VCL and
-the third-party libraries it needs the declarations, not the bodies. Several
-sessions at once start a server each, so the memory multiplies. The change
-is in PasTree first (design in 9.9.1, 2026-10-01: a
-host-chosen set of units parsed interface-only and never upgraded to a full
-parse, which the staged analysis already does in its first wave). What this
-server adds once PasTree has it:
+The server used to analyze the whole `uses` closure completely, library
+bodies included, though an agent asks about the project's own code and of
+the RTL, the VCL and the third-party libraries needs the declarations. Since
+0.31.0 the library units are read **interface-only** by default (PasTree's
+light mode, 0.113.0-0.117.1: `TPasSemaProject.LightPaths`, PasTree
+`docs/library-light-mode.md`), the own units as before. `--no-light` turns
+it off; `--light <dir>` (repeats) adds a tree.
 
-- **`--light <glob>`** (repeats), and a default for the installed Studio's
-  RTL and VCL sources: the units analyzed interface-only. The in-repo
-  third-party directories (`ThirdParty\...` on the client group) are own by
-  the rule of section 4 and are light only when named.
-- **Said in every answer it touches.** `status` names the light units and
-  the memory and build time saved. `callers`, `impact` and `related` say
-  that calls made from the bodies of light units into own code (an override
-  or an interface method the library runs, an event handler it assigns, a
-  class it creates through a class reference) are not seen. `source` and
-  `definition` of a light routine give the declaration and say the body is
-  not read, or upgrade that one unit on demand.
-- **Equivalence for own code** is the acceptance, measured with the audit
-  battery (10.5): the answers about own symbols equal to the full analysis
-  except for those named rows, every difference classified.
-- **Opt-in until measured.** Whether it becomes the default depends on
-  PasTree's numbers (the share of nodes in bodies, resident memory, closure
-  size) and on the battery.
-- Separate from it: one long-lived server shared by the sessions of a
-  project (a socket or HTTP transport), the other way to stop N sessions
-  holding N indexes. Not planned until light mode has been measured.
+Measured on the client group (frozen copy, RAD Studio 37.0, medians of three
+starts, `status`'s held memory):
 
-#### 9.9.1 The PasTree side (proposal, 2026-10-01, nothing built)
+| Policy | Mode | Units per analysis | Light | Load | Held |
+| --- | --- | --- | --- | --- | --- |
+| shared | full | 3,973 + 2,256 + 522 | - | 6.9 s | 2.8 GB |
+| shared | light | 3,163 + 1,680 + 393 | 1,443 + 908 + 335 | 3.9 s | 1.5 GB |
+| strict | full | 3,782 + 2,134 + 1,467 + 6 more (9) | - | 12.5 s | 4.6 GB |
+| strict | light | 3,086 + 1,666 + 1,078 + 6 more (9) | 4,246 in all | 6.5 s | 2.2 GB |
 
-Written first as a PasTree design note, kept here; the change itself is made in PasTree.
-Whoever builds it starts with "Measure first" and lets the numbers decide whether the rest is worth doing.
+Calls answer faster too: the audit battery below took 225 s against 328 s
+over the same 1,770 calls.
 
+Every binding the analysis makes in the own units is the full analysis's
+(PasTree's gate: 1,695 of 1,695 own units identical, by identity).
 
-##### The problem
+#### Which units are light
 
-An agent working on a project asks about the project's own code: callers,
-overrides, forms, what a change reaches. Almost never about the inside of the
-RTL, the VCL or a third-party library; of those it needs the **declarations**
-(types, members, ancestors, overloads, signatures) and nothing from the
-bodies. PasTree analyzes every unit of the uses closure completely, bodies
-included, and pastree-mcp keeps all of it:
+Per analysis: the installed library - the registry `Search Path` and
+`Browsing Path` of its platform and the Studio source trees, the directories
+the navigator calls library - and the `--light` trees, MINUS a library tree
+under the group directory or an `--also` root, or holding either of them, or
+holding a file a member lists. PasTree itself never reads light a listed
+file (pinned), a root, or anything under the analysis' project directory.
+So own code stays full, the in-repository copies of library units included:
+the client group keeps its third-party sources outside the repository and
+only its patched copies of some of their units (and of a few VCL ones) in
+it, and those are own by section 4's rule. `status` names them as hints -
+directories of own units no member lists a unit of, own units named as a
+unit of a library directory - for whoever wants `--light <dir>` on them. A
+`--light` tree under the group directory is library, not own (not watched,
+not linted); one under a project directory stays own and full, which the log
+says.
 
-- client group (`AVImark.groupproj`, 9 projects): analysis 0 holds 3,958
-  units, 1,705 of them own, so 2,253 library units are fully analyzed; the
-  server holds about 2.8 GB; building the three analyses takes 9.9 s + 7.0 s
-  + 4.2 s. The `strict` policy costs 1.6 GB and 7 s more.
-- an agent session starts its own server process; several sessions at once
-  (worktrees, parallel tasks) multiply the memory. Subagents of one session
-  share the parent's server, so the multiplication is across sessions.
+A light unit is its interface and its implementation `uses`; the units only
+library implementations use are not loaded (`UNIT_NOT_LOADED`). Diagnostics,
+the `status` count of unresolved names and the uses graph treat such an
+entry as resolved and not loaded, not as missing.
 
-`DemoteText` already frees the text layer of library units after a build
-(pastree-mcp SPEC section 6), and MEMORY-AUDIT 6.4-4 stage 1
-(`ReleaseRunMaps`) frees per-run maps. What stays is the semantic model of
-every library routine body: nodes, resolved references, expression types,
-cross-reference tables. That is the part nobody asks for.
+#### Promotion: a library body asked for
 
-##### What exists to build on
+A tool that reads a body promotes the light unit holding it to a full
+analysis first (`PromoteUnit`, the module path: 5-200 ms a unit, its
+consumers not redone, every binding identical to the full analysis's) and
+says so on the answer's last line: `source` and `definition` of a library
+routine (`definition` of a name of more than three declarations promotes
+none and says the implementation was not read), `callees` of one, `outline`
+of a light unit (but `section: interface`), `defines` of its file, and a
+position (`file` + `line`) in its implementation. A promoted unit stays full
+for the session, through rebuilds (the parse donor carries the set). A
+promotion PasTree can only make exact through a rebuild
+(`promote-needs-rebuild`: `$IF` questions about a unit not loaded yet) gets
+one, with the old analysis as donor (2-5 s on the client group); another
+refusal is said ("not analyzed in full, its bodies not read").
 
-- `TPasParser.ParseFile(..., AInterfaceOnly)` parses a unit up to the end of
-  its interface section (`ParseDeclSections`, `PasTree.Parser.pas` around
-  3994: "In interface-only mode we stop here"). `PasTree.Ast.Check` invariant
-  **I7** states the interface-only parse is a prefix of the full one.
-- `AnalyzeStaged` does exactly this in wave 1 (`msIntfReady`: "enough for
-  navigation INTO it") and then upgrades every module in wave 2
-  (`msFullReady`, "revealing implementation-only dependencies"), then the
-  cross passes (`msCrossReady`). The interface wave is documented as "a
-  transient early-usability optimization": the final state equals
-  `AnalyzeProject`. **Light mode is: for chosen units, stop at wave 1.**
-- `.dcu` units (`PasTree.Dcu.Source`) are already interface-only text fed to
-  the ordinary pipeline, so nothing downstream distinguishes them from an
-  interface-only `.pas`.
-- `Demoted` models and `EnsureHydrated` already model "this unit's text is not
-  here, bring it back when a query needs it".
+#### What the answers say
 
-##### The mode
+| Tool | In light mode |
+| --- | --- |
+| `callers`, `impact` | When a root, a source it is called through (a virtual or interface method it overrides or implements), or a property it republishes is declared in a unit light units list: "library units using X are read interface-only - a call or use made inside their bodies is not among the rows". Otherwise, when rows are in library code at all, the same without the names |
+| `references`, `related` | When light units can use the declaration (its unit, units listing it, every one for System), how many: "the bodies and implementation sections of library units read interface-only are not searched - N such units can use it there" |
+| `callees` | A virtual or interface call into a library: "what may run for X - overrides and implementations declared in the implementation sections of library units read interface-only are not among the rows". Fewer candidates can bring a list under the cap that full mode only counted |
+| `find`, and every "no declaration matches" | The index scope names how many units are read interface-only, and that their implementation-only declarations and the units only they use are not indexed |
+| `unit_deps` | An implementation `uses` entry of a light unit naming a unit not loaded: "not analyzed: used only by library implementations" |
+| `diagnostics` | With `library: true` or a library file: how many units report their interface only |
+| `outline` | A light unit with `section: interface`: its line count from the file, "its implementation is not outlined" |
+| `defines` | The count of directives in library files leaves out those past a light unit's interface |
+| `status` | Per analysis: units read interface-only, promoted, refused; the hints above |
+| `members`, `form`, `compile`, `metrics recompile`, `rename_plan`, `change_plan` | Unchanged: they read declarations and own code |
 
-**Light units**: a set of units (by file path, chosen by the host) that are
-parsed interface-only and never upgraded to a full parse. Every other unit
-(the host's own units) is analyzed exactly as today.
+#### `lint` and `metrics cycles`
 
-For a light unit:
+The uses lint reads library implementations: an inline routine's body (the
+units its expansion needs, H2443) and the initialization a removal leaves
+out of a program. Before the first lint the server asks PasTree which light
+units the lint over the own units would have to call unknown
+(`LintPromotions`), promotes them and asks again until nothing is left
+(rebuilding where a promotion needs it), once per analysis until it changes.
+Its own reach (the rows weighed together, which PasTree's lint does not
+have) may still meet a light unit's unknown initialization: it promotes
+those and runs again. A light unit left (a refusal) is never "no effect":
+its row says "read interface-only, its initialization not known", and
+PasTree's doubts naming one stay on the row.
 
-| | stays | goes |
-| --- | --- | --- |
-| parse | uses (interface), types, constants, variables, routine headers, class and interface members, properties, attributes, generic declarations, GUIDs | implementation section: bodies, local types, implementation `uses`, initialization and finalization |
-| semantic | type resolution of the declarations, ancestors, overload sets, member lookup, inherited members, default properties, enum values | expression typing and reference binding inside bodies, cross passes over bodies (`CrossResolve`, `CheckCalls`, `BindTypesX`, `CrossType` on those nodes) |
-| closure | the interface `uses` closure | units reachable only through a light unit's implementation `uses` (a library unit used by another library's body) |
+On the client group, the whole lint (19,928 rows): the same 19,928 rows of
+the same rules; four rows are more cautious - a "leaves ... out" naming a
+library unit that full mode reaches through a library unit only library
+implementations use, which light mode does not load: the safe side, and
+said in a note on the answer. `metrics cycles` is identical. The first lint
+of a session pays for its promotions - 47 s against 7 s (478 units
+promoted in 11 rounds, three rebuilds, one per analysis, for
+System.Variants and Winapi.Windows); the next one 3.4 s, as in full mode.
 
-Own units are unchanged, with these named consequences (the whole list; an
-answer outside it is a defect):
+#### Full vs light, measured
 
-1. **Calls made from a library body into own code are not seen.** The RTL or
-   VCL calling an own override, an interface implementation, a published
-   method through RTTI, an event handler assigned inside the library, a class
-   created through a class reference inside a library routine. `callers`,
-   `impact` and `related creations/overrides` lose those rows. (Calls from own
-   code, including through a library's virtual or interface method into an
-   own implementation, are found as before - the declarations carry that.)
-2. **The body of a library routine is not available**: `source` and
-   `definition` of one return the declaration only, unless the host asks to
-   upgrade that one unit (below).
-3. **Library units used only by library bodies are not loaded.** Smaller
-   closure; but `unit_deps` and project membership of a *library* unit may
-   differ. For own units nothing changes.
-4. **Inline routines, generic method bodies**: see "Risks".
+`tests\audit.ps1 -ServerArgs --no-light` against the default, the same 263
+symbols (seed 7, the library categories weighted up: 58 library symbols),
+1,770 calls: 1,488 identical
+(`members` and `source` all of them), 282 differing, every one classified
+with a script over the two runs and said in the answer: 119 by a note only;
+158 rows lost in library bodies (`references`, `callers`, `impact`,
+`related` of library declarations and of in-repository copies library code
+uses), with the counts and "through" sources that go with them and, under a
+`limit`, the rows the cut moves; 2 `callees` whose fewer dispatch candidates
+are listed where full mode counted them; 3 where fewer rows change which of
+a group of identical lines carries the text. No own row is lost outside a
+cut, and no answer differs without a light-mode note. Full mode is
+unchanged: the same 1,770 calls with `--no-light` equal 0.31.0 before the
+tool changes, call for call.
 
-Not affected: own units' diagnostics (name resolution of own code against
-library declarations), form files, `compile` (dcc does its own work),
-freshness of own files.
+`tests\smoke.ps1` runs its main part in both modes, and
+`tests\fixtures\light` (a library directory named with `--light`: an own
+override the library calls from a body, an inline routine needing a unit, a
+registering initialization, a unit only a library implementation uses) in
+both: the same answers but the notes, the promotions bringing the bodies
+back.
 
-##### What is "library"
+#### Still open
 
-Not decided by PasTree: the **host passes a predicate** (or a path set). In
-pastree-mcp "library" today means outside the project root and search paths'
-own roots (SPEC 4). That is not enough for the client group: its third-party
-sources (`ThirdParty\DevExpress`, `ThirdParty\RaveReport`, ...) live **inside
-the repository**, so they count as own. Light mode needs an explicit list
-(`--light <glob>` repeated) besides "everything outside the root", and a way
-to say "RTL and VCL of the installed Studio" (the search-path directories
-under `$(BDS)\source`).
+- References inside library bodies (PasTree stage 6): searched only after
+  promoting the units that can hold one; the count the notes give is that
+  set.
+- One server shared by the sessions of a project (a socket or HTTP
+  transport) - the other way to stop N sessions holding N indexes.
 
-##### API sketch
+#### 9.9.1 The PasTree side
 
-- `TPasSemaProject`: a property or an `AnalyzeStaged` parameter
-  `LightUnit: TFunc<string, Boolean>` (file path -> True when light).
-- Wave 2 skips a light module: its status stays `msIntfReady` for good. Every
-  place that tests `FStatus >= msFullReady` (Project.pas 16992, 17350, 17643,
-  17693-17737, 17792) must be read once to decide, per place, whether an
-  interface-ready module is acceptable (diagnostics scoping, E2003 gating,
-  cross passes) - each is a silent wrong answer if it is not.
-- `UpgradeToFull(mid)`: full-parse one light unit on demand (for `source` of a
-  library routine), cheap for a single unit, and it must not drag its
-  implementation `uses` into the closure unless asked.
-- `Light` is visible in the model (so a consumer can say "interface only" in an
-  answer), and `AnalyzeModuleOnly` / incremental reanalysis never touch light
-  units (they are not watched).
+Built in PasTree 0.113.0-0.117.1 (stages 1-5 and 9 of its light-mode plan):
+light units parsed, preprocessed and lexed to the end of their
+implementation `uses`, the exempt rules above, promotion (`PromoteUnit`,
+`PromotedFiles`, `ForgetPromotions`, `module=refused:<reason>`), the uses
+lint's safe side and `LintPromotions`. Its `docs/library-light-mode.md` is
+the reference; this server's 0.31.0 needs 0.117.1 (`cMinPasTreeVersion`).
 
-##### Measure first
-
-Before any of the above, three numbers, from the large group:
-
-1. **Share of the work that is bodies**: node counts per library unit,
-   interface-only vs full (the I7 check already builds both; total over the
-   closure), and per-wave time of `AnalyzeStaged`. If bodies are under about
-   half of the library nodes, stop.
-2. **Resident memory** after a build with wave 2 and the cross passes skipped
-   for library units (a throwaway hack is enough), against today's, for the
-   shared and the strict policy. The wanted ratio is what decides default vs
-   opt-in.
-3. **Closure size**: units loaded with and without implementation `uses` of
-   library units.
-
-Split every number three ways: RTL/VCL (installed Studio), in-repo
-third-party, own.
-
-##### Acceptance
-
-- **Own-unit equivalence.** On the fixture groups and on the client group:
-  diagnostics of every own unit, `references`/`callers`/`callees`/`impact`
-  for the sampled symbols (pastree-mcp's battery: 2,592 answers over 384
-  symbols, `tests\audit.ps1`), identical to the full analysis except for the
-  consequences 1-3 above; every difference is classified, none unexplained.
-- A fixture library whose body calls an own virtual method, an own interface
-  method and an event handler: full mode finds the caller rows, light mode
-  does not and says so (the pin that consequence 1 is *known*).
-- Light units' declarations resolve the same: `members`, `definition`, overload
-  choice for a call in own code that targets a library routine (the classes of
-  defect the 20,000-call audit found were all in overload and default-property
-  resolution - re-run those pins).
-- Peak memory and build time on the large group, before and after, in the
-  commit message.
-
-##### Risks
-
-- **Generic and inline bodies.** `docs/coverage.md` notes overlay generic
-  bodies as a stage-E gap, and inherited members "named from the generic's
-  own method bodies" were once a false-positive source (Project.pas 5094).
-  Check that typing own code through `TList<T>`, `TDictionary<K,V>`,
-  `TEnumerable<T>` needs nothing from the library's bodies.
-- **Constants and types declared in the implementation** of a library unit
-  are invisible to everyone else, so cutting them is safe; **initialization
-  sections** register classes (`RegisterClass`, `RegisterComponents`) -
-  nothing here follows registration.
-- **`$I` includes in an implementation** are skipped; one in the interface
-  stays.
-- **`status` / diagnostics gating**: a unit that is interface-only must not be
-  reported as "clean" for want of analysis - the failure mode the `.dcu`
-  fallback was built to avoid (F1027).
-- The hosts: pastree-lsp edits files and wants completion inside the open
-  unit, which is own, so it is unaffected; but its go-to-definition into a
-  library body would need `UpgradeToFull`.
-
-##### Beyond this section
-
-Light mode makes each server smaller. It does not stop N sessions from
-starting N servers. That is a pastree-mcp question (one long-lived server per
-project shared by sessions, over a socket or HTTP; the index is one per
-project but each client sees the working tree on disk) and not PasTree's;
-noted here only so the two are not mistaken for one another.
 
 ## 10. What deep testing showed
 
