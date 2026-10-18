@@ -260,7 +260,8 @@ finds it), and library files changing (not watched on purpose).
 ## 6. Memory
 
 Library units are read interface-only (light mode, 9.9): no bodies are held
-for them unless a tool promoted one. After every build `DemoteText` frees the
+for them unless a query needed them (made full inside the query; an
+escalation makes the whole analysis full, and it stays so). After every build `DemoteText` frees the
 text layer of every library unit and keeps own units warm. Library positions and snippets come back through
 `EnsureHydrated` when a query needs them; own units must stay warm because
 `AnalyzeModuleOnly` refuses a demoted model. Queries re-hydrate library units
@@ -924,7 +925,8 @@ gap between the answers and the truth.
 7. Light mode (9.9; done, 0.31.0, on PasTree 0.117.1): library units read
    interface-only by default - the client group in 3.9 s / 1.5 GB instead
    of 6.9 s / 2.8 GB, every difference of the audit battery said in the
-   answer.
+   answer. Since 0.32.0 (PasTree 0.121.0's workspace) the answers are the
+   full analysis' - the library bodies a query needs made full inside it.
 8. `rename_plan` (done, 0.24.0), `change_plan` (done, 0.25.0) - the notes section 10 added to
    `references` are the rename's parts, collected by hand today (9.6).
 9. `mode: count | files` (9.2; done for `references`, 0.26.0) - the answers the limits cut are about widely
@@ -942,7 +944,7 @@ gap between the answers and the truth.
 `type_of`, several targets per call, `overview`, `implement_plan`,
 `scope_at` and `uses_for` go in when a measured session asks for them.
 
-### 9.9 Light mode (0.31.0)
+### 9.9 Light mode (0.31.0; complete answers 0.32.0)
 
 The server used to analyze the whole `uses` closure completely, library
 bodies included, though an agent asks about the project's own code and of
@@ -962,8 +964,10 @@ starts, `status`'s held memory):
 | strict | full | 3,782 + 2,134 + 1,467 + 6 more (9) | - | 12.5 s | 4.6 GB |
 | strict | light | 3,086 + 1,666 + 1,078 + 6 more (9) | 4,246 in all | 6.5 s | 2.2 GB |
 
-Calls answer faster too: the audit battery below took 225 s against 328 s
-over the same 1,770 calls.
+Calls answered faster too in 0.31.0 (225 s against 328 s over 1,770 audit
+calls), when light answers left library bodies out; since 0.32.0 an answer
+that needs them pays for making them full, and the battery below takes a
+little longer than in full mode (6.0 min against 4.9-5.4).
 
 Every binding the analysis makes in the own units is the full analysis's
 (PasTree's gate: 1,695 of 1,695 own units identical, by identity).
@@ -991,100 +995,123 @@ library implementations use are not loaded (`UNIT_NOT_LOADED`). Diagnostics,
 the `status` count of unresolved names and the uses graph treat such an
 entry as resolved and not loaded, not as missing.
 
-#### Promotion: a library body asked for
+#### Completeness inside the query (0.32.0)
 
-A tool that reads a body promotes the light unit holding it to a full
-analysis first (`PromoteUnit`, the module path: 5-200 ms a unit, its
-consumers not redone, every binding identical to the full analysis's) and
-says so on the answer's last line: `source` and `definition` of a library
-routine (`definition` of a name of more than three declarations promotes
-none and says the implementation was not read), `callees` of one, `outline`
-of a light unit (but `section: interface`), `defines` of its file, and a
-position (`file` + `line`) in its implementation. A promoted unit stays full
-for the session, through rebuilds (the parse donor carries the set). A
-promotion PasTree can only make exact through a rebuild
-(`promote-needs-rebuild`: `$IF` questions about a unit not loaded yet) gets
-one, with the old analysis as donor (2-5 s on the client group); another
-refusal is said ("not analyzed in full, its bodies not read").
+Every answer in light mode is the full analysis' answer. Each analysis'
+project and navigator belong to a PasTree `TPasWorkspace` (PasTree 0.120.0,
+`docs/library-light-mode.md`, "The workspace"), and a tool asks through it
+every question a library body can change: the query's demand - the light
+units whose bodies or directives the answer needs - is met inside the
+query (the units made full in one batch, the units only their
+implementations use taken in), and then the question is answered over
+them. The server holds no promotion loop and no list of what light mode
+misses any more.
 
-#### What the answers say
-
-| Tool | In light mode |
+| Tool | Workspace entry |
 | --- | --- |
-| `callers`, `impact` | When a root, a source it is called through (a virtual or interface method it overrides or implements), or a property it republishes is declared in a unit light units list: "library units using X are read interface-only - a call or use made inside their bodies is not among the rows". Otherwise, when rows are in library code at all, the same without the names |
-| `references`, `related` | When light units can use the declaration (its unit, units listing it, every one for System), how many: "the bodies and implementation sections of library units read interface-only are not searched - N such units can use it there" |
-| `callees` | A virtual or interface call into a library: "what may run for X - overrides and implementations declared in the implementation sections of library units read interface-only are not among the rows". Fewer candidates can bring a list under the cap that full mode only counted |
-| `find`, and every "no declaration matches" | The index scope names how many units are read interface-only, and that their implementation-only declarations and the units only they use are not indexed |
-| `unit_deps` | An implementation `uses` entry of a light unit naming a unit not loaded: "not analyzed: used only by library implementations" |
-| `diagnostics` | With `library: true` or a library file: how many units report their interface only |
-| `outline` | A light unit with `section: interface`: its line count from the file, "its implementation is not outlined" |
-| `defines` | The count of directives in library files leaves out those past a light unit's interface |
-| `status` | Per analysis: units read interface-only, promoted, refused; the hints above |
-| `members`, `form`, `compile`, `metrics recompile`, `rename_plan`, `change_plan` | Unchanged: they read declarations and own code |
+| `references` | `FindReferences` (a symbol), `FindBuiltinReferences`, `FindDefineReferences` |
+| `callers`, `impact` | `FindReferences`, `CollectReferencesOfAll` (a family's batch), `FindOverrides`, `FindDescendants`, `FindImplementations` |
+| `related` | `FindDescendants`, `FindOverrides`, `FindImplementations`, `FindInterfaceImplementors`, `FindAssignments`, `FindCreations`, `FindDestructions` |
+| `rename_plan`, `change_plan` | `PlanRename` (with the old name's uncompiled uses), `RenameFamily`, `FindOverrides` |
+| `callees` | `RoutineImplNode` (the routine's body), `FindOverrides` / `FindImplementations` of each virtual or interface method called (what may run: the class index then holds the library's implementation-only classes too) |
+| `source`, `definition` | `RoutineImplNode` of each routine named |
+| `lint`, `metrics cycles` | `FindUnusedUses` (PasTree's rule and its demand: inline bodies, initializations); the server's own reach asks `InFile` of each library unit whose initialization a removal leaves out |
+| `defines` | `InFile` of the file asked about; `FindDefineReferences` of a name (the library's directives past a light unit's stop, through its preprocess-only completion) |
+| `outline`, `unit_deps`, `diagnostics` of a library file | `InFile` (the unit made full - or taken in, when only library implementations use it) |
+| a position (`file` + `line`) in a library unit | `At` |
 
-#### `lint` and `metrics cycles`
+A query that changed the analysis - units made full, the project rebuilt
+or escalated - leaves every model id, symbol index and model the tool held
+stale: the tool runs again from the start (`EMcpIndexChanged`), and the
+next run finds that demand met (an own question's demand is empty: own
+code never pays). A tool whose queries keep changing the analysis runs at
+most 24 times; the last run answers partially.
 
-The uses lint reads library implementations: an inline routine's body (the
-units its expansion needs, H2443) and the initialization a removal leaves
-out of a program. Before the first lint the server asks PasTree which light
-units the lint over the own units would have to call unknown
-(`LintPromotions`), promotes them and asks again until nothing is left
-(rebuilding where a promotion needs it), once per analysis until it changes.
-Its own reach (the rows weighed together, which PasTree's lint does not
-have) may still meet a light unit's unknown initialization: it promotes
-those and runs again. A light unit left (a refusal) is never "no effect":
-its row says "read interface-only, its initialization not known", and
-PasTree's doubts naming one stay on the row.
+**Escalation** (PasTree's decision D8: run it). When the demand passes
+`EscalationPercent` of the library's volume - `TObject`'s descendants, a hub
+class's members, `Free`, a big unit's body on a small closure - a rebuild
+without light paths is cheaper, and the workspace runs it: the analysis is
+full from then on, for the session (D9), its members' later analyses
+(rebuilds, a reload of the group) configure no light trees either. The
+answer that caused it says so on its last line: "(the library was analyzed
+in full for this answer; the analysis stays full)". The log has the
+progress, `status` the count.
 
-On the client group, the whole lint (19,928 rows): the same 19,928 rows of
-the same rules; four rows are more cautious - a "leaves ... out" naming a
-library unit that full mode reaches through a library unit only library
-implementations use, which light mode does not load: the safe side, and
-said in a note on the answer. `metrics cycles` is identical. The first lint
-of a session pays for its promotions - 47 s against 7 s (478 units
-promoted in 11 rounds, three rebuilds, one per analysis, for
-System.Variants and Winapi.Windows); the next one 3.4 s, as in full mode.
+**NotSearched.** An answer is partial only when the client cancelled the
+call (notifications/cancelled reaches the running query, the rebuild's
+workers too) or PasTree refused a unit; its last line then says "(library
+implementations not searched: N units)". A completed answer says nothing:
+it is the full one.
+
+What the answers still say in light mode, because no query completes it:
+
+- `find` and every "no declaration matches": the index scope names how many
+  units are read interface-only, whose implementation-only declarations are
+  not indexed (a name search has no demand).
+- `diagnostics` with `library: true` over the whole library: the light
+  units report their interface only (`--no-light` checks every body; a
+  library file asked about alone is made full first).
+- `lint`: a "leaves ... out" naming a library unit that a full analysis
+  reaches through a unit only library implementations use keeps its note
+  (the safe side; the server's own reach, which PasTree's lint demand does
+  not weigh).
+- `status`: per analysis, the units read interface-only and made full so
+  far - or that it escalated - and what the queries paid ("queries completed
+  in light mode: C of Q, R round(s), P unit(s) made full, L taken in, B
+  rebuild(s), E escalation(s), T ms"), the refused units named.
 
 #### Full vs light, measured
 
-`tests\audit.ps1 -ServerArgs --no-light` against the default, the same 263
-symbols (seed 7, the library categories weighted up: 58 library symbols),
-1,770 calls: 1,488 identical
-(`members` and `source` all of them), 282 differing, every one classified
-with a script over the two runs and said in the answer: 119 by a note only;
-158 rows lost in library bodies (`references`, `callers`, `impact`,
-`related` of library declarations and of in-repository copies library code
-uses), with the counts and "through" sources that go with them and, under a
-`limit`, the rows the cut moves; 2 `callees` whose fewer dispatch candidates
-are listed where full mode counted them; 3 where fewer rows change which of
-a group of identical lines carries the text. No own row is lost outside a
-cut, and no answer differs without a light-mode note. Full mode is
-unchanged: the same 1,770 calls with `--no-light` equal 0.31.0 before the
-tool changes, call for call.
+`tests\audit.ps1 -Against` (0.32.0): the battery over a sample run once
+with `--no-light` (`-SampleOut`) and once in light mode over the same
+symbols (`-Symbols`), every answer compared call for call.
 
-`tests\smoke.ps1` runs its main part in both modes, and
-`tests\fixtures\light` (a library directory named with `--light`: an own
-override the library calls from a body, an inline routine needing a unit, a
-registering initialization, a unit only a library implementation uses) in
-both: the same answers but the notes, the promotions bringing the bodies
-back.
+- PasTree's own group (`PasTree.groupproj`, seed 1, 193 symbols - 36 of
+  them library declarations): 1,290 calls, **1,290 equal, 0 differ**; two
+  answers escalated (`definition` of `System.SysUtils.LowerCase` in one
+  analysis and `references` of `System.Move` in the other, calls 1,048 and
+  1,070), none partial. The battery took 0.3 min in light mode, 0.2 in full.
+- The client group (frozen copy, seed 7, 232 symbols - 53 of them library
+  declarations): 1,562 calls, **1,562 equal, 0 differ**, none partial. The
+  first escalation came early: `callees` of an own routine at call 330,
+  whose virtual calls into the VCL ask for every override below a hub class
+  (the primary analysis full from there on); `references` of
+  `FreeAndNil` escalated the other two at call 1,202. The same battery
+  without `callees` (1,442 calls) escalated only at `FreeAndNil`, call
+  1,117: **1,442 equal, 0 differ**, the first 1,116 answered in light mode -
+  12 queries made units full on the way (1 to 140 units, 0.1-1 s each), then
+  the three escalations (4.4, 2.7 and 1.1 s). The light runs took 6.0 min
+  against 4.9-5.4 in full mode, the escalations included.
+
+0.31.0 measured the gap the notes then described: 1,770 calls on the client
+group, 282 differing - every one a light-mode note or a row lost in a
+library body. 0.32.0 has none of those notes.
+
+`tests\smoke.ps1` runs its main part in both modes (`references` of
+`IntToStr` must be the same text in both), and `tests\fixtures\light` (a
+library directory named with `--light`: an own override the library calls
+from a body, an inline routine needing a unit, a registering
+initialization, a unit only a library implementation uses) in both: every
+answer equal but `status` and the whole library's `diagnostics`.
 
 #### Still open
 
-- References inside library bodies (PasTree stage 6): searched only after
-  promoting the units that can hold one; the count the notes give is that
-  set.
 - One server shared by the sessions of a project (a socket or HTTP
   transport) - the other way to stop N sessions holding N indexes.
+- `lint`'s own reach and the units only library implementations use (the
+  note above): exact only through an escalation the server does not ask
+  for.
 
 #### 9.9.1 The PasTree side
 
 Built in PasTree 0.113.0-0.117.1 (stages 1-5 and 9 of its light-mode plan):
 light units parsed, preprocessed and lexed to the end of their
 implementation `uses`, the exempt rules above, promotion (`PromoteUnit`,
-`PromotedFiles`, `ForgetPromotions`, `module=refused:<reason>`), the uses
-lint's safe side and `LintPromotions`. Its `docs/library-light-mode.md` is
-the reference; this server's 0.31.0 needs 0.117.1 (`cMinPasTreeVersion`).
+`PromotedFiles`). Then 0.118.0-0.121.0: every query's demand, `EnsureFull`
+(batch promotion, escalation), and `TPasWorkspace`, which runs them inside
+the query; `PlanRename`'s uncompiled-uses overload through it (0.121.0).
+Its `docs/library-light-mode.md` is the reference; this server's 0.31.0
+needed 0.117.1, 0.32.0 needs 0.121.0 (`cMinPasTreeVersion`).
 
 
 ## 10. What deep testing showed

@@ -335,7 +335,20 @@ begin
         Progress(LToken, LCount, AText);
       end;
   end;
-  LText := CallTool(FWs, ATask.Name, ATask.Args, LIsError, LJob, LProgress);
+  // notifications/cancelled reaches a running call too: the workspace
+  // queries completing an answer in light mode poll it (from a rebuild's
+  // worker threads as well - read under the lock) and answer with what is
+  // analyzed; the answer is then dropped as any cancelled one is.
+  LText := CallTool(FWs, ATask.Name, ATask.Args, LIsError, LJob, LProgress,
+    function: Boolean
+    begin
+      FLock.Enter;
+      try
+        Result := ATask.Cancelled;
+      finally
+        FLock.Leave;
+      end;
+    end);
   if LJob = nil then
   begin
     Answer(ATask, LText, LIsError);

@@ -44,6 +44,16 @@ unit PasMcp.Workspace;
   keeps the own units warm, which is also what keeps AnalyzeModuleOnly usable
   for them - it refuses a demoted model.
 
+  LIGHT MODE (SPEC 9.9). Each analysis' project and navigator belong to a
+  PasTree TPasWorkspace (TMcpAnalysis.WS), and the tools ask through it the
+  questions a library body can change (references, the hierarchy, renames,
+  the lint, defines, one file, one position): the workspace makes the light
+  units the answer needs full inside the query, rebuilds or escalates to a
+  full analysis when that is cheaper, and the answer is the full analysis'.
+  A query that changed the analysis makes the tool start again
+  (QueryDone -> EMcpIndexChanged -> CallTool). After an escalation the
+  analysis' members stay full for the session (no LightPaths, D9).
+
   THREADING. Load runs once on a background thread so the MCP handshake does
   not wait for a closure-sized analysis; tools wait on Ready. After that,
   everything happens on the request thread, one call at a time.
@@ -61,10 +71,28 @@ uses
   PasTree.Sema.Model,
   PasTree.Sema.Project,
   PasTree.Sema.Nav,
+  PasTree.Sema.Workspace,
   PasMcp.Studio;
 
 type
   TMcpGroupPolicy = (gpShared, gpStrict);
+
+  // Raised by TMcpWorkspace.QueryDone when a workspace query changed the
+  // analysis it ran on - light units made full, the project rebuilt or
+  // escalated: every model id, symbol index, model and navigator the tool
+  // took before it is stale. CallTool runs the tool again from the start;
+  // the next run finds the demand met (SPEC 9.9).
+  EMcpIndexChanged = class(Exception);
+
+  // What workspace queries did to complete their answers (light mode):
+  // per call (the answer's note) and per analysis since the load (`status`).
+  TMcpQueryTally = record
+    Queries, Completed, Rounds, Promoted, Loaded, Rebuilt, Escalated: Integer;
+    Ms: Int64;
+    NotSearched: Integer;    // the largest of the call's queries
+    Cancelled: Boolean;
+    procedure Add(const AStatus: TPasQueryStatus);
+  end;
 
   TMcpMember = record
     ProjectFile: string;     // .dproj or .dpr
@@ -105,6 +133,13 @@ type
     Pins: TDictionary<string, string>;   // unit name lower -> file
     ProjectDir: string;
     Roots: TArray<string>;
+    // The analysis' project and navigator are its workspace's (PasTree
+    // TPasWorkspace, which owns both): a query through WS completes its own
+    // answer in light mode - the library bodies it needs made full, the
+    // project rebuilt or escalated to a full analysis when that is cheaper.
+    // Proj and Nav mirror WS.Project and WS.Nav, refreshed after every
+    // workspace query (QueryDone) and every own run; never freed here.
+    WS: TPasWorkspace;
     Proj: TPasSemaProject;
     Nav: TPasNavigator;
     Stamps: TDictionary<string, TMcpFileStamp>;   // own file (lower) -> stamp
@@ -116,14 +151,10 @@ type
     // Light mode: the directory trees whose units this analysis reads
     // interface-only (TPasSemaProject.LightPaths) - see AssignLightTrees.
     LightTrees: TArray<string>;
-    // Promotions asked of PasTree (PromoteUnits): accepted, the time they
-    // took, and the refused ones as `Unit (reason)`.
-    Promoted: Integer;
-    PromoteMs: Int64;
-    PromoteRefused: TArray<string>;
-    // `lint`'s promotions (LintPromotions) were done at this Builds/ModuleRuns
-    // - asked again only once the analysis changed.
-    LintPrepared: string;
+    // What the workspace queries of this analysis did since the load, and
+    // the units a query could not make full (`file: reason`), for `status`.
+    Tally: TMcpQueryTally;
+    Refused: TArray<string>;
     constructor Create;
     destructor Destroy; override;
     function MemberNames(const AWorkspace: TObject): string;
@@ -146,7 +177,18 @@ type
     FLightOn: Boolean;
     FLightDirs: TArray<string>;
     FLightNotOwn: TArray<string>;
-    FPromoteNote: string;   // see TakePromoteNote
+    // The members of an analysis a query escalated to a full analysis
+    // (lower-case project files): their analyses stay full for the session,
+    // a reload of the workspace included (decision D9 of PasTree's plan).
+    FEscalatedMembers: TDictionary<string, Boolean>;
+    // The workspace queries of the tool call running (TakeQueryNote), its
+    // cancel, whether its queries answer partially (the last run of a tool
+    // whose queries kept changing the analysis), and a change QueryDone was
+    // told to hold back (RaiseIfChanged).
+    FCall: TMcpQueryTally;
+    FCallCancelled: TFunc<Boolean>;
+    FCallPartial: Boolean;
+    FChangePending: Boolean;
     FPlatformOverride: string;
     FConfig: string;
     FPolicy: TMcpGroupPolicy;
@@ -174,9 +216,21 @@ type
     procedure SetState(const AText: string);
     procedure LoadMembers;
     procedure AssignAnalyses;
-    procedure BuildAnalysis(AAnalysis: TMcpAnalysis; ADonor: TPasSemaProject);
-    // A navigator over AAnalysis.Proj, set up as every tool expects it.
-    procedure NewNavigator(AAnalysis: TMcpAnalysis);
+    // A project configured as AAnalysis is analyzed - search paths, defines,
+    // namespaces, aliases, switches, pins, light trees - and NOT analyzed:
+    // BuildAnalysis' first step, and its workspace's factory for the
+    // rebuilds a query needs.
+    function NewProject(AAnalysis: TMcpAnalysis): TPasSemaProject;
+    procedure BuildAnalysis(AAnalysis: TMcpAnalysis; AUseDonor: Boolean);
+    // The text layer of every library unit freed (EnsureHydrated reads it
+    // back on demand); the own units kept warm for the module path.
+    procedure DemoteLibraryText(AProject: TPasSemaProject);
+    // The query options of AAnalysis' workspace: escalation run (decision
+    // D8), progress to the log, the call's cancel and partial mode.
+    procedure ApplyQueryOptions(AAnalysis: TMcpAnalysis);
+    // Proj and Nav set to the workspace's; a project the workspace replaced
+    // (a rebuild, an escalation) demoted and stamped as a build's is.
+    procedure SyncAnalysis(AAnalysis: TMcpAnalysis);
     procedure RecordStamps(AAnalysis: TMcpAnalysis);
     // After a module run: stamps the own files it took in that have none yet
     // - a unit a changed uses clause added, an include a changed unit now
@@ -201,18 +255,25 @@ type
     // to the project's directory or absolute. Before Load.
     procedure SetLight(AOn: Boolean; const ADirs: TArray<string>);
     property LightOn: Boolean read FLightOn;
-    // Turns the light units AFiles of AAnalysis into fully analyzed ones
-    // (TPasSemaProject.PromoteUnit) and recreates its navigator; a promotion
-    // asking for a rebuild (`promote-needs-rebuild`) gets one, with the old
-    // project as parse donor, which loads the unit full. A file that is not
-    // a light unit is skipped. Returns how many were promoted; ARebuilt: the
-    // analysis was rebuilt, so its model ids changed; ANote: what was done,
-    // for the answer ('' = nothing), the refusals named.
-    function PromoteUnits(AAnalysis: TMcpAnalysis; const AFiles: TArray<string>;
-      out ARebuilt: Boolean; out ANote: string): Integer;
-    // The notes of the promotions since the last call, '; '-joined, and
-    // clears them: every answer a promotion went into says so (CallTool).
-    function TakePromoteNote: string;
+    // A tool call starts (CallTool): its tally cleared; ACancelled (nil:
+    // none) is what every workspace query polls.
+    procedure BeginCall(const ACancelled: TFunc<Boolean>);
+    // The queries of the tool's next run answer partially (Options.Partial):
+    // no unit made full, what light bodies hold counted in NotSearched.
+    procedure SetPartialQueries(APartial: Boolean);
+    // After every query through AAnalysis.WS: its Status tallied, logged
+    // when it did anything, an escalation remembered (D9), Proj and Nav
+    // synced - and, when the query changed the analysis, EMcpIndexChanged
+    // raised (ADefer: remembered for RaiseIfChanged instead, for a tool that
+    // asks a batch of completions before it reads anything).
+    procedure QueryDone(AAnalysis: TMcpAnalysis; ADefer: Boolean = False);
+    procedure RaiseIfChanged;
+    // What the call's queries leave to say on its answer, '' for nothing:
+    // an escalation ("the library was analyzed in full for this answer; the
+    // analysis stays full") and NotSearched ("library implementations not
+    // searched: N units"). An answer completed without either says nothing:
+    // it is the full analysis' answer.
+    function TakeQueryNote: string;
     // Reads the group and analyzes it. Never raises: a failure lands in
     // LoadError and Ready is set either way, so no caller waits forever.
     procedure Load;
@@ -343,6 +404,25 @@ begin
   end;
 end;
 
+{ TMcpQueryTally }
+
+procedure TMcpQueryTally.Add(const AStatus: TPasQueryStatus);
+begin
+  Inc(Queries);
+  if (AStatus.Rounds > 0) or AStatus.Rebuilt or AStatus.Escalated then
+    Inc(Completed);
+  Inc(Rounds, AStatus.Rounds);
+  Inc(Promoted, AStatus.Promoted);
+  Inc(Loaded, AStatus.Loaded);
+  if AStatus.Rebuilt then
+    Inc(Rebuilt);
+  if AStatus.Escalated then
+    Inc(Escalated);
+  Inc(Ms, AStatus.Ms);
+  NotSearched := Max(NotSearched, AStatus.NotSearched);
+  Cancelled := Cancelled or AStatus.Cancelled;
+end;
+
 { TMcpAnalysis }
 
 constructor TMcpAnalysis.Create;
@@ -355,8 +435,8 @@ end;
 
 destructor TMcpAnalysis.Destroy;
 begin
-  Nav.Free;
-  Proj.Free;
+  // The workspace owns the project and the navigator Proj and Nav mirror.
+  WS.Free;
   Paths.Free;
   Stamps.Free;
   Pins.Free;
@@ -404,6 +484,7 @@ begin
   FPolicy := APolicy;
   FLightOn := True;
   FAnalyses := TObjectList<TMcpAnalysis>.Create(True);
+  FEscalatedMembers := TDictionary<string, Boolean>.Create;
   FConfigStamps := TDictionary<string, TMcpFileStamp>.Create;
   FListed := TDictionary<string, Boolean>.Create;
   FOwner := TDictionary<string, Integer>.Create;
@@ -421,6 +502,7 @@ end;
 destructor TMcpWorkspace.Destroy;
 begin
   FAnalyses.Free;
+  FEscalatedMembers.Free;
   FConfigStamps.Free;
   FListed.Free;
   FOwner.Free;
@@ -553,6 +635,14 @@ begin
   begin
     LA.LightTrees := nil;
     if not FLightOn then
+      Continue;
+    // A query escalated an analysis of these members to a full one: it
+    // stays full for the session (D9), through a reload too.
+    LDrop := False;
+    for var LIdx in LA.Members do
+      LDrop := LDrop or FEscalatedMembers.ContainsKey(
+        LowerCase(FMembers[LIdx].ProjectFile));
+    if LDrop then
       Continue;
     for LTree in PasNormalizeDirTrees(FStudio.LibraryPaths(LA.Platform)) do
     begin
@@ -1137,14 +1227,64 @@ begin
   Result := Result.TrimLeft([';', ' ']);
 end;
 
-procedure TMcpWorkspace.BuildAnalysis(AAnalysis: TMcpAnalysis;
-  ADonor: TPasSemaProject);
+function TMcpWorkspace.NewProject(AAnalysis: TMcpAnalysis): TPasSemaProject;
+begin
+  if FStudio.Found then
+    Result := TPasSemaProject.Create(AAnalysis.Platform, AAnalysis.SearchPaths,
+      AAnalysis.Defines, FStudio.CompilerVersion)
+  else
+    Result := TPasSemaProject.Create(AAnalysis.Platform, AAnalysis.SearchPaths,
+      AAnalysis.Defines);
+  try
+    Result.SetNamespaces(AAnalysis.Namespaces);
+    for var LAl in AAnalysis.Aliases do
+      Result.AddUnitAlias(LAl.Alias, LAl.UnitName);
+    Result.SetProjectDir(AAnalysis.ProjectDir);
+    // The state every unit starts in: without it a Release config's
+    // `{$IFOPT D+}` code was compiled for the index and a console program's
+    // units had no CONSOLE (PasTree 0.106.0).
+    Result.SwitchStart := PasStartOptState(AAnalysis.Switches);
+    Result.ConsoleTarget := AAnalysis.ConsoleTarget;
+    for var LPin in AAnalysis.Pins.Values do
+      Result.PinUnitFile(LPin);
+    // Library units interface-only (SPEC 9.9) - none once a query escalated
+    // this analysis (D9: it stays full; LightTrees is cleared then too). A
+    // donor brings the units made full before (PromotedFiles), which stay
+    // full.
+    if (AAnalysis.WS = nil) or not AAnalysis.WS.Escalated then
+      Result.LightPaths := AAnalysis.LightTrees;
+    // The same switch pastree-lsp turns on: a member after a dot that nothing
+    // resolves is E2003 too, and PasTree's corpus runs report zero false ones.
+    Result.ReportUnresolvedMembers := True;
+  except
+    Result.Free;
+    raise;
+  end;
+end;
+
+procedure TMcpWorkspace.DemoteLibraryText(AProject: TPasSemaProject);
 var
-  LProj: TPasSemaProject;
-  LSW: TStopwatch;
   LKeep: TList<string>;
+begin
+  LKeep := TList<string>.Create;
+  try
+    for var LMid := 0 to AProject.ModelCount - 1 do
+      if IsOwnFile(AProject.ModelFile(LMid)) then
+        LKeep.Add(AProject.ModelFile(LMid));
+    AProject.DemoteText(LKeep.ToArray);
+  finally
+    LKeep.Free;
+  end;
+end;
+
+procedure TMcpWorkspace.BuildAnalysis(AAnalysis: TMcpAnalysis;
+  AUseDonor: Boolean);
+var
+  LProj, LDonor: TPasSemaProject;
+  LSW: TStopwatch;
   LLast: Int64;
   LPrefix: string;
+  LIdx: Integer;
 begin
   LPrefix := Format('analysis %d (%s)', [AAnalysis.Index,
     AAnalysis.MemberNames(Self)]);
@@ -1154,66 +1294,58 @@ begin
     Length(AAnalysis.Defines), string.Join(';', AAnalysis.Defines),
     string.Join(' ', AAnalysis.Switches),
     IfThen(AAnalysis.ConsoleTarget, 'on', 'off')]);
-  if FStudio.Found then
-    LProj := TPasSemaProject.Create(AAnalysis.Platform, AAnalysis.SearchPaths,
-      AAnalysis.Defines, FStudio.CompilerVersion)
-  else
-    LProj := TPasSemaProject.Create(AAnalysis.Platform, AAnalysis.SearchPaths,
-      AAnalysis.Defines);
+  LProj := NewProject(AAnalysis);
   try
-    LProj.SetNamespaces(AAnalysis.Namespaces);
-    for var LAl in AAnalysis.Aliases do
-      LProj.AddUnitAlias(LAl.Alias, LAl.UnitName);
-    LProj.SetProjectDir(AAnalysis.ProjectDir);
-    // The state every unit starts in: without it a Release config's
-    // `{$IFOPT D+}` code was compiled for the index and a console program's
-    // units had no CONSOLE (PasTree 0.106.0).
-    LProj.SwitchStart := PasStartOptState(AAnalysis.Switches);
-    LProj.ConsoleTarget := AAnalysis.ConsoleTarget;
-    for var LPin in AAnalysis.Pins.Values do
-      LProj.PinUnitFile(LPin);
-    // Library units interface-only (SPEC 9.9). A donor below brings the
-    // units promoted before (PromotedFiles), which stay full.
-    LProj.LightPaths := AAnalysis.LightTrees;
-    // The same switch pastree-lsp turns on: a member after a dot that nothing
-    // resolves is E2003 too, and PasTree's corpus runs report zero false ones.
-    LProj.ReportUnresolvedMembers := True;
-    if (ADonor <> nil) and not LProj.AdoptParseDonor(ADonor) then
-      Log('%s: parse donor refused (configuration changed, or its last run '
-        + 'did not complete) - every unit is parsed again', [LPrefix]);
-    LSW := TStopwatch.StartNew;
-    LLast := 0;
-    LProj.AnalyzeStaged(AAnalysis.Roots, [], nil,
-      procedure(AP: TPasStagedProgress)
-      begin
-        SetState(Format('%s: %s, %d of %d units', [LPrefix, AP.Phase,
-          AP.FullDone, AP.Total]));
-        if LSW.ElapsedMilliseconds - LLast >= 5000 then
+    // The old project donates every unchanged parse: lent by its workspace
+    // for the run (the workspace then refuses a query that would change it).
+    LDonor := nil;
+    if AUseDonor and (AAnalysis.WS <> nil) then
+      LDonor := AAnalysis.WS.Lend;
+    try
+      if (LDonor <> nil) and not LProj.AdoptParseDonor(LDonor) then
+        Log('%s: parse donor refused (configuration changed, or its last run '
+          + 'did not complete) - every unit is parsed again', [LPrefix]);
+      LSW := TStopwatch.StartNew;
+      LLast := 0;
+      LProj.AnalyzeStaged(AAnalysis.Roots, [], nil,
+        procedure(AP: TPasStagedProgress)
         begin
-          LLast := LSW.ElapsedMilliseconds;
-          Log('%s: %s %d/%d', [LPrefix, AP.Phase, AP.FullDone, AP.Total]);
-        end;
-      end);
+          SetState(Format('%s: %s, %d of %d units', [LPrefix, AP.Phase,
+            AP.FullDone, AP.Total]));
+          if LSW.ElapsedMilliseconds - LLast >= 5000 then
+          begin
+            LLast := LSW.ElapsedMilliseconds;
+            Log('%s: %s %d/%d', [LPrefix, AP.Phase, AP.FullDone, AP.Total]);
+          end;
+        end);
+    finally
+      if LDonor <> nil then
+        AAnalysis.WS.EndLend;
+    end;
     AAnalysis.LastBuildMs := LSW.ElapsedMilliseconds;
     Inc(AAnalysis.Builds);
+    DemoteLibraryText(LProj);
   except
     LProj.Free;
     raise;
   end;
-  FreeAndNil(AAnalysis.Nav);
-  FreeAndNil(AAnalysis.Proj);
-  AAnalysis.Proj := LProj;
+  // The workspace takes the project (and frees the one before it).
+  if AAnalysis.WS = nil then
+  begin
+    LIdx := AAnalysis.Index;
+    AAnalysis.WS := TPasWorkspace.Create(LProj,
+      function: TPasSemaProject
+      begin
+        Result := NewProject(FAnalyses[LIdx]);
+      end);
+    AAnalysis.WS.LibraryPaths := FLibDirs;
+    ApplyQueryOptions(AAnalysis);
+  end
+  else
+    AAnalysis.WS.Adopt(LProj);
+  AAnalysis.Proj := AAnalysis.WS.Project;
+  AAnalysis.Nav := AAnalysis.WS.Nav;
   RecordStamps(AAnalysis);
-  LKeep := TList<string>.Create;
-  try
-    for var LMid := 0 to LProj.ModelCount - 1 do
-      if IsOwnFile(LProj.ModelFile(LMid)) then
-        LKeep.Add(LProj.ModelFile(LMid));
-    LProj.DemoteText(LKeep.ToArray);
-  finally
-    LKeep.Free;
-  end;
-  NewNavigator(AAnalysis);
   Log('%s: %d units (%d own, %d light, %d promoted) in %.1f s, %s held; '
     + 'stages %s', [LPrefix, LProj.ModelCount, AAnalysis.OwnModels,
     LProj.LightCount, Length(LProj.PromotedFiles), AAnalysis.LastBuildMs /
@@ -1225,11 +1357,135 @@ begin
       Log('%s: a unit could not be analyzed: %s', [LPrefix, LFail]);
 end;
 
-procedure TMcpWorkspace.NewNavigator(AAnalysis: TMcpAnalysis);
+procedure TMcpWorkspace.ApplyQueryOptions(AAnalysis: TMcpAnalysis);
+var
+  LOpt: TPasQueryOptions;
+  LIdx: Integer;
+  LLast: Int64;
+  LSW: TStopwatch;
 begin
-  FreeAndNil(AAnalysis.Nav);
-  AAnalysis.Nav := TPasNavigator.Create(AAnalysis.Proj);
-  AAnalysis.Nav.LibraryPaths := FLibDirs;
+  LIdx := AAnalysis.Index;
+  LOpt := Default(TPasQueryOptions);
+  // Decision D8: an escalation runs, with progress (to the log - an MCP
+  // answer has no status bar, and `status` waits in the call queue).
+  LOpt.Escalation := esRun;
+  LOpt.Partial := FCallPartial;
+  LOpt.Cancelled := FCallCancelled;
+  LSW := TStopwatch.StartNew;
+  LLast := -10000;
+  LOpt.OnProgress :=
+    procedure(AP: TPasQueryProgress)
+    begin
+      // A round each; a rebuild's analysis every 5 s (called from its
+      // worker threads too: Log is thread-safe).
+      if (AP.Stage = qsPromote) or (LSW.ElapsedMilliseconds - LLast >= 5000)
+      then
+      begin
+        LLast := LSW.ElapsedMilliseconds;
+        Log('analysis %d: completing an answer - %s', [LIdx, AP.Text]);
+      end;
+    end;
+  AAnalysis.WS.Options := LOpt;
+end;
+
+procedure TMcpWorkspace.SyncAnalysis(AAnalysis: TMcpAnalysis);
+begin
+  if AAnalysis.WS = nil then
+    Exit;
+  if AAnalysis.Proj <> AAnalysis.WS.Project then
+  begin
+    // Rebuilt or escalated by a query: as after a build - the library text
+    // demoted (a fresh navigator after it), the own files stamped.
+    DemoteLibraryText(AAnalysis.WS.Project);
+    AAnalysis.WS.Adopt(AAnalysis.WS.Project);
+    AAnalysis.Proj := AAnalysis.WS.Project;
+    AAnalysis.Nav := AAnalysis.WS.Nav;
+    Inc(AAnalysis.Builds);
+    RecordStamps(AAnalysis);
+    RebuildOwners;
+    RecordFormStamps;
+  end;
+  AAnalysis.Proj := AAnalysis.WS.Project;
+  AAnalysis.Nav := AAnalysis.WS.Nav;
+end;
+
+procedure TMcpWorkspace.BeginCall(const ACancelled: TFunc<Boolean>);
+begin
+  FCall := Default(TMcpQueryTally);
+  FChangePending := False;
+  FCallCancelled := ACancelled;
+  FCallPartial := False;
+  for var LA in FAnalyses do
+    if LA.WS <> nil then
+      ApplyQueryOptions(LA);
+end;
+
+procedure TMcpWorkspace.SetPartialQueries(APartial: Boolean);
+begin
+  FCallPartial := APartial;
+  for var LA in FAnalyses do
+    if LA.WS <> nil then
+      ApplyQueryOptions(LA);
+end;
+
+procedure TMcpWorkspace.QueryDone(AAnalysis: TMcpAnalysis; ADefer: Boolean);
+var
+  LStatus: TPasQueryStatus;
+begin
+  LStatus := AAnalysis.WS.Status;
+  FCall.Add(LStatus);
+  AAnalysis.Tally.Add(LStatus);
+  for var LR in LStatus.Refused do
+    if IndexText(LR, AAnalysis.Refused) < 0 then
+      AAnalysis.Refused := AAnalysis.Refused + [LR];
+  if (LStatus.Rounds > 0) or LStatus.Rebuilt or LStatus.Escalated or
+     (LStatus.NotSearched > 0) then
+    Log('analysis %d: a query completed its answer: %d round(s), %d unit(s) '
+      + 'made full, %d taken in%s%s in %d ms%s%s', [AAnalysis.Index,
+      LStatus.Rounds, LStatus.Promoted, LStatus.Loaded,
+      IfThen(LStatus.Rebuilt, ', the analysis rebuilt', ''),
+      IfThen(LStatus.Escalated, ', ESCALATED to a full analysis', ''),
+      LStatus.Ms, IfThen(LStatus.NotSearched > 0, Format(', %d unit(s) not '
+      + 'searched%s', [LStatus.NotSearched, IfThen(LStatus.Cancelled,
+      ' (cancelled)', '')]), ''), IfThen(LStatus.Refused <> nil,
+      ', refused: ' + string.Join('; ', LStatus.Refused), '')]);
+  if LStatus.Escalated then
+  begin
+    // D9: full for the session - the next analyses of these members too.
+    AAnalysis.LightTrees := nil;
+    for var LIdx in AAnalysis.Members do
+      FEscalatedMembers.AddOrSetValue(LowerCase(FMembers[LIdx].ProjectFile),
+        True);
+  end;
+  if not LStatus.Changed then
+    Exit;
+  SyncAnalysis(AAnalysis);
+  if ADefer then
+    FChangePending := True
+  else
+    raise EMcpIndexChanged.Create('the analysis changed under the query');
+end;
+
+procedure TMcpWorkspace.RaiseIfChanged;
+begin
+  if FChangePending then
+  begin
+    FChangePending := False;
+    raise EMcpIndexChanged.Create('the analysis changed under the query');
+  end;
+end;
+
+function TMcpWorkspace.TakeQueryNote: string;
+begin
+  Result := '';
+  if FCall.Escalated > 0 then
+    Result := 'the library was analyzed in full for this answer; the '
+      + 'analysis stays full';
+  if FCall.NotSearched > 0 then
+    Result := Result + IfThen(Result <> '', '; ') + Format('library '
+      + 'implementations not searched: %d units%s', [FCall.NotSearched,
+      IfThen(FCall.Cancelled, ' (cancelled)', '')]);
+  FCall := Default(TMcpQueryTally);
 end;
 
 procedure TMcpWorkspace.ClearAnalyses;
@@ -1310,7 +1566,7 @@ begin
       if FAnalyses.Count = 0 then
         raise Exception.Create('no loadable project in ' + FProjectFile);
       for var LA in FAnalyses do
-        BuildAnalysis(LA, nil);
+        BuildAnalysis(LA, False);
       RebuildOwners;
       RecordFormStamps;
       FLoadMs := LSW.ElapsedMilliseconds;
@@ -1360,114 +1616,13 @@ end;
 
 procedure TMcpWorkspace.RebuildAnalysis(AAnalysis: TMcpAnalysis;
   const AWhy: string);
-var
-  LOld: TPasSemaProject;
 begin
   Log('analysis %d: full rebuild - %s', [AAnalysis.Index, AWhy]);
-  // The old project donates every unchanged parse; it must outlive the run.
-  LOld := AAnalysis.Proj;
-  FreeAndNil(AAnalysis.Nav);
-  AAnalysis.Proj := nil;
-  try
-    BuildAnalysis(AAnalysis, LOld);
-  finally
-    LOld.Free;
-  end;
+  // The old project donates every unchanged parse (its workspace lends it
+  // for the run, then adopts the new one and frees it).
+  BuildAnalysis(AAnalysis, True);
   RebuildOwners;
   RecordFormStamps;
-end;
-
-function TMcpWorkspace.PromoteUnits(AAnalysis: TMcpAnalysis;
-  const AFiles: TArray<string>; out ARebuilt: Boolean;
-  out ANote: string): Integer;
-var
-  LSW, LOne: TStopwatch;
-  LMid: Integer;
-  LRebuild, LRefused: TArray<string>;
-  LWhy: string;
-begin
-  Result := 0;
-  ARebuilt := False;
-  ANote := '';
-  if (AAnalysis = nil) or (AAnalysis.Proj = nil) then
-    Exit;
-  LSW := TStopwatch.StartNew;
-  LRebuild := nil;
-  LRefused := nil;
-  for var LFile in AFiles do
-  begin
-    LMid := AAnalysis.Proj.ModelIdOf(LFile);
-    if (LMid < 0) or not AAnalysis.Proj.IsLight(LMid) then
-      Continue;
-    LOne := TStopwatch.StartNew;
-    try
-      if AAnalysis.Proj.PromoteUnit(LFile) then
-      begin
-        Inc(Result);
-        Log('analysis %d: promoted %s to a full analysis in %d ms', [
-          AAnalysis.Index, RelPath(LFile), LOne.ElapsedMilliseconds]);
-        Continue;
-      end;
-      LWhy := ModuleRefusalText(AAnalysis.Proj.StageTimings);
-    except
-      on E: Exception do
-        LWhy := Format(' (raised %s: %s)', [E.ClassName, E.Message]);
-    end;
-    Log('analysis %d: promotion of %s refused%s', [AAnalysis.Index,
-      RelPath(LFile), LWhy]);
-    // PasTree kept the file in PromotedFiles: a rebuild loads it full.
-    if Pos('promote-needs-rebuild', LWhy) > 0 then
-      LRebuild := LRebuild + [LFile]
-    else
-    begin
-      LRefused := LRefused + [UnitNameOfPath(LFile) + LWhy];
-      if IndexText(UnitNameOfPath(LFile) + LWhy, AAnalysis.PromoteRefused) < 0
-      then
-        AAnalysis.PromoteRefused := AAnalysis.PromoteRefused +
-          [UnitNameOfPath(LFile) + LWhy];
-    end;
-  end;
-  Inc(AAnalysis.Promoted, Result);
-  if LRebuild <> nil then
-  begin
-    RebuildAnalysis(AAnalysis, 'promoting ' + NamedFiles(Self, LRebuild) +
-      ' needs a rebuild (its $IF questions ask about units not loaded yet)');
-    ARebuilt := True;
-    Inc(Result, Length(LRebuild));
-    Inc(AAnalysis.Promoted, Length(LRebuild));
-  end
-  else if Result > 0 then
-    // The models changed under the navigator, as after a module run.
-    NewNavigator(AAnalysis);
-  Inc(AAnalysis.PromoteMs, LSW.ElapsedMilliseconds);
-  if Result > 0 then
-  begin
-    if Result <= 3 then
-    begin
-      LWhy := '';
-      for var LFile in AFiles do
-        if AAnalysis.Proj.ModelIdOf(LFile) >= 0 then
-          if not AAnalysis.Proj.IsLight(AAnalysis.Proj.ModelIdOf(LFile)) then
-            LWhy := LWhy + IfThen(LWhy <> '', ', ') + UnitNameOfPath(LFile);
-    end
-    else
-      LWhy := Plural(Result, 'library unit');
-    ANote := Format('light mode: %s read interface-only until now, analyzed '
-      + 'in full first (%d ms%s)', [LWhy, LSW.ElapsedMilliseconds,
-      IfThen(ARebuilt, ', the analysis rebuilt for it', '')]);
-  end;
-  if LRefused <> nil then
-    ANote := ANote + IfThen(ANote <> '', '; ', 'light mode: ') +
-      'not analyzed in full, its bodies not read: ' + string.Join(', ',
-      LRefused);
-  if ANote <> '' then
-    FPromoteNote := FPromoteNote + IfThen(FPromoteNote <> '', '; ') + ANote;
-end;
-
-function TMcpWorkspace.TakePromoteNote: string;
-begin
-  Result := FPromoteNote;
-  FPromoteNote := '';
 end;
 
 procedure TMcpWorkspace.EnsureFresh(out AReport: string);
@@ -1485,6 +1640,7 @@ var
   LSW: TStopwatch;
   LOk, LRebuilt: Boolean;
   LTotalMs: Int64;
+  LRunProj: TPasSemaProject;
 begin
   AReport := '';
   if (FLoadError <> '') or (FAnalyses.Count = 0) then
@@ -1541,7 +1697,17 @@ begin
       LNeedRebuild := '';
       if LGone.Count > 0 then
         LNeedRebuild := 'deleted: ' + NamedFiles(Self, LGone.ToArray);
+      // The module runs change the project in place: its workspace hands it
+      // out for them (Release) and takes it back (Adopt), with a navigator
+      // made afresh - a navigator kept across a run raises (PasTree 0.96.0).
+      LRunProj := nil;
       if LNeedRebuild = '' then
+      begin
+        LRunProj := LA.WS.Release;
+        LA.Nav := nil;
+      end;
+      if LNeedRebuild = '' then
+      try
         for var LFile in LChanged do
         begin
           LMid := LA.Proj.ModelIdOf(LFile);
@@ -1575,6 +1741,11 @@ begin
           if StampOf(LFile, LStamp) then
             LA.Stamps.AddOrSetValue(LowerCase(LFile), LStamp);
         end;
+      finally
+        LA.WS.Adopt(LRunProj);
+        LA.Proj := LA.WS.Project;
+        LA.Nav := LA.WS.Nav;
+      end;
       LAdded := nil;
       if LNeedRebuild <> '' then
       begin
@@ -1596,9 +1767,6 @@ begin
           RebuildOwners;
           RecordFormStamps;
         end;
-        // The models changed under the navigator's per-model caches (and
-        // since PasTree 0.96.0 a navigator kept across a run raises).
-        NewNavigator(LA);
       end;
       for var LFile in LAdded do
       begin
@@ -1661,13 +1829,22 @@ begin
       + 'full');
     Exit;
   end;
-  ASb.AppendLine(Format('  light mode: %d of %d units are library units read '
-    + 'interface-only (no bodies: calls and uses inside them are not seen); '
-    + '%d promoted to a full analysis on demand%s', [AA.Proj.LightCount,
-    AA.Proj.ModelCount, Length(AA.Proj.PromotedFiles), IfThen(
-    AA.PromoteRefused <> nil, ', refused: ' + string.Join(', ',
-    Copy(AA.PromoteRefused, 0, MAX_HINTS)) + IfThen(Length(AA.PromoteRefused) >
-    MAX_HINTS, ', ...'), '')]));
+  if AA.WS.Escalated then
+    ASb.AppendLine('  light mode: escalated - a query needed the library in '
+      + 'full, and the analysis stays full for the session')
+  else
+    ASb.AppendLine(Format('  light mode: %d of %d units are library units '
+      + 'read interface-only (a query needing their bodies analyzes them in '
+      + 'full first); %d made full so far', [AA.Proj.LightCount,
+      AA.Proj.ModelCount, Length(AA.Proj.PromotedFiles)]));
+  // What the queries paid for answers equal to a full analysis'.
+  ASb.AppendLine(Format('  queries completed in light mode: %d of %d, %d '
+    + 'round(s), %d unit(s) made full, %d taken in, %d rebuild(s), %d '
+    + 'escalation(s), %d ms%s', [AA.Tally.Completed, AA.Tally.Queries,
+    AA.Tally.Rounds, AA.Tally.Promoted, AA.Tally.Loaded, AA.Tally.Rebuilt,
+    AA.Tally.Escalated, AA.Tally.Ms, IfThen(AA.Refused <> nil,
+    '; refused: ' + string.Join(', ', Copy(AA.Refused, 0, MAX_HINTS)) +
+    IfThen(Length(AA.Refused) > MAX_HINTS, ', ...'), '')]));
   LDirs := TDictionary<string, Integer>.Create;
   try
     LShadows := nil;

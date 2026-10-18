@@ -49,10 +49,13 @@ function ToolDefinitions: TJSONArray;
 function ServerInstructions(AWs: TMcpWorkspace): string;
 // The answer to a call - or '' and ADeferred, for a tool that answers later.
 // AProgress, when set, gets a line of status from a tool that reports: set by
-// the server when the call carries a progress token.
+// the server when the call carries a progress token. ACancelled, when set,
+// is the client's cancel (notifications/cancelled), polled by the workspace
+// queries completing an answer in light mode - from worker threads too.
 function CallTool(AWs: TMcpWorkspace; const AName: string; AArgs: TJSONObject;
   out AIsError: Boolean; out ADeferred: TDeferredTool;
-  const AProgress: TProc<string> = nil): string;
+  const AProgress: TProc<string> = nil;
+  const ACancelled: TFunc<Boolean> = nil): string;
 // CallTool to its answer, a deferred tool's work done on the calling thread:
 // the CLI's way.
 function CallToolNow(AWs: TMcpWorkspace; const AName: string;
@@ -79,6 +82,7 @@ uses
   PasTree.Sema.Project,
   PasTree.Sema.Nav,
   PasTree.Sema.Lint,
+  PasTree.Sema.Workspace,
   PasTree.Dfm,
   PasTree.Sema.Dfm,
   PasTree.Platforms,
@@ -820,109 +824,231 @@ begin
       [AWs.RelPath(AA.Proj.ModelFile(AMid))]);
 end;
 
-{ ---- light mode -------------------------------------------------------------- }
+{ ---- the workspace: queries that complete their own answers -------------------- }
 
 function ModuleChild(LM: TPasSemaModel; AKind: TPasNodeKind): Integer; forward;
 
-// Light mode (SPEC 9.9): AMid of AA, a library unit read interface-only, is
-// promoted to a full analysis (TMcpWorkspace.PromoteUnits - the answer says
-// so) before a tool reads its bodies. True when the analysis was rebuilt for
-// it: model ids changed, and the caller resolves what it holds again.
-function PromoteModel(AWs: TMcpWorkspace; AA: TMcpAnalysis;
-  AMid: Integer): Boolean;
+{ Light mode (SPEC 9.9). A question a library body can change - references,
+  the hierarchy, a rename, the lint, defines, one file's text, a position -
+  is asked through the analysis' TPasWorkspace (TMcpAnalysis.WS): PasTree
+  makes the light units the answer needs full first, rebuilds or escalates
+  to a full analysis when that is cheaper, and the answer is the full
+  analysis'. Each Q* below asks it, then TMcpWorkspace.QueryDone: a query
+  that changed the analysis raises EMcpIndexChanged, the ids the tool holds
+  being stale, and CallTool runs the tool again - its next run finds the
+  demand met. In a full analysis every demand is empty and a Q* is the
+  navigator's own call. }
+
+// (AMid, ASym) of AA as the workspace's key - only when the key names that
+// symbol again (a declaration with no site has none: the navigator's own
+// call then, which needs no library body for a builtin either).
+function QKey(AA: TMcpAnalysis; AMid, ASym: Integer;
+  out AKey: TPasSymbolKey): Boolean;
 var
-  LNote: string;
+  LM, LS: Integer;
 begin
-  Result := False;
-  if (AA <> nil) and (AA.Proj <> nil) and AA.Proj.IsLight(AMid) then
-    AWs.PromoteUnits(AA, [AA.Proj.ModelFile(AMid)], Result, LNote);
+  AKey := TPasSymbolKey.Make(AA.Proj, AMid, ASym);
+  Result := AKey.Valid and AKey.Resolve(AA.Proj, LM, LS) and (LM = AMid) and
+    (LS = ASym);
 end;
 
-// Light mode: how many light units of AA list AMid in `uses` (either
-// section), AMid itself when it is one - whose bodies or implementation
-// sections, not read, can hold a use of what AMid declares: every light unit
-// for System and SysInit. A project's own unit has none, unless it is a
-// patched copy of a library unit that library units use. 0 when nothing is
-// light.
-function LightListers(AA: TMcpAnalysis; AMid: Integer): Integer;
+function QRefs(AWs: TMcpWorkspace; AA: TMcpAnalysis; AMid, ASym: Integer;
+  AImplHeaders: Boolean = False): TArray<TPasRefHit>;
 var
-  LAll: Boolean;
+  LKey: TPasSymbolKey;
 begin
-  Result := 0;
-  if (AA = nil) or (AA.Proj = nil) or (AMid < 0) or
-     (AMid >= AA.Proj.ModelCount) or (AA.Proj.LightCount = 0) then
-    Exit;
-  LAll := MatchText(ChangeFileExt(ExtractFileName(AA.Proj.ModelFile(AMid)),
-    ''), ['System', 'SysInit']);
-  for var LMid := 0 to AA.Proj.ModelCount - 1 do
-  begin
-    if not AA.Proj.IsLight(LMid) then
-      Continue;
-    if LAll or (LMid = AMid) then
-      Inc(Result)
+  if not QKey(AA, AMid, ASym, LKey) then
+    Exit(AA.Nav.FindReferences(AMid, ASym, AImplHeaders));
+  Result := AA.WS.FindReferences(LKey, AImplHeaders);
+  AWs.QueryDone(AA);
+end;
+
+// The references of every symbol of ASyms in one pass (callers' family
+// batch).
+procedure QRefsOfAll(AWs: TMcpWorkspace; AA: TMcpAnalysis;
+  const ASyms: TArray<TPasExtRef>; AHits: TList<TPasRefHit>);
+var
+  LKey: TPasSymbolKey;
+  LKeys: TArray<TPasSymbolKey>;
+  LRest: TArray<TPasExtRef>;
+begin
+  LKeys := nil;
+  LRest := nil;
+  for var LR in ASyms do
+    if QKey(AA, LR.UnitId, LR.Sym, LKey) then
+      LKeys := LKeys + [LKey]
     else
-      for var LU in AA.Proj.Model(LMid).UsesList do
-        if LU.UnitId = AMid then
-        begin
-          Inc(Result);
-          Break;
-        end;
-  end;
-end;
-
-// LightListers for a declaration: its unit's, or - a bare property
-// redeclaration (`property Constraints;`), whose uses are the republished
-// property's through every class - the unit of the property it republishes.
-function LightListersOf(AA: TMcpAnalysis; AMid, ASym: Integer): Integer;
-var
-  LMid, LSym, LPMid, LPSym: Integer;
-begin
-  Result := LightListers(AA, AMid);
-  if (Result > 0) or (AA = nil) or (AA.Proj = nil) or (ASym < 0) or
-     (AA.Proj.LightCount = 0) or
-     not AA.Proj.IsBarePropertyRedecl(AMid, ASym) then
-    Exit;
-  LMid := AMid;
-  LSym := ASym;
-  for var LDepth := 1 to 32 do
+      LRest := LRest + [LR];
+  if LKeys <> nil then
   begin
-    if not AA.Proj.IsBarePropertyRedecl(LMid, LSym) or
-       not AA.Proj.PropertyRedeclPrev(LMid, LSym, LPMid, LPSym) then
-      Break;
-    LMid := LPMid;
-    LSym := LPSym;
+    AHits.AddRange(AA.WS.CollectReferencesOfAll(LKeys));
+    AWs.QueryDone(AA);
   end;
-  if LMid <> AMid then
-    Result := LightListers(AA, LMid);
+  if LRest <> nil then
+    AA.Nav.CollectReferencesOfAll(LRest, AHits);
 end;
 
-// Light mode: whether any analysis reads a unit interface-only.
-function LightAny(AWs: TMcpWorkspace): Boolean;
-begin
-  for var LA in AWs.Analyses do
-    if (LA.Proj <> nil) and (LA.Proj.LightCount > 0) then
-      Exit(True);
-  Result := False;
-end;
-
-// The first line of a light unit's implementation section: a position there
-// or past it is in text the light analysis never read. MaxInt for a unit
-// read whole.
-function LightImplLine(AA: TMcpAnalysis; AMid: Integer): Integer;
+function QAssignments(AWs: TMcpWorkspace; AA: TMcpAnalysis;
+  AMid, ASym: Integer): TArray<TPasRefHit>;
 var
-  LSec, LLine, LCol: Integer;
-  LFile: string;
+  LKey: TPasSymbolKey;
 begin
-  Result := MaxInt;
-  if not AA.Proj.IsLight(AMid) or not AA.Proj.EnsureHydrated(AMid) then
+  if not QKey(AA, AMid, ASym, LKey) then
+    Exit(AA.Nav.FindAssignments(AMid, ASym));
+  Result := AA.WS.FindAssignments(LKey);
+  AWs.QueryDone(AA);
+end;
+
+function QCreations(AWs: TMcpWorkspace; AA: TMcpAnalysis;
+  AMid, ASym: Integer): TArray<TPasRefHit>;
+var
+  LKey: TPasSymbolKey;
+begin
+  if not QKey(AA, AMid, ASym, LKey) then
+    Exit(AA.Nav.FindCreations(AMid, ASym));
+  Result := AA.WS.FindCreations(LKey);
+  AWs.QueryDone(AA);
+end;
+
+function QDestructions(AWs: TMcpWorkspace; AA: TMcpAnalysis;
+  AMid, ASym: Integer): TArray<TPasRefHit>;
+var
+  LKey: TPasSymbolKey;
+begin
+  if not QKey(AA, AMid, ASym, LKey) then
+    Exit(AA.Nav.FindDestructions(AMid, ASym));
+  Result := AA.WS.FindDestructions(LKey);
+  AWs.QueryDone(AA);
+end;
+
+function QDescendants(AWs: TMcpWorkspace; AA: TMcpAnalysis;
+  AMid, ASym: Integer): TArray<TPasDescendantHit>;
+var
+  LKey: TPasSymbolKey;
+begin
+  if not QKey(AA, AMid, ASym, LKey) then
+    Exit(AA.Nav.FindDescendants(AMid, ASym));
+  Result := AA.WS.FindDescendants(LKey);
+  AWs.QueryDone(AA);
+end;
+
+function QOverrides(AWs: TMcpWorkspace; AA: TMcpAnalysis;
+  AMid, ASym: Integer): TArray<TPasOverrideHit>;
+var
+  LKey: TPasSymbolKey;
+begin
+  if not QKey(AA, AMid, ASym, LKey) then
+    Exit(AA.Nav.FindOverrides(AMid, ASym));
+  Result := AA.WS.FindOverrides(LKey);
+  AWs.QueryDone(AA);
+end;
+
+function QImplementations(AWs: TMcpWorkspace; AA: TMcpAnalysis;
+  AMid, ASym: Integer): TArray<TPasImplHit>;
+var
+  LKey: TPasSymbolKey;
+begin
+  if not QKey(AA, AMid, ASym, LKey) then
+    Exit(AA.Nav.FindImplementations(AMid, ASym));
+  Result := AA.WS.FindImplementations(LKey);
+  AWs.QueryDone(AA);
+end;
+
+function QInterfaceImplementors(AWs: TMcpWorkspace; AA: TMcpAnalysis;
+  AMid, ASym: Integer): TArray<TPasImplHit>;
+var
+  LKey: TPasSymbolKey;
+begin
+  if not QKey(AA, AMid, ASym, LKey) then
+    Exit(AA.Nav.FindInterfaceImplementors(AMid, ASym));
+  Result := AA.WS.FindInterfaceImplementors(LKey);
+  AWs.QueryDone(AA);
+end;
+
+function QRenameFamily(AWs: TMcpWorkspace; AA: TMcpAnalysis;
+  AMid, ASym: Integer; out AMembers: TArray<TPasRenameFamilyMember>;
+  out AError: string): Boolean;
+var
+  LKey: TPasSymbolKey;
+begin
+  if not QKey(AA, AMid, ASym, LKey) then
+    Exit(AA.Nav.RenameFamily(AMid, ASym, AMembers, AError));
+  Result := AA.WS.RenameFamily(LKey, AMembers, AError);
+  AWs.QueryDone(AA);
+end;
+
+function QPlanRename(AWs: TMcpWorkspace; AA: TMcpAnalysis;
+  AMid, ASym: Integer; const ANewName: string;
+  out AEdits: TArray<TPasRenameEdit>;
+  out ACarried: TArray<TPasCarriedRename>;
+  out AFamily: TArray<TPasRenameFamilyMember>;
+  out AInactive: TArray<TPasInactiveUse>; out AError: string): Boolean;
+var
+  LKey: TPasSymbolKey;
+begin
+  if not QKey(AA, AMid, ASym, LKey) then
+    Exit(AA.Nav.PlanRename(AMid, ASym, ANewName, AEdits, ACarried, AFamily,
+      AInactive, AError));
+  Result := AA.WS.PlanRename(LKey, ANewName, AEdits, ACarried, AFamily,
+    AInactive, AError);
+  AWs.QueryDone(AA);
+end;
+
+function QBuiltinRefs(AWs: TMcpWorkspace; AA: TMcpAnalysis;
+  const AName: string): TArray<TPasRefHit>;
+begin
+  Result := AA.WS.FindBuiltinReferences(AName);
+  AWs.QueryDone(AA);
+end;
+
+function QDefineRefs(AWs: TMcpWorkspace; AA: TMcpAnalysis;
+  const AName: string): TArray<TPasDefineHit>;
+begin
+  Result := AA.WS.FindDefineReferences(AName);
+  AWs.QueryDone(AA);
+end;
+
+// AFile analyzed in full - its bodies, its directives past the interface,
+// its implementation `uses` loaded - when it is a light unit, or loaded when
+// only a full closure holds it (WS.InFile: "one library file"). ADefer: a
+// change is held back for TMcpWorkspace.RaiseIfChanged.
+procedure QFile(AWs: TMcpWorkspace; AA: TMcpAnalysis; const AFile: string;
+  ADefer: Boolean = False);
+begin
+  AA.WS.InFile<Boolean>(AFile,
+    function(ANav: TPasNavigator; AMid: Integer): Boolean
+    begin
+      Result := True;
+    end);
+  AWs.QueryDone(AA, ADefer);
+end;
+
+// The demand of a position question (WS.At: the file when it is light, and
+// the unit of the symbol there when it is light) met before the tool asks
+// the navigator what is there.
+procedure QPosition(AWs: TMcpWorkspace; AA: TMcpAnalysis; const AFile: string;
+  ALine, ACol: Integer);
+begin
+  AA.WS.At<Boolean>(AFile, ALine, ACol,
+    function(ANav: TPasNavigator; AMid: Integer): Boolean
+    begin
+      Result := True;
+    end);
+  AWs.QueryDone(AA);
+end;
+
+// The body of routine (AMid, ASym) in the analysis (WS.RoutineImplNode: its
+// unit made full first when it is light).
+procedure QRoutineBody(AWs: TMcpWorkspace; AA: TMcpAnalysis;
+  AMid, ASym: Integer);
+var
+  LKey: TPasSymbolKey;
+  LImplMid: Integer;
+begin
+  if not QKey(AA, AMid, ASym, LKey) then
     Exit;
-  LSec := ModuleChild(AA.Proj.Model(AMid), nkImplementationSec);
-  if LSec <> NIL_NODE then
-  begin
-    AA.Proj.NodeSite(AMid, LSec, LFile, LLine, LCol);
-    if LLine > 0 then
-      Result := LLine;
-  end;
+  AA.WS.RoutineImplNode(LKey, LImplMid);
+  AWs.QueryDone(AA);
 end;
 
 // file + line + (name | column) -> what is there.
@@ -999,12 +1125,11 @@ begin
     end;
     LInClosure := True;
     RequireText(AWs, LA, LMid);
-    // A library body asked about: its unit is analyzed in full first.
-    if (LLine >= LightImplLine(LA, LMid)) and PromoteModel(AWs, LA, LMid) then
-    begin
-      LMid := LA.Nav.ModelIdOf(LFile);
-      RequireText(AWs, LA, LMid);
-    end;
+    // A position in a library unit read interface-only: the unit analyzed
+    // in full first (the position question's demand), as a full analysis
+    // reads it.
+    if LA.Proj.IsLight(LMid) then
+      QPosition(AWs, LA, LFile, LLine, LCol);
     if LA.Nav.SymbolAt(LMid, LLine, LCol, LTMid, LTSym, LText) then
       LFound := FillSymbolTarget(AWs, LA, LTMid, LTSym, Result)
     else if LA.Nav.UnitAt(LMid, LLine, LCol, LTMid, LText) then
@@ -1027,9 +1152,16 @@ begin
       Break;
   end;
   if not LInClosure then
+  begin
+    // A unit only library implementations use: not loaded in light mode,
+    // in the closure all the same (taken in, and the tool runs again).
+    for var LA in AWs.Analyses do
+      if LA.Proj.LightCount > 0 then
+        QFile(AWs, LA, LFile);
     raise EToolError.CreateFmt('%s is not part of any analyzed project '
       + '(not reachable from the main sources through `uses`)',
       [AWs.RelPath(LFile)]);
+  end;
   if not LFound then
   begin
     // A method resolution clause, `function IFoo.Bar = Baz;`: its left side
@@ -1807,21 +1939,20 @@ begin
       ArgStr(AArgs, 'kind'));
 end;
 
-// Light mode: the unit declaring each routine of ATargets - where its body
-// is - promoted (PromoteModel) in the analysis that answers for it, the first
-// holding it: a library unit has no owner. True at a rebuild, where it
-// stops: the targets are stale - resolve them again and call it again.
-function PromoteRoutines(AWs: TMcpWorkspace;
-  const ATargets: TArray<TTarget>): Boolean;
+// The body of each routine of ATargets, in the analysis that answers for
+// it - the first holding it: a library unit has no owner. In light mode its
+// unit is made full first (QRoutineBody); that changes the analysis, and the
+// tool starts again (EMcpIndexChanged).
+procedure EnsureRoutineBodies(AWs: TMcpWorkspace;
+  const ATargets: TArray<TTarget>);
 begin
-  Result := False;
   for var LT in ATargets do
     if IsRoutineTarget(LT) then
       for var LA in AWs.Analyses do
         if LT.Ids[LA.Index].Mid >= 0 then
         begin
-          if PromoteModel(AWs, LA, LT.Ids[LA.Index].Mid) then
-            Exit(True);
+          if LA.Proj.LightCount > 0 then
+            QRoutineBody(AWs, LA, LT.Ids[LA.Index].Mid, LT.Ids[LA.Index].Sym);
           Break;
         end;
 end;
@@ -2619,27 +2750,22 @@ var
   LImplFile, LShort: string;
 begin
   LContext := EnsureRange(ArgInt(AArgs, 'context', 0), 0, 200);
-  // A routine of a library unit read interface-only is implemented in text
-  // the light analysis never read: the unit is analyzed in full first.
-  for var LTry := 1 to 3 do
+  LMore := 0;
+  if ArgStr(AArgs, 'file') <> '' then
+    LTargets := [ResolvePosition(AWs, AArgs)]
+  else
   begin
-    LMore := 0;
-    if ArgStr(AArgs, 'file') <> '' then
-      LTargets := [ResolvePosition(AWs, AArgs)]
-    else
-    begin
-      if ArgStr(AArgs, 'symbol') = '' then
-        raise EToolError.Create('give `symbol` or `file` + `line` + `name`');
-      LTargets := ResolveName(AWs, ArgStr(AArgs, 'symbol'),
-        ArgStr(AArgs, 'kind'), False, 10, LMore);
-      if Length(LTargets) = 0 then
-        raise EToolError.Create(NoSuchDeclaration(AWs,
-          ArgStr(AArgs, 'symbol')));
-    end;
-    // Not for a name of many declarations: each would cost a unit.
-    if (Length(LTargets) > 3) or not PromoteRoutines(AWs, LTargets) then
-      Break;
+    if ArgStr(AArgs, 'symbol') = '' then
+      raise EToolError.Create('give `symbol` or `file` + `line` + `name`');
+    LTargets := ResolveName(AWs, ArgStr(AArgs, 'symbol'),
+      ArgStr(AArgs, 'kind'), False, 10, LMore);
+    if Length(LTargets) = 0 then
+      raise EToolError.Create(NoSuchDeclaration(AWs,
+        ArgStr(AArgs, 'symbol')));
   end;
+  // A routine of a library unit read interface-only is implemented in text
+  // the light analysis has not read: its unit made full first.
+  EnsureRoutineBodies(AWs, LTargets);
   LSb := TStringBuilder.Create;
   try
     for var LT in LTargets do
@@ -2687,15 +2813,6 @@ begin
             LImplLine := ImplHeaderLine(LLines, LNavT.Line, LShort);
             LSb.AppendLine(Format('implemented at %s:%d', [
               AWs.RelPath(LImplFile), LImplLine]));
-            Break;
-          end;
-          // Light mode, a name of many declarations: none promoted (above).
-          if (LMid >= 0) and LA.Proj.IsLight(LMid) and
-             (Length(LTargets) > 3) then
-          begin
-            LSb.AppendLine(Format('(implementation not read: %s is a library '
-              + 'unit read interface-only - `definition` of this one alone '
-              + 'reads it)', [UnitNameOfFile(LT.DeclFile)]));
             Break;
           end;
         end;
@@ -3175,11 +3292,7 @@ begin
   // A routine of a library unit read interface-only: its body is read once
   // the unit is analyzed in full.
   if LPart <> 'decl' then
-    for var LTry := 1 to 3 do
-      if PromoteRoutines(AWs, LCands) then
-        LCands := ResolveOneOrOverloads(AWs, AArgs)
-      else
-        Break;
+    EnsureRoutineBodies(AWs, LCands);
   LSb := TStringBuilder.Create;
   try
     if Length(LCands) = 1 then
@@ -3548,28 +3661,6 @@ begin
       end;
 end;
 
-// Light mode (SPEC 9.9): a declaration of a library unit has uses in the
-// bodies of library units, which are not searched when those are read
-// interface-only - said, with the number that can hold one (LightListers).
-// '' when none can: an own declaration, or nothing light.
-function LightBodiesNote(AWs: TMcpWorkspace; const AT: TTarget): string;
-var
-  LN: Integer;
-begin
-  Result := '';
-  if not (AT.Kind in [tkSymbol, tkUnit]) then
-    Exit;
-  for var LA in AWs.Analyses do
-    if AT.Ids[LA.Index].Mid >= 0 then
-    begin
-      LN := LightListersOf(LA, AT.Ids[LA.Index].Mid, AT.Ids[LA.Index].Sym);
-      if LN = 0 then
-        Exit;
-      Exit(Format('(light mode: the bodies and implementation sections of '
-        + 'library units read interface-only are not searched - %s can use '
-        + 'it there)', [Plural(LN, 'such unit')]));
-    end;
-end;
 
 function ToolReferences(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
 var
@@ -3631,7 +3722,7 @@ begin
         tkSymbol:
           begin
             var LBefore := LSet.Count;
-            for var LH in LA.Nav.FindReferences(LId.Mid, LId.Sym) do
+            for var LH in QRefs(AWs, LA, LId.Mid, LId.Sym) do
               LSet.Add(LH, LTag);
             Inc(LCodeRows[LTi], LSet.Count - LBefore);
             // A class's name qualifying its own methods' implementation
@@ -3640,10 +3731,10 @@ begin
             begin
               LPlainKeys := TDictionary<string, Boolean>.Create;
               try
-                for var LH in LA.Nav.FindReferences(LId.Mid, LId.Sym) do
+                for var LH in QRefs(AWs, LA, LId.Mid, LId.Sym) do
                   LPlainKeys.AddOrSetValue(Format('%s:%d:%d',
                     [LowerCase(LH.FilePath), LH.Line, LH.Col]), True);
-                for var LH in LA.Nav.FindReferences(LId.Mid, LId.Sym, True) do
+                for var LH in QRefs(AWs, LA, LId.Mid, LId.Sym, True) do
                   if not LPlainKeys.ContainsKey(Format('%s:%d:%d',
                      [LowerCase(LH.FilePath), LH.Line, LH.Col])) and
                      LHeaderSeen.TryAdd(Format('%s:%d', [LowerCase(LH.FilePath),
@@ -3673,10 +3764,10 @@ begin
           for var LH in LA.Nav.FindUnitReferences(LId.Mid) do
             LSet.Add(LH);
         tkBuiltin:
-          for var LH in LA.Nav.FindBuiltinReferences(LT.Name) do
+          for var LH in QBuiltinRefs(AWs, LA, LT.Name) do
             LSet.Add(LH);
         tkDefine:
-          for var LH in LA.Nav.FindDefineReferences(LT.Name) do
+          for var LH in QDefineRefs(AWs, LA, LT.Name) do
             LSet.Add(LH.Hit, IfThen(LH.Active, '', 'inactive'));
       end;
     end;
@@ -3826,18 +3917,7 @@ begin
             Copy(LForms, 2, MaxInt)]);
         LSb.Append(LForms);
       end;
-    LForms := LightBodiesNote(AWs, LT);
-    // An own declaration library code uses - a property it republishes.
-    if LForms = '' then
-      for var LH in LAll do
-        if not LH.Own and not LH.Form and LightAny(AWs) then
-        begin
-          LForms := '(light mode: the bodies and implementation sections of '
-            + 'library units read interface-only are not searched)';
-          Break;
-        end;
-    if LForms <> '' then
-      LSb.AppendLine(LForms);
+
     if (LT.Kind = tkSymbol) and (LT.Head = 'property') then
       for var LA in AWs.Analyses do
       begin
@@ -4279,7 +4359,7 @@ begin
   if ABase.HasPlatform(AName) then
     Exit(Format('%s predefined for %s', [AName, PlatformName(AA.Platform)]));
   LElse := nil;
-  for var LH in AA.Nav.FindDefineReferences(AName) do
+  for var LH in QDefineRefs(AWs, AA, AName) do
     if (LH.Kind = drDefine) and AWs.IsOwnFile(LH.Hit.FilePath) then
       LElse := LElse + [Format('%s:%d', [AWs.RelPath(LH.Hit.FilePath),
         LH.Hit.Line])];
@@ -4948,6 +5028,13 @@ begin
         Continue;
       LBase := BaseDefinesOf(LA);
       LAny := LAny or LBase.HasProject(AName) or LBase.HasPlatform(AName);
+      // The library's directives, counted: through the workspace, which
+      // reads them past the stop of a unit read interface-only (its
+      // preprocess-only completion) as a full analysis does.
+      for var LH in QDefineRefs(AWs, LA, AName) do
+        if not AWs.IsOwnFile(LH.Hit.FilePath) then
+          LLibrary.AddOrSetValue(Format('%s:%d:%d', [LowerCase(
+            LH.Hit.FilePath), LH.Hit.Line, LH.Hit.Col]), True);
       for var LMid := 0 to LA.Proj.ModelCount - 1 do
       begin
         LM := LA.Proj.Model(LMid);
@@ -4957,11 +5044,7 @@ begin
             Continue;
           LFileName := LM.Tree.Source.FileNames[LR.FileId];
           if not AWs.IsOwnFile(LFileName) then
-          begin
-            LLibrary.AddOrSetValue(Format('%s:%d', [LowerCase(LFileName),
-              LR.Start]), True);
             Continue;
-          end;
           if (AFile <> '') and not SameText(LFileName, AFile) then
             Continue;
           if not LA.Proj.EnsureHydrated(LMid) then
@@ -5040,9 +5123,7 @@ begin
       LSb.AppendLine(Format('%s (conditional symbol) - %s in %s of the '
         + 'group%s', [AName, Plural(LRows.Count, 'directive'), Plural(LFiles,
         'file'), IfThen(LLibrary.Count > 0, Format(' (+%d in library files, '
-        + 'not listed%s)', [LLibrary.Count, IfThen(AWs.LightOn, '; those '
-        + 'past the interface of a unit read interface-only not counted',
-        '')]), '')]));
+        + 'not listed)', [LLibrary.Count]), '')]));
     for var LA in AWs.Analyses do
     begin
       if LA.Proj = nil then
@@ -5163,10 +5244,10 @@ begin
   LSb := TStringBuilder.Create;
   try
     // A library unit read interface-only was preprocessed only that far:
-    // its directives past it, once analyzed in full.
+    // its directives past it, once analyzed in full (one file's demand).
     for var LA in AWs.Analyses do
-      if LA.Proj <> nil then
-        PromoteModel(AWs, LA, LA.Nav.ModelIdOf(LFile));
+      if (LA.Proj <> nil) and (LA.Proj.LightCount > 0) then
+        QFile(AWs, LA, LFile);
     for var LA in AWs.Analyses do
     begin
       if LA.Proj = nil then
@@ -5366,7 +5447,7 @@ begin
         LOk := LA.Nav.PlanUnitRename(LId.Mid, LNew, LOne, LFileName,
           LOneInactive, LErr)
       else
-        LOk := LA.Nav.PlanRename(LId.Mid, LId.Sym, LNew, LOne, LOneCarried,
+        LOk := QPlanRename(AWs, LA, LId.Mid, LId.Sym, LNew, LOne, LOneCarried,
           LOneFamily, LOneInactive, LErr);
       // The name written in a branch these defines leave out: PasTree lists
       // it beside the plan (never a refusal since 0.98.0); a library's
@@ -5696,7 +5777,7 @@ begin
         begin
           LAccepted := True;
           // A direct child's parent is the target itself: named only below.
-          for var LH in LA.Nav.FindDescendants(LTMid, LTSym) do
+          for var LH in QDescendants(AWs, LA, LTMid, LTSym) do
             if LH.Kind = pdkDescendant then
               LSet.Add(LH.Hit, LH.TypeName + IfThen(LH.Depth > 1, ' <- ' +
                 LH.ParentTypeName, ''));
@@ -5709,7 +5790,7 @@ begin
         if At(LA, 1) then
         begin
           LAccepted := True;
-          for var LH in LA.Nav.FindOverrides(LTMid, LTSym) do
+          for var LH in QOverrides(AWs, LA, LTMid, LTSym) do
             LSet.Add(LH.Hit, LH.TypeName + ' ' + OVK[LH.Kind]);
         end;
       end
@@ -5719,7 +5800,7 @@ begin
         if At(LA, 2) then
         begin
           LAccepted := True;
-          for var LH in LA.Nav.FindImplementations(LTMid, LTSym) do
+          for var LH in QImplementations(AWs, LA, LTMid, LTSym) do
             if LH.Kind <> pikRoot then
               LSet.Add(LH.Hit, LH.TypeName + ' ' + IMK[LH.Kind] +
                 IfThen(LH.ViaTypeName <> '', ' via ' + LH.ViaTypeName, ''));
@@ -5727,7 +5808,7 @@ begin
         else if At(LA, 3) then
         begin
           LAccepted := True;
-          for var LH in LA.Nav.FindInterfaceImplementors(LTMid, LTSym) do
+          for var LH in QInterfaceImplementors(AWs, LA, LTMid, LTSym) do
             if LH.Kind <> pikRoot then
               LSet.Add(LH.Hit, LH.TypeName);
         end;
@@ -5738,7 +5819,7 @@ begin
         if At(LA, 4) then
         begin
           LAccepted := True;
-          for var LH in LA.Nav.FindAssignments(LTMid, LTSym) do
+          for var LH in QAssignments(AWs, LA, LTMid, LTSym) do
             LSet.Add(LH);
         end;
       end
@@ -5749,10 +5830,10 @@ begin
         begin
           LAccepted := True;
           if LRel = 'creations' then
-            for var LH in LA.Nav.FindCreations(LTMid, LTSym) do
+            for var LH in QCreations(AWs, LA, LTMid, LTSym) do
               LSet.Add(LH)
           else
-            for var LH in LA.Nav.FindDestructions(LTMid, LTSym) do
+            for var LH in QDestructions(AWs, LA, LTMid, LTSym) do
               LSet.Add(LH);
         end;
       end
@@ -5783,9 +5864,7 @@ begin
     if LSet.Compiled > 0 then
       LSb.AppendLine(Format('(+%d in compiled units without source, not '
         + 'shown)', [LSet.Compiled]));
-    LMeta := LightBodiesNote(AWs, LT);
-    if LMeta <> '' then
-      LSb.AppendLine(LMeta);
+
     Result := LSb.ToString.TrimRight;
   finally
     LEnclosing.Free;
@@ -6285,14 +6364,7 @@ type
     FFamily: Boolean;
     FHideBindings: Boolean;
     FMet: TList<TMetSource>;
-    // Light mode: the roots' sources declared in a library - calls made
-    // through them inside library bodies read interface-only are not seen.
-    FLight: TStringList;
-    // A row in a library file: the analysis read library code for it, and
-    // in light mode the bodies of library units are not among what it read.
-    FLibRows: Boolean;
     procedure NoteThrough(const ASource: TCallSource);
-    procedure NoteLight(AA: TMcpAnalysis; const ASource: TCallSource);
     procedure NoteBelow(const AText: string);
     function Listed(ALists: TObjectDictionary<Integer, TStringList>;
       ANode: Integer): TArray<string>;
@@ -6434,12 +6506,10 @@ begin
   FIfaceNames := TDictionary<string, Boolean>.Create;
   FIfaceScanned := TDictionary<Integer, Boolean>.Create;
   FMet := TList<TMetSource>.Create;
-  FLight := TStringList.Create;
 end;
 
 destructor TCallerWalk.Destroy;
 begin
-  FLight.Free;
   FMet.Free;
   FIfaceScanned.Free;
   FIfaceNames.Free;
@@ -6474,12 +6544,6 @@ begin
 end;
 
 // An override below the root: what a change to its signature must follow.
-procedure TCallerWalk.NoteLight(AA: TMcpAnalysis; const ASource: TCallSource);
-begin
-  if (FLight.IndexOf(ASource.Name) < 0) and
-     (LightListersOf(AA, ASource.Mid, ASource.Sym) > 0) then
-    FLight.Add(ASource.Name);
-end;
 
 procedure TCallerWalk.NoteBelow(const AText: string);
 var
@@ -6585,7 +6649,7 @@ begin
       AddClass(LK);
       LK := AA.Proj.CanonTypeX(AA.Proj.AncestorOfX(LK));
     end;
-    for var LD in AA.Nav.FindDescendants(AClass.UnitId, AClass.Sym) do
+    for var LD in QDescendants(FWs, AA, AClass.UnitId, AClass.Sym) do
       if LD.Kind = pdkDescendant then
         AddClass(XPlain(LD.UnitId, LD.Sym));
     Result := LList.ToArray;
@@ -6740,7 +6804,7 @@ begin
   LRow.Hit.Joined := AJoined;
   LRow.Hit.Tag := '';
   LRow.Hit.Own := FWs.IsOwnFile(AHit.FilePath);
-  FLibRows := FLibRows or not LRow.Hit.Own;
+
   LRow.Caller := ACaller;
   LRow.Call := ACall;
   LRow.Binding := False;
@@ -6780,14 +6844,14 @@ begin
     begin
       LBatch := TList<TPasRefHit>.Create;
       try
-        AA.Nav.CollectReferencesOfAll(ABatch, LBatch);
+        QRefsOfAll(FWs, AA, ABatch, LBatch);
         LHits := LBatch.ToArray;
       finally
         LBatch.Free;
       end;
     end
     else
-      LHits := AA.Nav.FindReferences(LS.Mid, LS.Sym);
+      LHits := QRefs(FWs, AA, LS.Mid, LS.Sym);
     for var LH in LHits do
     begin
       LM := nil;
@@ -7212,7 +7276,7 @@ begin
         LName);
       if LVirtual then
       begin
-        LFamily := AA.Nav.FindOverrides(LTMid, LTSym);
+        LFamily := QOverrides(FWs, AA, LTMid, LTSym);
         LIdx := -1;
         for var LI := 0 to High(LFamily) do
         begin
@@ -7253,7 +7317,7 @@ begin
       else if LHead = rhConstructor then
         // A constructor that is not virtual: `inherited;` in a descendant's
         // constructor of the same name.
-        for var LD in AA.Nav.FindDescendants(LClass.UnitId, LClass.Sym) do
+        for var LD in QDescendants(FWs, AA, LClass.UnitId, LClass.Sym) do
         begin
           if LD.Kind <> pdkDescendant then
             Continue;
@@ -7303,9 +7367,7 @@ begin
           end;
         end;
     end;
-    if ANode.Level = 0 then
-      for var LS2 in LSources do
-        NoteLight(AA, LS2);
+
     SearchRefs(AA, ANode, LSources, LClass, LHead in [rhFunction,
       rhConstructor], LVirtual);
     for var LB in LBelow do
@@ -7348,9 +7410,7 @@ begin
     begin
       LS := LSources[LIdx];
       Inc(LIdx);
-      if ANode.Level = 0 then
-        NoteLight(AA, LS);
-      for var LH in AA.Nav.FindReferences(LS.Mid, LS.Sym) do
+      for var LH in QRefs(FWs, AA, LS.Mid, LS.Sym) do
       begin
         LCaller := '';
         LNote := '';
@@ -7672,16 +7732,7 @@ begin
         + 'either)', [String.Join(', ', LDfmData.ToStringArray)]));
     for var LNote in FNotes do
       ASb.AppendLine('(' + LNote + ')');
-    if FLight.Count > 0 then
-      ASb.AppendLine(Format('(light mode: library units using %s are read '
-        + 'interface-only - a call or use made inside their bodies is not '
-        + 'among the rows)', [String.Join(', ', Copy(FLight.ToStringArray, 0,
-        3)) + IfThen(FLight.Count > 3, Format(' (%d in all)',
-        [FLight.Count]))]))
-    else if FLibRows and LightAny(FWs) then
-      // An own declaration library code uses - a property it republishes.
-      ASb.AppendLine('(light mode: library units read interface-only - a '
-        + 'call or use made inside their bodies is not among the rows)');
+
     if LDestructor then
       ASb.AppendLine('(a destructor runs from Free and FreeAndNil: `related '
         + 'destructions` of its class lists those)');
@@ -7967,7 +8018,7 @@ begin
       LId := LT.Ids[LA.Index];
       if LId.Mid < 0 then
         Continue;
-      if not LA.Nav.RenameFamily(LId.Mid, LId.Sym, LMembers, LErr) then
+      if not QRenameFamily(AWs, LA, LId.Mid, LId.Sym, LMembers, LErr) then
       begin
         LFamErr := LErr;
         LFamily.Clear;
@@ -8103,7 +8154,7 @@ begin
         LDm := LA.Nav.ModelIdOf(LT.DeclFile);
         if (LDm >= 0) and LA.Nav.MethodAt(LDm, LT.DeclLine, LT.DeclCol, LTMid,
            LTSym, LTypeName) then
-          for var LO in LA.Nav.FindOverrides(LTMid, LTSym) do
+          for var LO in QOverrides(AWs, LA, LTMid, LTSym) do
             if (LO.Kind = pokRoot) and ((LO.Hit.FilePath = '') or
                not AWs.IsOwnFile(LO.Hit.FilePath)) then
               LName := Format('%s.%s', [LO.TypeName, LTypeName]) +
@@ -9140,10 +9191,7 @@ type
     FValueCalls: TStringList;                   // through a procedural value
     FCompiled: TStringList;
     FNotes: TStringList;
-    // Light mode: the virtual and interface methods called whose overrides
-    // and implementations library units read interface-only may declare in
-    // their implementation sections - not among the rows.
-    FLight: TStringList;
+
     function XKey(AA: TMcpAnalysis; const AX: TSemaXType): string;
     procedure BuildIndex(AA: TMcpAnalysis);
     function TargetOf(AA: TMcpAnalysis; AMid, ASym: Integer): TTarget;
@@ -9187,12 +9235,10 @@ begin
   FValueCalls := TStringList.Create;
   FCompiled := TStringList.Create;
   FNotes := TStringList.Create;
-  FLight := TStringList.Create;
 end;
 
 destructor TCalleeWalk.Destroy;
 begin
-  FLight.Free;
   FNotes.Free;
   FCompiled.Free;
   FValueCalls.Free;
@@ -9542,8 +9588,15 @@ begin
     LBaseT := TargetOf(AA, AReceiver.UnitId, AReceiver.Sym);
   LUse := AUse;
   LUse.Via := LT.Name;
-  if (FLight.IndexOf(LT.Name) < 0) and (LightListers(AA, AMid) > 0) then
-    FLight.Add(LT.Name);
+  // What may run is the overrides and implementations the class index
+  // below holds: in light mode the units that may declare one (below the
+  // method's class, by the heritage edges) made full first, as the hierarchy
+  // query of the method does - the tool then runs again over them.
+  if AA.Proj.LightCount > 0 then
+    if LIface then
+      QImplementations(FWs, AA, AMid, ASym)
+    else
+      QOverrides(FWs, AA, AMid, ASym);
   LList := TList<TSymId>.Create;
   LIds := TList<TSymId>.Create;
   LOf := TList<TMcpAnalysis>.Create;
@@ -9915,12 +9968,7 @@ begin
         + '%s)', [String.Join(', ', FCompiled.ToStringArray)]));
     for var LNote in FNotes do
       LSb.AppendLine('(' + LNote + ')');
-    if FLight.Count > 0 then
-      LSb.AppendLine(Format('(light mode: what may run for %s - overrides '
-        + 'and implementations declared in the implementation sections of '
-        + 'library units read interface-only are not among the rows)',
-        [String.Join(', ', Copy(FLight.ToStringArray, 0, 3)) + IfThen(
-        FLight.Count > 3, Format(' (%d in all)', [FLight.Count]))]));
+
     // The ends of the walk: searched, nothing called.
     for var LI := 1 to FNodes.Count - 1 do
       if FNodes[LI].Found = 0 then
@@ -9973,11 +10021,7 @@ begin
     raise EToolError.CreateFmt('%s is a %s - `callees` takes a routine; '
       + '`members` lists what a type has', [LT.Name, LT.Head]);
   // A library routine read interface-only: its body, once analyzed in full.
-  for var LTry := 1 to 3 do
-    if PromoteRoutines(AWs, [LT]) then
-      LT := ResolveOne(AWs, AArgs)
-    else
-      Break;
+  EnsureRoutineBodies(AWs, [LT]);
   LA := ReportingAnalysis(AWs, LT);
   if (LA = nil) or not RoutineImpl(LA, LT.Ids[LA.Index].Mid,
      LT.Ids[LA.Index].Sym, LIMid, LRoutine) then
@@ -10609,18 +10653,23 @@ begin
   if ArgStr(AArgs, 'file') = '' then
     raise EToolError.Create('`file` is required');
   LFile := ArgFile(AWs, AArgs);
-  if not ModelOfFile(AWs, LFile, LA, LMid) then
-    raise EToolError.CreateFmt('%s is not part of any analyzed project',
-      [AWs.RelPath(LFile)]);
   LOwner := ArgStr(AArgs, 'owner');
   LSection := LowerCase(ArgStr(AArgs, 'section'));
+  if not ModelOfFile(AWs, LFile, LA, LMid) then
+  begin
+    // A unit only library implementations use: taken in, as a full
+    // analysis has it (one file's demand; the tool runs again).
+    for var LB in AWs.Analyses do
+      if LB.Proj.LightCount > 0 then
+        QFile(AWs, LB, LFile);
+    raise EToolError.CreateFmt('%s is not part of any analyzed project',
+      [AWs.RelPath(LFile)]);
+  end;
   // A library unit read interface-only has no implementation to outline
   // (and its text stops there): analyzed in full first, unless only the
   // interface is asked for.
-  if (LSection <> 'interface') and PromoteModel(AWs, LA, LMid) and
-     not ModelOfFile(AWs, LFile, LA, LMid) then
-    raise EToolError.CreateFmt('%s is not part of any analyzed project',
-      [AWs.RelPath(LFile)]);
+  if (LSection <> 'interface') and LA.Proj.IsLight(LMid) then
+    QFile(AWs, LA, LFile);
   LMembers := ArgBool(AArgs, 'members', True);
   LLimit := EnsureRange(ArgInt(AArgs, 'limit', 300), 0, 100000);
   LM := LA.Proj.Model(LMid);
@@ -10628,10 +10677,10 @@ begin
   LRows := TList<string>.Create;
   LSb := TStringBuilder.Create;
   try
-    // A light unit's text stops after its implementation `uses`.
+    // A light unit's text stops after its implementation `uses` (asked for
+    // its interface alone): the file's lines.
     if LA.Proj.IsLight(LMid) then
-      LSb.AppendLine(Format('%s (%d lines; a library unit read interface-only '
-        + '- its implementation is not outlined)', [AWs.RelPath(LFile),
+      LSb.AppendLine(Format('%s (%d lines)', [AWs.RelPath(LFile),
         TFile.ReadAllText(LFile).CountChar(#10) + 1]))
     else
       LSb.AppendLine(Format('%s (%d lines)', [AWs.RelPath(LFile),
@@ -10689,6 +10738,12 @@ begin
   LSb := TStringBuilder.Create;
   LEnclosing := TEnclosing.Create(AWs);
   try
+    // A library file asked about, read interface-only: analyzed in full
+    // first, its implementation checked as a full analysis checks it.
+    if (LFile <> '') and not AWs.IsOwnFile(LFile) then
+      for var LA in AWs.Analyses do
+        if LA.Proj.LightCount > 0 then
+          QFile(AWs, LA, LFile);
     for var LA in AWs.Analyses do
       for var LMid := 0 to LA.Proj.ModelCount - 1 do
       begin
@@ -10743,18 +10798,18 @@ begin
     else
       LSb.AppendLine(Format('%d diagnostics in %d files', [Length(LArr),
         LFiles.Count]));
-    // Light mode: what a library unit read interface-only can report.
+    // Light mode, the whole library asked for: its units read
+    // interface-only report what their interfaces hold - no query makes
+    // every library unit full short of `--no-light` (a file asked about
+    // alone is made full above).
     LN := 0;
-    if LLibrary or ((LFile <> '') and not AWs.IsOwnFile(LFile)) then
+    if LLibrary and (LFile = '') then
       for var LA in AWs.Analyses do
-        if LFile = '' then
-          Inc(LN, LA.Proj.LightCount)
-        else if LA.Proj.IsLight(LA.Nav.ModelIdOf(LFile)) then
-          Inc(LN);
+        Inc(LN, LA.Proj.LightCount);
     if LN > 0 then
-      LSb.AppendLine(Format('(light mode: %s read interface-only - their '
-        + 'implementations are not analyzed, so not checked)', [IfThen(LFile =
-        '', Plural(LN, 'library unit'), UnitNameOfFile(LFile) + ' is')]));
+      LSb.AppendLine(Format('(%s read interface-only report their interface '
+        + 'only - `--no-light` checks their implementations too)',
+        [Plural(LN, 'library unit')]));
     // More than fit: say WHERE they are first - one row per file, worst first.
     if (LFile = '') and (Length(LArr) > LLimit) and (LFiles.Count > 1) then
     begin
@@ -10855,8 +10910,20 @@ begin
   else
     raise EToolError.Create('give `unit` (a unit name) or `file`');
   if not LFound then
+  begin
+    // A unit only library implementations use: taken in, as a full
+    // analysis has it (one file's demand; the tool runs again).
+    if LFile <> '' then
+      for var LB in AWs.Analyses do
+        if LB.Proj.LightCount > 0 then
+          QFile(AWs, LB, LFile);
     raise EToolError.Create('that unit is not part of any analyzed project');
+  end;
   LFile := LA.Proj.ModelFile(LMid);
+  // A library unit read interface-only: its implementation `uses` loaded,
+  // as a full analysis loads them (one file's demand).
+  if ((LDir = 'uses') or (LDir = 'both')) and LA.Proj.IsLight(LMid) then
+    QFile(AWs, LA, LFile);
   LM := LA.Proj.Model(LMid);
   LSb := TStringBuilder.Create;
   LSet := THitSet.Create(AWs);
@@ -11044,8 +11111,8 @@ type
     // The same for many files in one call - cheaper than one per file.
     procedure AskTree(const AFiles: TArray<string>);
     // The doubts PasTree's rule put on that entry for a library unit it read
-    // interface-only (light mode) - what LintPromotions could not settle, a
-    // promotion refused: nil when none.
+    // interface-only (light mode) - a unit the workspace could not make
+    // full: nil when none.
     function TreeLightDoubts(const AFile, AName: string): TArray<string>;
     // The units with an effect AStart reaches through the units in ALost,
     // 'Name (initialization)'.
@@ -11243,7 +11310,8 @@ begin
   if FEffect.TryGetValue(AMid, Result) then
     Exit;
   // Light mode: a library unit read interface-only has no initialization to
-  // look at - unknown is not none (ToolLint promotes the ones it can).
+  // look at - unknown is not none (EnsureLintEffects has the workspace make
+  // them full, and the tool runs again).
   if FA.Proj.IsLight(AMid) then
   begin
     Result := 'read interface-only, its initialization not known';
@@ -11381,39 +11449,44 @@ end;
 
 procedure TLintAnalysis.AskTree(const AFiles: TArray<string>);
 var
-  LMids: TArray<Integer>;
-  LMid: Integer;
+  LFiles: TArray<string>;
   LKey: string;
   LDoubts: TArray<string>;
+  LUnused: TArray<TPasUnusedUse>;
 begin
   if FTreeUnused = nil then
     FTreeUnused := TDictionary<string, Boolean>.Create;
-  LMids := nil;
+  LFiles := nil;
   for var LF in AFiles do
-  begin
-    LMid := FA.Proj.ModelIdOf(LF);
     // The file itself marks it asked.
-    if (LMid >= 0) and FTreeUnused.TryAdd(LowerCase(LF), True) then
-      LMids := LMids + [LMid];
+    if (FA.Proj.ModelIdOf(LF) >= 0) and FTreeUnused.TryAdd(LowerCase(LF), True)
+    then
+      LFiles := LFiles + [LF];
+  if LFiles = nil then
+    Exit;
+  // Through the workspace: in light mode the library units the rule reads
+  // (inline bodies, initializations) made full first (PasTree's lint
+  // demand) - the tool then runs again over them.
+  LUnused := FA.WS.FindUnusedUses(LFiles);
+  FWs.QueryDone(FA);
+  for var LU in LUnused do
+  begin
+    FTreeUnused.AddOrSetValue(LowerCase(LU.Hit.FilePath + '|' +
+      LU.UnitName), True);
+    // Its doubts of what a light unit hides (PasTree.Sema.Lint words them
+    // "interface-only": a unit the workspace could not make full); the rest
+    // this lint finds its own way.
+    for var LD in LU.Doubts do
+      if ContainsText(LD, 'interface-only') then
+      begin
+        if FTreeLight = nil then
+          FTreeLight := TDictionary<string, TArray<string>>.Create;
+        LKey := LowerCase(LU.Hit.FilePath + '|' + LU.UnitName);
+        if not FTreeLight.TryGetValue(LKey, LDoubts) then
+          LDoubts := nil;
+        FTreeLight.AddOrSetValue(LKey, LDoubts + [LD]);
+      end;
   end;
-  if LMids <> nil then
-    for var LU in FindUnusedUses(FA.Nav, LMids) do
-    begin
-      FTreeUnused.AddOrSetValue(LowerCase(LU.Hit.FilePath + '|' +
-        LU.UnitName), True);
-      // Its doubts of what a light unit hides (PasTree.Sema.Lint words them
-      // "interface-only"); the rest this lint finds its own way.
-      for var LD in LU.Doubts do
-        if ContainsText(LD, 'interface-only') then
-        begin
-          if FTreeLight = nil then
-            FTreeLight := TDictionary<string, TArray<string>>.Create;
-          LKey := LowerCase(LU.Hit.FilePath + '|' + LU.UnitName);
-          if not FTreeLight.TryGetValue(LKey, LDoubts) then
-            LDoubts := nil;
-          FTreeLight.AddOrSetValue(LKey, LDoubts + [LD]);
-        end;
-    end;
 end;
 
 function TLintAnalysis.MayOverstate(const AEffect: string): Boolean;
@@ -12378,110 +12451,34 @@ begin
     end;
 end;
 
-// Light mode (SPEC 9.9): the lint reads what a library unit read
-// interface-only does not have - an inline routine's body (the units its
-// expansion needs), the initialization a removal leaves out of a program.
-// PasTree names the light units the same lint over the own units had to
-// treat as unknown (LintPromotions); they are promoted, and it is asked
-// again - a promotion loads the unit's implementation-only units light,
-// which may be needed in turn - until nothing is left. Once per analysis
-// until it changes. '' when nothing was done, else what was, for the answer.
-function PrepareLint(AWs: TMcpWorkspace): string;
-var
-  LMids: TArray<Integer>;
-  LNeed, LNew: TArray<string>;
-  LTried: TDictionary<string, Boolean>;
-  LRebuilt, LAny: Boolean;
-  LNote, LStamp: string;
-  LCount, LRounds, LRefusedBefore: Integer;
-  LSW: TStopwatch;
-begin
-  Result := '';
-  LCount := 0;
-  LRounds := 0;
-  LAny := False;
-  LSW := TStopwatch.StartNew;
-  LTried := TDictionary<string, Boolean>.Create;
-  try
-    for var LA in AWs.Analyses do
-    begin
-      if (LA.Proj = nil) or (LA.Proj.LightCount = 0) then
-        Continue;
-      LStamp := Format('%d/%d', [LA.Builds, LA.ModuleRuns]);
-      if LA.LintPrepared = LStamp then
-        Continue;
-      LAny := True;
-      LTried.Clear;
-      LRefusedBefore := Length(LA.PromoteRefused);
-      // Bounded: each round promotes units not tried before.
-      for var LRound := 1 to 20 do
-      begin
-        LMids := nil;
-        for var LMid := 0 to LA.Proj.ModelCount - 1 do
-          if SameText(ExtractFileExt(LA.Proj.ModelFile(LMid)), '.pas') and
-             AWs.IsOwnFile(LA.Proj.ModelFile(LMid)) then
-            LMids := LMids + [LMid];
-        Inc(LRounds);
-        LNeed := LintPromotions(LA.Nav, LMids);
-        LNew := nil;
-        for var LF in LNeed do
-          if LTried.TryAdd(LowerCase(LF), True) then
-            LNew := LNew + [LF];
-        if LNew = nil then
-          Break;
-        Inc(LCount, AWs.PromoteUnits(LA, LNew, LRebuilt, LNote));
-      end;
-      LA.LintPrepared := Format('%d/%d', [LA.Builds, LA.ModuleRuns]);
-      if Length(LA.PromoteRefused) > LRefusedBefore then
-        Result := Result + IfThen(Result <> '', '; ') + 'not analyzed in '
-          + 'full: ' + string.Join(', ', Copy(LA.PromoteRefused,
-          LRefusedBefore, MaxInt)) + ' - the rows they decide carry a "but"';
-    end;
-  finally
-    LTried.Free;
-  end;
-  // One line for the lint, not one per round.
-  AWs.TakePromoteNote;
-  if LAny then
-    Log('lint: light mode, %d library unit(s) promoted in %d round(s), %d ms',
-      [LCount, LRounds, LSW.ElapsedMilliseconds]);
-  if LCount > 0 then
-    Result := Format('light mode: %s read interface-only analyzed in full '
-      + 'first - what their inline routines and initialization need (%d ms)',
-      [Plural(LCount, 'library unit'), LSW.ElapsedMilliseconds]) +
-      IfThen(Result <> '', '; ' + Result)
-  else if Result <> '' then
-    Result := 'light mode: ' + Result;
-end;
-
-// Light mode: the light units whose initialization a lint over ALints had to
-// call unknown - a removal leaving them out of a program, weighed by this
-// lint's own reach (LintTogether's rows together too, which PasTree's
-// LintPromotions does not weigh) - promoted. How many were; 0 when none was,
-// and the lint stands as it is, those doubts on its rows.
-function PromoteLintEffects(AWs: TMcpWorkspace;
-  ALints: TObjectList<TLintAnalysis>): Integer;
+// Light mode (SPEC 9.9): this lint's own reach (the rows weighed together,
+// which PasTree's rule does not have) may meet a library unit read
+// interface-only whose initialization a removal leaves out (LinkEffect):
+// each is made full through the workspace (one file's demand), and once
+// they all are, the tool runs again over them (EMcpIndexChanged). A unit the
+// workspace cannot make full keeps "its initialization not known".
+procedure EnsureLintEffects(AWs: TMcpWorkspace;
+  ALints: TObjectList<TLintAnalysis>);
 var
   LFiles: TArray<string>;
-  LRebuilt: Boolean;
-  LNote: string;
 begin
-  Result := 0;
   for var LL in ALints do
-  begin
-    if LL.LightAsked = nil then
-      Continue;
-    LFiles := nil;
-    for var LMid in LL.LightAsked do
-      LFiles := LFiles + [LL.A.Proj.ModelFile(LMid)];
-    Inc(Result, AWs.PromoteUnits(LL.A, LFiles, LRebuilt, LNote));
-  end;
+    if LL.LightAsked <> nil then
+    begin
+      // By path: a query may rebuild the project, and its ids with it.
+      LFiles := nil;
+      for var LMid in LL.LightAsked do
+        LFiles := LFiles + [LL.A.Proj.ModelFile(LMid)];
+      for var LF in LFiles do
+        QFile(AWs, LL.A, LF, True);
+    end;
+  AWs.RaiseIfChanged;
 end;
 
 function ToolLint(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
 var
   LRules: TArray<string>;
-  LFile, LIn, LKey, LPrepared: string;
+  LFile, LIn, LKey: string;
   LLimit, LShown, LDoubts, LN, LAsked: Integer;
   LUnused, LMove: Boolean;
   LFiles, LOthers: TList<string>;
@@ -12493,7 +12490,6 @@ var
   LEnclosing: TEnclosing;
   LSb: TStringBuilder;
   LByRule, LByFile: TDictionary<string, Integer>;
-  LMore: Integer;
 begin
   LRules := nil;
   for var LR in ArgStr(AArgs, 'rules').Split([',', ' '],
@@ -12508,7 +12504,6 @@ begin
     LRules := LINT_RULES;
   LUnused := MatchText(LINT_UNUSED_USES, LRules);
   LMove := MatchText(LINT_USES_TO_IMPL, LRules);
-  LPrepared := PrepareLint(AWs);
   LFile := '';
   if ArgStr(AArgs, 'file') <> '' then
     LFile := ArgFile(AWs, AArgs);
@@ -12523,23 +12518,7 @@ begin
   LSb := TStringBuilder.Create;
   LByRule := TDictionary<string, Integer>.Create;
   LByFile := TDictionary<string, Integer>.Create;
-  LMore := 0;
   try
-    // Light mode: a pass whose rows met a light unit's unknown
-    // initialization promotes it and runs again (PromoteLintEffects).
-    for var LPass := 1 to 5 do
-    begin
-    if LPass > 1 then
-    begin
-      LFiles.Clear;
-      LOthers.Clear;
-      LSeen.Clear;
-      LRows.Clear;
-      LLints.Clear;
-      // Its models are the promoted units' old ones.
-      LEnclosing.Free;
-      LEnclosing := TEnclosing.Create(AWs);
-    end;
     // LFiles: the units asked about; LOthers: the rest of the own units,
     // whose unused-uses rows LintTogether weighs with theirs.
     for var LA in AWs.Analyses do
@@ -12576,19 +12555,8 @@ begin
       LintTogether(LLints, LRows);
       LRows.DeleteRange(LAsked, LRows.Count - LAsked);
     end;
-    if LPass = 5 then
-      Break;
-    LN := PromoteLintEffects(AWs, LLints);
-    if LN = 0 then
-      Break;
-    Inc(LMore, LN);
-    end;
-    AWs.TakePromoteNote;
-    if LMore > 0 then
-      LPrepared := IfThen(LPrepared <> '', LPrepared + '; then ',
-        'light mode: ') + Format('%s whose initialization a removal leaves '
-        + 'out of a program analyzed in full', [Plural(LMore,
-        'library unit')]);
+    // Light mode: the initializations the rows met unread, read.
+    EnsureLintEffects(AWs, LLints);
     LArr := LRows.ToArray;
     TArray.Sort<TLintRow>(LArr, TComparer<TLintRow>.Construct(
       function(const L, R: TLintRow): Integer
@@ -12651,8 +12619,6 @@ begin
         + 'implementations use are not loaded, so a removal may seem to leave '
         + 'out a library unit - %s, ... - that one of them reaches: such a '
         + '"leaves ... out" is on the safe side)', [LKey]));
-    if LPrepared <> '' then
-      LSb.AppendLine('(' + LPrepared + ')');
     Result := LSb.ToString.TrimRight;
   finally
     LByFile.Free;
@@ -14331,7 +14297,7 @@ end;
 
 function ToolMetrics(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
 var
-  LMetric, LPrepared: string;
+  LMetric: string;
   LLints: TObjectList<TLintAnalysis>;
   LGraphs: TObjectList<TRcGraph>;
   LLimit: Integer;
@@ -14343,10 +14309,6 @@ begin
   if not MatchText(LMetric, METRIC_NAMES) then
     raise EToolError.CreateFmt('unknown metric `%s` - the metrics: %s',
       [LMetric, string.Join(', ', METRIC_NAMES)]);
-  // The cycles name the entries `lint` finds unused: its promotions first.
-  LPrepared := '';
-  if LMetric = METRIC_CYCLES then
-    LPrepared := PrepareLint(AWs);
   LLints := TObjectList<TLintAnalysis>.Create;
   LGraphs := TObjectList<TRcGraph>.Create;
   try
@@ -14355,21 +14317,11 @@ begin
         LLints.Add(TLintAnalysis.Create(AWs, LA));
     if LMetric = METRIC_CYCLES then
     begin
-      // As lint: a light unit's unknown initialization promoted, again.
-      for var LPass := 1 to 5 do
-      begin
-        Result := MetricCycles(AWs, AArgs, LLints, EnsureRange(ArgInt(AArgs,
-          'limit', 20), 0, 100000));
-        if (LPass = 5) or (PromoteLintEffects(AWs, LLints) = 0) then
-          Break;
-        LLints.Clear;
-        for var LA in AWs.Analyses do
-          if LA.Proj <> nil then
-            LLints.Add(TLintAnalysis.Create(AWs, LA));
-      end;
-      AWs.TakePromoteNote;
-      if LPrepared <> '' then
-        Result := Result + sLineBreak + '(' + LPrepared + ')';
+      // The cycles name the entries `lint` finds unused: as lint, through
+      // the workspace, the initializations met unread read first.
+      Result := MetricCycles(AWs, AArgs, LLints, EnsureRange(ArgInt(AArgs,
+        'limit', 20), 0, 100000));
+      EnsureLintEffects(AWs, LLints);
       Exit;
     end;
     if (ArgStr(AArgs, 'symbol') <> '') or (ArgStr(AArgs, 'file') <> '') then
@@ -15960,7 +15912,7 @@ begin
     LId.Mid := LMid;
     LId.Sym := LClassSym;
     LCands.Add(LId);
-    for var LD in LA.Nav.FindDescendants(LMid, LClassSym) do
+    for var LD in QDescendants(FWs, LA, LMid, LClassSym) do
       if LD.Kind = pdkDescendant then
       begin
         LId.Mid := LD.UnitId;
@@ -16090,7 +16042,7 @@ begin
        not LA.Nav.InterfaceMethodAt(LDm, AT.DeclLine, AT.DeclCol, LTMid, LTSym,
        LName) then
       Continue;
-    for var LH in LA.Nav.FindImplementations(LTMid, LTSym) do
+    for var LH in QImplementations(FWs, LA, LTMid, LTSym) do
     begin
       if LH.Kind = pikRoot then
         Continue;
@@ -17845,25 +17797,106 @@ begin
     + 'on disk, and names them: one you did not edit is someone else''s edit.';
   if AWs.LightOn then
     Result := Result + ' Library units (RTL, VCL, third-party) are read for '
-      + 'their declarations, not their bodies: a call that needs a library '
-      + 'body analyzes that unit first, and an answer that may miss calls '
-      + 'made inside library bodies says so.';
+      + 'their declarations, not their bodies, until a call needs them: the '
+      + 'call analyzes those bodies first (the whole library, when a '
+      + 'question about a hub class makes that cheaper - the answer says '
+      + 'so), and answers as a full analysis would.';
+end;
+
+// A tool's answer. EMcpIndexChanged out of it - a workspace query changed the
+// analysis under the ids the tool held (light mode, SPEC 9.9) - runs it again:
+// each run finds more of its demand met. The last run, should the queries
+// keep changing it, answers partially (NotSearched said).
+function RunTool(AWs: TMcpWorkspace; const AName: string; AArgs: TJSONObject;
+  const AFresh: string; out ADeferred: TDeferredTool;
+  const AProgress: TProc<string>): string;
+const
+  MAX_RUNS = 24;
+var
+  LJob: TCompileJob;
+begin
+  ADeferred := nil;
+  Result := '';
+  for var LRun := 1 to MAX_RUNS do
+  try
+    AWs.SetPartialQueries(LRun = MAX_RUNS);
+    try
+      if AName = 'status' then
+        Result := ToolStatus(AWs, AArgs)
+      else if AName = 'find' then
+        Result := ToolFind(AWs, AArgs)
+      else if AName = 'definition' then
+        Result := ToolDefinition(AWs, AArgs)
+      else if AName = 'source' then
+        Result := ToolSource(AWs, AArgs)
+      else if AName = 'members' then
+        Result := ToolMembers(AWs, AArgs)
+      else if AName = 'references' then
+        Result := ToolReferences(AWs, AArgs)
+      else if AName = 'callers' then
+        Result := ToolCallers(AWs, AArgs)
+      else if AName = 'callees' then
+        Result := ToolCallees(AWs, AArgs)
+      else if AName = 'rename_plan' then
+        Result := ToolRenamePlan(AWs, AArgs)
+      else if AName = 'change_plan' then
+        Result := ToolChangePlan(AWs, AArgs)
+      else if AName = 'impact' then
+        Result := ToolImpact(AWs, AArgs)
+      else if AName = 'compile' then
+      begin
+        // Answered by the job, the freshness note with it.
+        LJob := NewCompileJob(AWs, AArgs, AProgress);
+        LJob.Fresh := AFresh;
+        ADeferred := LJob;
+        Result := '';
+      end
+      else if AName = 'related' then
+        Result := ToolRelated(AWs, AArgs)
+      else if AName = 'outline' then
+        Result := ToolOutline(AWs, AArgs)
+      else if AName = 'form' then
+        Result := ToolForm(AWs, AArgs)
+      else if AName = 'diagnostics' then
+        Result := ToolDiagnostics(AWs, AArgs)
+      else if AName = 'unit_deps' then
+        Result := ToolUnitDeps(AWs, AArgs)
+      else if AName = 'defines' then
+        Result := ToolDefines(AWs, AArgs)
+      else if AName = 'lint' then
+        Result := ToolLint(AWs, AArgs)
+      else if AName = 'metrics' then
+        Result := ToolMetrics(AWs, AArgs)
+      else
+        raise EToolError.Create('unknown tool: ' + AName);
+    finally
+      AWs.SetPartialQueries(False);
+    end;
+    Exit;
+  except
+    on EMcpIndexChanged do
+    begin
+      Log('tool %s: a query changed the analysis - run %d of the tool, '
+        + 'again', [AName, LRun]);
+      if LRun = MAX_RUNS then
+        raise;
+    end;
+  end;
 end;
 
 function CallTool(AWs: TMcpWorkspace; const AName: string; AArgs: TJSONObject;
   out AIsError: Boolean; out ADeferred: TDeferredTool;
-  const AProgress: TProc<string>): string;
+  const AProgress: TProc<string>; const ACancelled: TFunc<Boolean>): string;
 var
-  LFresh, LPromoted: string;
+  LFresh, LNote: string;
   LSW: TStopwatch;
   LFreshMs: Int64;
-  LJob: TCompileJob;
 begin
   AIsError := False;
   ADeferred := nil;
   LSW := TStopwatch.StartNew;
   LFreshMs := 0;
-  AWs.TakePromoteNote;
+  AWs.BeginCall(ACancelled);
   try
     if AName <> 'status' then
     begin
@@ -17884,55 +17917,10 @@ begin
       AWs.EnsureFresh(LFresh);
       LFreshMs := LSW.ElapsedMilliseconds - LFreshMs;
     end;
-    if AName = 'status' then
-      Result := ToolStatus(AWs, AArgs)
-    else if AName = 'find' then
-      Result := ToolFind(AWs, AArgs)
-    else if AName = 'definition' then
-      Result := ToolDefinition(AWs, AArgs)
-    else if AName = 'source' then
-      Result := ToolSource(AWs, AArgs)
-    else if AName = 'members' then
-      Result := ToolMembers(AWs, AArgs)
-    else if AName = 'references' then
-      Result := ToolReferences(AWs, AArgs)
-    else if AName = 'callers' then
-      Result := ToolCallers(AWs, AArgs)
-    else if AName = 'callees' then
-      Result := ToolCallees(AWs, AArgs)
-    else if AName = 'rename_plan' then
-      Result := ToolRenamePlan(AWs, AArgs)
-    else if AName = 'change_plan' then
-      Result := ToolChangePlan(AWs, AArgs)
-    else if AName = 'impact' then
-      Result := ToolImpact(AWs, AArgs)
-    else if AName = 'compile' then
-    begin
-      // Answered by the job, the freshness note with it.
-      LJob := NewCompileJob(AWs, AArgs, AProgress);
-      LJob.Fresh := LFresh;
+    Result := RunTool(AWs, AName, AArgs, LFresh, ADeferred, AProgress);
+    // A deferred tool's answer carries the freshness note.
+    if ADeferred <> nil then
       LFresh := '';
-      ADeferred := LJob;
-      Result := '';
-    end
-    else if AName = 'related' then
-      Result := ToolRelated(AWs, AArgs)
-    else if AName = 'outline' then
-      Result := ToolOutline(AWs, AArgs)
-    else if AName = 'form' then
-      Result := ToolForm(AWs, AArgs)
-    else if AName = 'diagnostics' then
-      Result := ToolDiagnostics(AWs, AArgs)
-    else if AName = 'unit_deps' then
-      Result := ToolUnitDeps(AWs, AArgs)
-    else if AName = 'defines' then
-      Result := ToolDefines(AWs, AArgs)
-    else if AName = 'lint' then
-      Result := ToolLint(AWs, AArgs)
-    else if AName = 'metrics' then
-      Result := ToolMetrics(AWs, AArgs)
-    else
-      raise EToolError.Create('unknown tool: ' + AName);
   except
     on E: EToolError do
     begin
@@ -17946,11 +17934,14 @@ begin
       Log('tool %s raised %s: %s', [AName, E.ClassName, E.Message]);
     end;
   end;
-  // A library unit the answer needed in full (light mode, SPEC 9.9): said
-  // last, with its cost - or why its bodies stayed unread.
-  LPromoted := AWs.TakePromoteNote;
-  if LPromoted <> '' then
-    Result := Result.TrimRight + sLineBreak + '(' + LPromoted + ')';
+  // Light mode (SPEC 9.9): an answer completed by the workspace is the full
+  // analysis' and says nothing more - but an escalation, which the
+  // analysis keeps, and units left unsearched (a cancel, a refusal).
+  LNote := AWs.TakeQueryNote;
+  if LNote <> '' then
+    Result := Result.TrimRight + sLineBreak + '(' + LNote + ')';
+  // The call's cancel lives no longer than its task.
+  AWs.BeginCall(nil);
   // On an error answer too: the re-analysis happened, the next call will not
   // report it again, and an edit someone else made may be what the error is.
   if LFresh <> '' then

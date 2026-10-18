@@ -7,6 +7,16 @@
 #   powershell -File tests\audit.ps1 -Project X.groupproj -Forms -Outlines 300 -Out forms.jsonl
 #   powershell -File tests\audit.ps1 -Project X.groupproj -Calls my.calls -Out run.jsonl
 #
+# Full vs light (SPEC 9.9): the same sample in both modes, every answer
+# required equal - light mode's workspace queries make the library bodies an
+# answer needs full first:
+#   powershell -File tests\audit.ps1 -Project X.groupproj -Sample 200 -Seed 1 -SampleOut s.tsv -ServerArgs --no-light -Out full.jsonl
+#   powershell -File tests\audit.ps1 -Project X.groupproj -Symbols s.tsv -Out light.jsonl -Against full.jsonl
+# -Against compares this run's answers with another run's of the same calls,
+# call for call, and writes the ones that differ to <Out>.diff.txt. The
+# escalation note ("the library was analyzed in full for this answer") is
+# not a difference; "library implementations not searched" is.
+#
 # Sampling (-Sample N): `outline` of every Pascal file of the group
 # directory (git's view of it; a file no project compiles answers "not part
 # of any analyzed project" and is left out) gives the group's own
@@ -79,6 +89,8 @@ param(
     # more server options, e.g. '--no-light' or '--light,ThirdParty\Lib' for
     # the full-vs-light comparison (SPEC 9.9); comma-separated
     [string[]]$ServerArgs = @(),
+    # another run's -Out over the same calls: every answer must be equal
+    [string]$Against,
     [int]$CallTimeout = 180,
     [int]$LoadTimeout = 600,
     [int]$MaxRestarts = 20,
@@ -596,4 +608,36 @@ $tab = $sum | Group-Object Tool | Sort-Object Name | ForEach-Object {
     }
 }
 $tab | Format-Table -AutoSize | Out-String -Width 200 | Write-Host
+
+# ---- full vs light: the same calls answered by another run -----------------------
+
+if ($Against) {
+    $escNote = '(the library was analyzed in full for this answer; the analysis stays full)'
+    $other = @([IO.File]::ReadAllLines((Resolve-Path $Against).Path, $utf8) | Where-Object { $_.Trim() -ne '' } | ForEach-Object { $_ | ConvertFrom-Json })
+    $mine = @($lines | ForEach-Object { $_ | ConvertFrom-Json })
+    if ($other.Count -ne $mine.Count) { Write-Host "AGAINST: $($mine.Count) calls here, $($other.Count) in $Against - not the same battery" }
+    $diffPath = [IO.Path]::ChangeExtension($Out, $null).TrimEnd('.') + '.diff.txt'
+    $diff = New-Object System.Collections.ArrayList
+    $equal = 0; $differ = 0; $escalated = 0; $notSearched = 0
+    for ($i = 0; $i -lt [Math]::Min($mine.Count, $other.Count); $i++) {
+        $m = $mine[$i]; $o = $other[$i]
+        $mc = $m.tool + ' ' + ($m.args | ConvertTo-Json -Compress -Depth 5)
+        $oc = $o.tool + ' ' + ($o.args | ConvertTo-Json -Compress -Depth 5)
+        if ($mc -ne $oc) { [void]$diff.Add("=== ${i}: different calls: $mc | $oc"); $differ++; continue }
+        $mt = [string]$m.text; $ot = [string]$o.text
+        if ($mt.Contains($escNote)) { $escalated++ }
+        if ($mt.Contains('library implementations not searched')) { $notSearched++ }
+        $mt = (($mt -split "`n") | Where-Object { $_ -ne $escNote }) -join "`n"
+        $ot = (($ot -split "`n") | Where-Object { $_ -ne $escNote }) -join "`n"
+        if ($m.tool -eq 'status' -or $mt -eq $ot) { $equal++; continue }
+        $differ++
+        [void]$diff.Add("=== $i $mc")
+        [void]$diff.Add('--- this run:')
+        [void]$diff.Add($mt)
+        [void]$diff.Add('--- ' + $Against + ':')
+        [void]$diff.Add($ot)
+    }
+    [IO.File]::WriteAllLines($diffPath, [string[]]$diff, $utf8)
+    Write-Host ("AGAINST {0}: {1} calls equal, {2} differ (in {3}); {4} answers escalated, {5} said library implementations not searched" -f $Against, $equal, $differ, $diffPath, $escalated, $notSearched)
+}
 Write-Host ("{0} calls -> {1}; {2:N1} min in all; working files in {3}" -f $plan.Count, $Out, $sw.Elapsed.TotalMinutes, $work)

@@ -1,7 +1,9 @@
 # tests\fixtures\light\App\LightApp.dproj, run by tests\smoke.ps1 twice: with
-# --light ..\lib (its library read interface-only) and with --no-light. The
-# order matters: a promotion lasts for the session, so the calls that show
-# what light mode does not see come before the ones that promote.
+# --light ..\lib (its library read interface-only) and with --no-light. Each
+# answer must be the same in both runs (but `status` and the whole library's
+# `diagnostics`): a call needing a library body has its unit made full first,
+# for the rest of the session - so the first call of each kind is the one
+# that shows it.
 status
 callers {"symbol":"TOwnWorker.DoWork"}
 references {"symbol":"LibRun"}

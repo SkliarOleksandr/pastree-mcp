@@ -22,10 +22,12 @@ exactly the uses the compiler would bind, one line each.
   shows.
 - **The library read interface-only.** The RTL, the VCL and the third-party
   libraries of the installed RAD Studio are analyzed for their declarations,
-  not their bodies (light mode) - the own code exactly as before. A tool that
-  needs a library body - `source` of a library routine, `callees` of one,
-  `lint` - analyzes that unit in full first and says so; an answer that may
-  miss calls made inside library bodies says that too.
+  not their bodies (light mode) - the own code exactly as before. A call
+  whose answer needs library bodies - `source` of a library routine, the
+  references or callers of a library method, `lint` - has PasTree analyze
+  those units in full first, inside the query, and answers exactly as a full
+  analysis would; when a question about a hub class makes the whole library
+  cheaper, the analysis turns full for the session and the answer says so.
 - **Built for an agent.** Symbols are addressed by name (`TFoo.Bar`) or by file,
   line and identifier - no column counting; a unit by its name or its file. Answers are compact text:
   relative paths, grouped by file and by the routine each row sits in,

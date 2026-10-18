@@ -11,9 +11,10 @@
 #      answered while a build runs, a cancelled build left unanswered.
 # Part 1 runs twice: in light mode, the default (the installed library read
 # interface-only, SPEC 9.9), and with --no-light; the answers are the same
-# but where a check says otherwise. tests\fixtures\light is a project whose
-# library directory --light names: what light mode does not see, said, and
-# the promotions that bring it back, in both modes.
+# but where a check says otherwise - a query needing library bodies has them
+# made full first (PasTree's TPasWorkspace). tests\fixtures\light is a
+# project whose library directory --light names: the same answers in both
+# modes, the light run's taken through the workspace.
 #
 # Line numbers of the fixture are pinned below; move a declaration there and
 # update the expectation with it.
@@ -78,18 +79,21 @@ Check 'status' (Block $b 'status') @('member AppA', 'member AppB', 'member AppF'
 if ($light) {
     # System and the rest of the RTL the fixture uses: under the Studio's
     # source trees, read interface-only.
-    Check 'status light' (Block $b 'status') @(' units are library units read interface-only (no bodies: calls and uses inside them are not seen); ') @('light mode off')
+    Check 'status light' (Block $b 'status') @(' units are library units read interface-only (a query needing their bodies analyzes them in full first); ', 'queries completed in light mode: ') @('light mode off')
     # What the index does not hold, said where a name is not found.
     Check 'find nowhere light' (Block $b 'find {"query":"NothingAnywhere"}') @(' read interface-only (light mode: what their implementation sections declare, and the library units only those use, are not indexed)')
-    # A body of Winapi.Windows read: the unit analyzed in full first, said.
-    Check 'source library promoted' (Block $b 'source {"symbol":"Winapi.Windows.SendMessage"}') @('(light mode: Winapi.Windows read interface-only until now, analyzed in full first (')
-    # The rows of a library routine's callers are own code and library
-    # interfaces; the bodies of the RTL read interface-only are not searched.
-    Check 'references library light' (Block $b 'references {"symbol":"System.SysUtils.IntToStr"') @('(light mode: the bodies and implementation sections of library units read interface-only are not searched - ', ' such units can use it there)')
+    # A body of Winapi.Windows read: the unit made full first, nothing said.
+    Check 'source library light' (Block $b 'source {"symbol":"Winapi.Windows.SendMessage"}') @('SendMessage') @('light mode', 'interface-only', 'not searched')
+    # The references of a library routine, the RTL's bodies included: the
+    # light units that can use it made full first - the full answer.
+    $script:refsLight = (Block $b 'references {"symbol":"System.SysUtils.IntToStr"') -replace "\(the library was analyzed in full for this answer; the analysis stays full\)`n", ''
+    Check 'references library light' $script:refsLight @('IntToStr (function) - 2 overloads declared in ') @('light mode', 'not searched')
 } else {
     Check 'status full' (Block $b 'status') @('light mode off (--no-light): library units analyzed in full') @('read interface-only')
     Check 'source library full' (Block $b 'source {"symbol":"Winapi.Windows.SendMessage"}') @() @('light mode')
-    Check 'references library full' (Block $b 'references {"symbol":"System.SysUtils.IntToStr"') @('IntToStr (function) - 2 overloads declared in ') @('light mode')
+    $refsFull = Block $b 'references {"symbol":"System.SysUtils.IntToStr"'
+    Check 'references library full' $refsFull @('IntToStr (function) - 2 overloads declared in ') @('light mode')
+    if ($refsFull -ne $script:refsLight) { Write-Host "FAIL [references library: light differs from full]"; $script:failures++ }
 }
 Check 'find' (Block $b 'find {"query":"TCircle"}') @('Shared\uShapes.pas:21  TCircle (class)')
 Check 'find wildcard' (Block $b 'find {"query":"*Circ*"') @('AppB\uAppB.pas:11  TBigCircle', 'Shared\uShapes.pas:21  TCircle')
@@ -571,8 +575,10 @@ $script:mode = ''
 # library caller is in a body (LibBase.LibRun), lists a unit only for an
 # inline routine's expansion (LibMath, through LibInl) and one only for its
 # initialization (LibReg); LibHidden is used by LibBase's implementation
-# alone. Read light, each is said where an answer no longer sees it, and the
-# calls that need a body promote its unit first - the same answers after.
+# alone. Read light, every call that needs a library body has its unit made
+# full first, inside the query (PasTree's TPasWorkspace): each answer is the
+# full run's, call for call - only `status` and the whole library's
+# `diagnostics` say light mode.
 $lightProj = Join-Path $here 'fixtures\light\App\LightApp.dproj'
 foreach ($light in @($true, $false)) {
     $script:mode = $(if ($light) { ', light fixture' } else { ', light fixture full' })
@@ -601,23 +607,21 @@ foreach ($light in @($true, $false)) {
         Check 'light lint' (Block $lb $k) @('2 findings in 1 file of 1 own unit', 'uOwn.pas:6:12: uses-to-implementation LibInl - used only in the implementation (first at line 30, in OwnMain)', 'uOwn.pas:6:29: unused-uses LibReg - no name of it is used here; but removing it leaves LibReg (initialization) out of LightApp') @('LibMath', 'not known')
     }
     if ($light) {
-        Check 'light status' (Block $lb 'status') @('light mode: 6 of 8 units are library units read interface-only', '; 0 promoted to a full analysis on demand', 'every `uses` name resolved')
-        # LibBase.LibRun's call is in a body light mode did not read: said.
-        Check 'light callers' (Block $lb 'callers {"symbol":"TOwnWorker.DoWork"}') @('1 call in 1 routine', '(light mode: library units using TLibWorker.DoWork are read interface-only - a call or use made inside their bodies is not among the rows)') @('LibRun')
-        Check 'light references' (Block $lb 'references {"symbol":"LibRun"}') @('1 references in 1 files', '(light mode: the bodies and implementation sections of library units read interface-only are not searched - 1 such unit can use it there)')
-        # LibBase analyzed in full now: its body's row found; other library units still light.
-        Check 'light callers after promoted' (Block $lb 'callers {"symbol":"TOwnWorker.DoWork"} #2') @('  LibRun', '(light mode: library units read interface-only - a call or use made inside their bodies is not among the rows)') @('library units using')
-        Check 'light unit_deps' (Block $lb 'unit_deps {"unit":"LibBase"}') @('LibHidden                                (not analyzed: used only by library implementations, read interface-only)  (implementation)')
-        Check 'light outline not loaded' (Block $lb 'outline {"file":"../lib/LibHidden.pas"}') @('lib\LibHidden.pas is not part of any analyzed project')
-        Check 'light outline interface' (Block $lb 'outline {"file":"../lib/LibReg.pas","section":"interface"}') @('lib\LibReg.pas (23 lines; a library unit read interface-only - its implementation is not outlined)', '7  procedure RegisterLib')
-        Check 'light diagnostics' (Block $lb 'diagnostics {"library":true,"limit":1}') @('(light mode: 6 library units read interface-only - their implementations are not analyzed, so not checked)')
-        Check 'light definition promoted' (Block $lb 'definition {"symbol":"RegisterLib"}') @('(light mode: LibReg read interface-only until now, analyzed in full first (')
-        Check 'light source promoted' (Block $lb 'source {"symbol":"LibRun"}') @('(light mode: LibBase read interface-only until now, analyzed in full first (')
-        # LintPromotions: LibInl's inline body read; the second lint asks no more.
-        Check 'light lint promoted' (Block $lb 'lint {"file":"uOwn.pas"}') @('(light mode: 1 library unit read interface-only analyzed in full first - what their inline routines and initialization need (')
-        Check 'light lint again' (Block $lb 'lint {"file":"uOwn.pas"} #2') @() @('light mode')
-        Check 'light status after' (Block $lb 'status {} #2') @('light mode: 4 of 9 units are library units read interface-only', '; 3 promoted to a full analysis on demand')
+        Check 'light status' (Block $lb 'status') @('light mode: 6 of 8 units are library units read interface-only', '; 0 made full so far', 'queries completed in light mode: 0 of 0', 'every `uses` name resolved')
+        # LibBase.LibRun's call is in a body: LibBase made full by the query,
+        # the row found at the first call already.
+        Check 'light callers' (Block $lb 'callers {"symbol":"TOwnWorker.DoWork"}') @('2 calls in 2 routines', "  LibRun`n    34  [via TLibWorker.DoWork]  AWorker.DoWork;") @('light mode')
+        # The whole library's diagnostics: its light units report their interface.
+        Check 'light diagnostics' (Block $lb 'diagnostics {"library":true,"limit":1}') @(' library units read interface-only report their interface only - `--no-light` checks their implementations too)')
+        Check 'light status after' (Block $lb 'status {} #2') @('light mode: 3 of 9 units are library units read interface-only', '; 4 made full so far', 'queries completed in light mode: 4 of ', ' 0 escalation(s)')
+        $script:lightFixture = $lb
     } else {
+        # Every answer of the light run is the full run's but status and the
+        # whole library's diagnostics.
+        foreach ($k in $lb.Keys) {
+            if ($k.StartsWith('status') -or $k.StartsWith('diagnostics {"library":true')) { continue }
+            if ($script:lightFixture[$k] -ne $lb[$k]) { Write-Host "FAIL [light fixture: $k differs between light and full]"; $script:failures++ }
+        }
         Check 'full status' (Block $lb 'status') @('light mode off (--no-light)')
         Check 'full callers' (Block $lb 'callers {"symbol":"TOwnWorker.DoWork"}') @('2 calls in 2 routines', "  LibRun`n    34  [via TLibWorker.DoWork]  AWorker.DoWork;") @('light mode')
         Check 'full unit_deps' (Block $lb 'unit_deps {"unit":"LibBase"}') @('lib\LibHidden.pas  (implementation)') @('not analyzed')
