@@ -1009,23 +1009,38 @@ misses any more.
 
 | Tool | Workspace entry |
 | --- | --- |
-| `references` | `FindReferences` (a symbol), `FindBuiltinReferences`, `FindDefineReferences` |
+| `references` | `FindReferences` (a symbol), `FindUnitReferences` (a unit, 0.32.1), `FindBuiltinReferences`, `FindDefineReferences` |
 | `callers`, `impact` | `FindReferences`, `CollectReferencesOfAll` (a family's batch), `FindOverrides`, `FindDescendants`, `FindImplementations` |
 | `related` | `FindDescendants`, `FindOverrides`, `FindImplementations`, `FindInterfaceImplementors`, `FindAssignments`, `FindCreations`, `FindDestructions` |
-| `rename_plan`, `change_plan` | `PlanRename` (with the old name's uncompiled uses), `RenameFamily`, `FindOverrides` |
+| `rename_plan`, `change_plan` | `PlanRename` (with the old name's uncompiled uses), `PlanUnitRename` (0.32.1), `RenameFamily`, `FindOverrides` |
 | `callees` | `RoutineImplNode` (the routine's body), `FindOverrides` / `FindImplementations` of each virtual or interface method called (what may run: the class index then holds the library's implementation-only classes too) |
 | `source`, `definition` | `RoutineImplNode` of each routine named |
 | `lint`, `metrics cycles` | `FindUnusedUses` (PasTree's rule and its demand: inline bodies, initializations); the server's own reach asks `InFile` of each library unit whose initialization a removal leaves out |
 | `defines` | `InFile` of the file asked about; `FindDefineReferences` of a name (the library's directives past a light unit's stop, through its preprocess-only completion) |
 | `outline`, `unit_deps`, `diagnostics` of a library file | `InFile` (the unit made full - or taken in, when only library implementations use it) |
+| `unit_deps` used by, `impact`'s "used by" | `FindUnitReferences` (0.32.1; in every light analysis, the unit loaded there or not) |
 | a position (`file` + `line`) in a library unit | `At` |
+| a target, in each analysis that did not produce it | `InFile` of its unit when that analysis has not loaded it or holds it light and the symbol is not there (0.32.1) |
+
+The last row matters with several analyses: a library unit one analysis
+loads through own code another may load only through library
+implementations - not at all in light mode. Without its id there the
+tools skipped that analysis, and with it the own calls it holds through a
+virtual the target overrides: on the client group `callers` of
+`TdxSubItems.Clear` lost 14 of 707 calls (through `TStrings.Clear`),
+`impact` a member to build.
 
 A query that changed the analysis - units made full, the project rebuilt
 or escalated - leaves every model id, symbol index and model the tool held
 stale: the tool runs again from the start (`EMcpIndexChanged`), and the
 next run finds that demand met (an own question's demand is empty: own
-code never pays). A tool whose queries keep changing the analysis runs at
-most 24 times; the last run answers partially.
+code never pays). After four such runs of one call the next query that
+needs any unit made full escalates instead (0.32.1: the bound set to 1 % of
+the library's volume for the rest of the call): every run repeats the
+whole walk, and PasTree 0.122.0's narrower demands made `callees` of a
+form's `FormActivate` at depth 2 run 10 times, 144 s, against 39 s with
+the bound. A tool whose queries keep changing the analysis runs at most 24
+times; the last run answers partially.
 
 **Escalation** (PasTree's decision D8: run it). When the demand passes
 `EscalationPercent` of the library's volume - `TObject`'s descendants, a hub
@@ -1047,7 +1062,19 @@ What the answers still say in light mode, because no query completes it:
 
 - `find` and every "no declaration matches": the index scope names how many
   units are read interface-only, whose implementation-only declarations are
-  not indexed (a name search has no demand).
+  not indexed (a name search has no demand). Not only a note: a name
+  declared in a light unit's implementation section or in a unit only
+  library implementations use (on the client group 833 units:
+  `Winapi.ShLwApi`, `Vcl.Shell.ShellCtrls`) is not found by `find`, nor by
+  any tool given it as `symbol` (a `file` + `line` finds it), a wildcard
+  lists fewer rows, and its "N more" depends on what earlier calls made
+  full; the scope's unit counts are the light closure's. Needs a name
+  demand from PasTree (a declaration-names index).
+- `references`' note on the name in uncompiled branches: an own unit counts
+  when its `uses` reach the declaring unit, and in light mode the way may
+  run through a unit nobody loaded (one line of seven left out for
+  `TFile.Delete` on the client group). Needs the full closure's uses graph
+  from PasTree.
 - `diagnostics` with `library: true` over the whole library: the light
   units report their interface only (`--no-light` checks every body; a
   library file asked about alone is made full first).
@@ -1082,6 +1109,21 @@ symbols (`-Symbols`), every answer compared call for call.
   12 queries made units full on the way (1 to 140 units, 0.1-1 s each), then
   the three escalations (4.4, 2.7 and 1.1 s). The light runs took 6.0 min
   against 4.9-5.4 in full mode, the escalations included.
+
+Those runs answered most calls in a session already escalated: after the
+first escalation the analysis is full. 0.32.1 measured with the server
+restarted after every escalated answer, so every call ran in a session
+still light (the client group, seed 11, 200 symbols, `-Forms`,
+`-Outlines 80`: 2,501 calls; and 1,558 more of the tools the battery does
+not call - `rename_plan`, `change_plan`, depth 2, `metrics`, `defines`,
+`unit_deps`, `diagnostics`, `lint`, wildcard `find`): **2,498 and 1,494
+equal**. What differs is the list above - 58 `find`, 4 `lint`, the
+uncompiled-branch note once - and `defines` of `MSWINDOWS` counting 10
+library directives fewer: PasTree 0.122.0's word index records no
+directive inside a `uses` clause, so the define demand misses those units
+(a PasTree fix). An escalation came every 30 to 100 calls (`callees` of an
+own routine calling a VCL virtual, `callers` of a constructor,
+`references` of `Pos` or `Format`).
 
 0.31.0 measured the gap the notes then described: 1,770 calls on the client
 group, 282 differing - every one a light-mode note or a row lost in a

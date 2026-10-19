@@ -16,13 +16,16 @@ unit PasMcp.Version;
 interface
 
 const
-  PasTreeMcpVersion = '0.32.0';
-  // 0.121.0: the tools ask through TPasWorkspace (0.120.0), whose queries
+  PasTreeMcpVersion = '0.32.1';
+  // 0.122.0: a unit's references and its rename through the workspace
+  // (FindUnitReferences, PlanUnitRename), and a property's overrides whose
+  // demand was empty before (a silent light gap).
+  // 0.121.0 before: the tools ask through TPasWorkspace (0.120.0), whose queries
   // make the light units an answer needs full - and PlanRename's AInactive
   // overload (0.121.0). An older PasTree has no workspace (a compile error)
   // or a workspace whose demand misses a family (a silent light gap).
   // 0.117.1 before: light mode, promotion, LintPromotions (0.31.0).
-  cMinPasTreeVersion = '0.121.0';
+  cMinPasTreeVersion = '0.122.0';
 
 // 'pastree-mcp 0.1.0 (PasTree 0.50.1), built 2026-09-25 15:00' - the first
 // line of every log.

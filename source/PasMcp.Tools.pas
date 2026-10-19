@@ -759,9 +759,18 @@ begin
   Result := True;
 end;
 
+procedure QFile(AWs: TMcpWorkspace; AA: TMcpAnalysis; const AFile: string;
+  ADefer: Boolean = False); forward;
+
 // The same target in the analyses that did not produce it: by its declaration
 // site for a symbol, by file for a unit, by name for a builtin or a define.
-procedure MapToOthers(AWs: TMcpWorkspace; var AT: TTarget);
+// Light mode (SPEC 9.9): a library unit an analysis has not loaded (only
+// library implementations use it) or holds light (an implementation-section
+// declaration) is taken in first, as the full analysis holds it - else the
+// tools skip that analysis, and the own calls it holds through a virtual the
+// target overrides. ATakeIn False: a listing (find), which asks nothing.
+procedure MapToOthers(AWs: TMcpWorkspace; var AT: TTarget;
+  ATakeIn: Boolean = True);
 var
   LMid, LTMid, LTSym: Integer;
   LName: string;
@@ -786,6 +795,17 @@ begin
         AT.Ids[LA.Index].Mid := LA.Nav.ModelIdOf(AT.DeclFile);
       tkBuiltin, tkDefine:
         AT.Ids[LA.Index].Mid := 0;
+    end;
+    // Not there: a unit this analysis has not loaded, or a light one whose
+    // implementation declares it. Taken in (the tool runs again, the
+    // mapping then finds it), or not in this analysis' closure at all.
+    if ATakeIn and (AT.Ids[LA.Index].Mid < 0) and (AT.Kind in [tkSymbol,
+       tkUnit]) and (LA.Proj.LightCount > 0) and not AWs.IsOwnFile(AT.DeclFile)
+    then
+    begin
+      LMid := LA.Nav.ModelIdOf(AT.DeclFile);
+      if (LMid < 0) or LA.Proj.IsLight(LMid) then
+        QFile(AWs, LA, AT.DeclFile);
     end;
   end;
 end;
@@ -1005,6 +1025,26 @@ function QDefineRefs(AWs: TMcpWorkspace; AA: TMcpAnalysis;
   const AName: string): TArray<TPasDefineHit>;
 begin
   Result := AA.WS.FindDefineReferences(AName);
+  AWs.QueryDone(AA);
+end;
+
+// A unit's references - its `uses` entries and the qualifiers in code - by
+// its file: the units only library implementations use loaded, the library
+// bodies spelling it made full (PasTree 0.122.0).
+function QUnitRefs(AWs: TMcpWorkspace; AA: TMcpAnalysis;
+  const AUnitFile: string): TArray<TPasRefHit>;
+begin
+  Result := AA.WS.FindUnitReferences(AUnitFile);
+  AWs.QueryDone(AA);
+end;
+
+function QPlanUnitRename(AWs: TMcpWorkspace; AA: TMcpAnalysis;
+  const AUnitFile, ANewName: string; out AEdits: TArray<TPasRenameEdit>;
+  out ARequiredFileName: string; out AInactive: TArray<TPasInactiveUse>;
+  out AError: string): Boolean;
+begin
+  Result := AA.WS.PlanUnitRename(AUnitFile, ANewName, AEdits,
+    ARequiredFileName, AInactive, AError);
   AWs.QueryDone(AA);
 end;
 
@@ -1317,7 +1357,7 @@ begin
       LT := Default(TTarget);
       LT.Ids := NewIds(AWs);
       FillUnitTarget(AWs, LA, LA.Nav.ModelIdOf(LFile), LT);
-      MapToOthers(AWs, LT);
+      MapToOthers(AWs, LT, False);
       Result := Result + [LT];
     end;
   finally
@@ -3761,7 +3801,7 @@ begin
                 Visibility = svPublished);
           end;
         tkUnit:
-          for var LH in LA.Nav.FindUnitReferences(LId.Mid) do
+          for var LH in QUnitRefs(AWs, LA, LA.Proj.ModelFile(LId.Mid)) do
             LSet.Add(LH);
         tkBuiltin:
           for var LH in QBuiltinRefs(AWs, LA, LT.Name) do
@@ -5444,8 +5484,8 @@ begin
       LOneCarried := nil;
       LOneFamily := nil;
       if LT.Kind = tkUnit then
-        LOk := LA.Nav.PlanUnitRename(LId.Mid, LNew, LOne, LFileName,
-          LOneInactive, LErr)
+        LOk := QPlanUnitRename(AWs, LA, LA.Proj.ModelFile(LId.Mid), LNew, LOne,
+          LFileName, LOneInactive, LErr)
       else
         LOk := QPlanRename(AWs, LA, LId.Mid, LId.Sym, LNew, LOne, LOneCarried,
           LOneFamily, LOneInactive, LErr);
@@ -10960,9 +11000,11 @@ begin
     begin
       for var LB in AWs.Analyses do
       begin
+        // Light mode: an analysis that has not loaded the unit may hold
+        // users of it the full closure has (the query takes them in).
         LTMid := LB.Nav.ModelIdOf(LFile);
-        if LTMid >= 0 then
-          for var LH in LB.Nav.FindUnitReferences(LTMid) do
+        if (LTMid >= 0) or (LB.Proj.LightCount > 0) then
+          for var LH in QUnitRefs(AWs, LB, LFile) do
             LSet.Add(LH);
       end;
       LHits := LSet.Sorted;
@@ -15820,7 +15862,7 @@ begin
         LMid := LA.Nav.ModelIdOf(LFile);
         if LMid < 0 then
           Continue;
-        for var LH in LA.Nav.FindUnitReferences(LMid) do
+        for var LH in QUnitRefs(FWs, LA, LFile) do
         begin
           LUnit := UnitNameOfFile(LH.FilePath);
           if LNames.IndexOf(LUnit) < 0 then
@@ -17812,6 +17854,11 @@ function RunTool(AWs: TMcpWorkspace; const AName: string; AArgs: TJSONObject;
   const AProgress: TProc<string>): string;
 const
   MAX_RUNS = 24;
+  // Past this many runs the next query escalates rather than make a few
+  // more units full: callees of a form's FormActivate at depth 2 on the
+  // client group ran 10 times (144 s) with PasTree 0.122.0's narrower
+  // demands, against 19 s escalated.
+  EAGER_AFTER = 4;
 var
   LJob: TCompileJob;
 begin
@@ -17819,7 +17866,7 @@ begin
   Result := '';
   for var LRun := 1 to MAX_RUNS do
   try
-    AWs.SetPartialQueries(LRun = MAX_RUNS);
+    AWs.SetPartialQueries(LRun = MAX_RUNS, LRun > EAGER_AFTER);
     try
       if AName = 'status' then
         Result := ToolStatus(AWs, AArgs)

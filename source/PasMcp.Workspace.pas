@@ -188,6 +188,11 @@ type
     FCall: TMcpQueryTally;
     FCallCancelled: TFunc<Boolean>;
     FCallPartial: Boolean;
+    // A tool run that keeps changing the analysis is cheaper answered from
+    // a full one: its next query escalates (SetPartialQueries' AEager).
+    // FEscalationPercent: PasTree's own bound, restored after the call.
+    FCallEager: Boolean;
+    FEscalationPercent: Integer;
     FChangePending: Boolean;
     FPlatformOverride: string;
     FConfig: string;
@@ -260,7 +265,10 @@ type
     procedure BeginCall(const ACancelled: TFunc<Boolean>);
     // The queries of the tool's next run answer partially (Options.Partial):
     // no unit made full, what light bodies hold counted in NotSearched.
-    procedure SetPartialQueries(APartial: Boolean);
+    // AEager: a query that needs any unit made full escalates instead (the
+    // run after several the queries changed: each run repeats the whole
+    // walk, and one rebuild costs less than the walks) - for this call.
+    procedure SetPartialQueries(APartial: Boolean; AEager: Boolean = False);
     // After every query through AAnalysis.WS: its Status tallied, logged
     // when it did anything, an escalation remembered (D9), Proj and Nav
     // synced - and, when the query changed the analysis, EMcpIndexChanged
@@ -605,7 +613,7 @@ end;
 // all the same, which the log says.
 procedure TMcpWorkspace.AssignLightTrees;
 var
-  LOwnTrees, LTrees, LListed: TArray<string>;
+  LOwnTrees, LListed: TArray<string>;
   LTree: string;
   LDrop: Boolean;
 begin
@@ -1371,6 +1379,16 @@ begin
   LOpt.Escalation := esRun;
   LOpt.Partial := FCallPartial;
   LOpt.Cancelled := FCallCancelled;
+  // 1 %: any demand past the volume made full so far escalates (0 would
+  // turn escalation off). A rebuild's project takes the bound over, so the
+  // next call's BeginCall puts PasTree's own back on every project.
+  if AAnalysis.WS.Project <> nil then
+  begin
+    if FEscalationPercent = 0 then
+      FEscalationPercent := AAnalysis.WS.Project.EscalationPercent;
+    AAnalysis.WS.Project.EscalationPercent := IfThen(FCallEager, 1,
+      FEscalationPercent);
+  end;
   LSW := TStopwatch.StartNew;
   LLast := -10000;
   LOpt.OnProgress :=
@@ -1415,14 +1433,16 @@ begin
   FChangePending := False;
   FCallCancelled := ACancelled;
   FCallPartial := False;
+  FCallEager := False;
   for var LA in FAnalyses do
     if LA.WS <> nil then
       ApplyQueryOptions(LA);
 end;
 
-procedure TMcpWorkspace.SetPartialQueries(APartial: Boolean);
+procedure TMcpWorkspace.SetPartialQueries(APartial, AEager: Boolean);
 begin
   FCallPartial := APartial;
+  FCallEager := AEager;
   for var LA in FAnalyses do
     if LA.WS <> nil then
       ApplyQueryOptions(LA);
