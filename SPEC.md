@@ -1015,7 +1015,8 @@ misses any more.
 | `rename_plan`, `change_plan` | `PlanRename` (with the old name's uncompiled uses), `PlanUnitRename` (0.32.1), `RenameFamily`, `FindOverrides` |
 | `callees` | `RoutineImplNode` (the routine's body), `FindOverrides` / `FindImplementations` of each virtual or interface method called (what may run: the class index then holds the library's implementation-only classes too) |
 | `source`, `definition` | `RoutineImplNode` of each routine named |
-| `lint`, `metrics cycles` | `FindUnusedUses` (PasTree's rule and its demand: inline bodies, initializations); the server's own reach asks `InFile` of each library unit whose initialization a removal leaves out |
+| `lint`, `metrics cycles` | `FindUnusedUses` (PasTree's rule and its demand: inline bodies, initializations, and since PasTree 0.123.0 the units a library body keeps reached); the server's own reach asks `InFile` of each library unit whose initialization a removal leaves out, and walks past the loaded models as PasTree's rule does (0.32.2: `NotLoadedImports`, `NotLoadedUses`) - a lost unit a library body may still reach is not reported, the units nobody loaded on its way taken in, until the loaded graph answers |
+| `references`' note on the name in uncompiled branches | the same walk: an own unit whose `uses` reach the declaring unit only through units nobody loaded has them taken in (0.32.2); an own unit under a light tree whose implementation spells the name, `InFile` |
 | `defines` | `InFile` of the file asked about; `FindDefineReferences` of a name (the library's directives past a light unit's stop, through its preprocess-only completion) |
 | `outline`, `unit_deps`, `diagnostics` of a library file | `InFile` (the unit made full - or taken in, when only library implementations use it) |
 | `unit_deps` used by, `impact`'s "used by" | `FindUnitReferences` (0.32.1; in every light analysis, the unit loaded there or not) |
@@ -1034,13 +1035,16 @@ A query that changed the analysis - units made full, the project rebuilt
 or escalated - leaves every model id, symbol index and model the tool held
 stale: the tool runs again from the start (`EMcpIndexChanged`), and the
 next run finds that demand met (an own question's demand is empty: own
-code never pays). After four such runs of one call the next query that
-needs any unit made full escalates instead (0.32.1: the bound set to 1 % of
-the library's volume for the rest of the call): every run repeats the
-whole walk, and PasTree 0.122.0's narrower demands made `callees` of a
-form's `FormActivate` at depth 2 run 10 times, 144 s, against 39 s with
-the bound. A tool whose queries keep changing the analysis runs at most 24
-times; the last run answers partially.
+code never pays). Once the runs of one call have taken 15 s, the next
+query that needs any unit made full escalates instead (the bound set to
+1 % of the library's volume for the rest of the call): every run repeats
+the whole walk, and PasTree 0.122.0's narrower demands made `callees` of a
+form's `FormActivate` at depth 2 run 10 times, 144 s, where a full rebuild
+of the group's largest analysis takes 3 to 7 s. By time, not by runs
+(0.32.1 counted four): a reference search over three analyses takes four
+short runs, one per analysis made complete, and stays light. A tool whose
+queries keep changing the analysis runs at most 24 times; the last run
+answers partially.
 
 **Escalation** (PasTree's decision D8: run it). When the demand passes
 `EscalationPercent` of the library's volume - `TObject`'s descendants, a hub
@@ -1070,18 +1074,9 @@ What the answers still say in light mode, because no query completes it:
   lists fewer rows, and its "N more" depends on what earlier calls made
   full; the scope's unit counts are the light closure's. Needs a name
   demand from PasTree (a declaration-names index).
-- `references`' note on the name in uncompiled branches: an own unit counts
-  when its `uses` reach the declaring unit, and in light mode the way may
-  run through a unit nobody loaded (one line of seven left out for
-  `TFile.Delete` on the client group). Needs the full closure's uses graph
-  from PasTree.
 - `diagnostics` with `library: true` over the whole library: the light
   units report their interface only (`--no-light` checks every body; a
   library file asked about alone is made full first).
-- `lint`: a "leaves ... out" naming a library unit that a full analysis
-  reaches through a unit only library implementations use keeps its note
-  (the safe side; the server's own reach, which PasTree's lint demand does
-  not weigh).
 - `status`: per analysis, the units read interface-only and made full so
   far - or that it escalated - and what the queries paid ("queries completed
   in light mode: C of Q, R round(s), P unit(s) made full, L taken in, B
@@ -1116,14 +1111,14 @@ restarted after every escalated answer, so every call ran in a session
 still light (the client group, seed 11, 200 symbols, `-Forms`,
 `-Outlines 80`: 2,501 calls; and 1,558 more of the tools the battery does
 not call - `rename_plan`, `change_plan`, depth 2, `metrics`, `defines`,
-`unit_deps`, `diagnostics`, `lint`, wildcard `find`): **2,498 and 1,494
-equal**. What differs is the list above - 58 `find`, 4 `lint`, the
-uncompiled-branch note once - and `defines` of `MSWINDOWS` counting 10
-library directives fewer: PasTree 0.122.0's word index records no
-directive inside a `uses` clause, so the define demand misses those units
-(a PasTree fix). An escalation came every 30 to 100 calls (`callees` of an
-own routine calling a VCL virtual, `callers` of a constructor,
-`references` of `Pos` or `Format`).
+`unit_deps`, `diagnostics`, `lint`, wildcard `find`): 0.32.1 **2,498 and
+1,494 equal**, 0.32.2 (PasTree 0.123.0) **2,499 and 1,500** - all that
+differs is the 60 `find` answers of the list above. The full-mode answers
+are byte-identical across 0.32.0-0.32.2. An escalation came every 30 to
+100 calls (`callees` of an own routine calling a VCL virtual, `callers` of
+a constructor, `references` of `Pos` or `Format`). The light lint costs
+more where it takes units in: one file 16-20 s against 1.5 s full, the
+whole group 71 s against 4.7 s, on a fresh session.
 
 0.31.0 measured the gap the notes then described: 1,770 calls on the client
 group, 282 differing - every one a light-mode note or a row lost in a

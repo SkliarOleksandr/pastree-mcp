@@ -3502,6 +3502,104 @@ end;
 // across the client group and `TStream.Read` 127: namesakes in type library
 // imports, vendored sources and a library's .inc, drowning the few that
 // matter.
+// Light mode: whether AFrom reaches ATo through `uses` once the units nobody
+// loaded are counted (a light model's not-loaded imports, then the word
+// index's `uses` of those units - every name, conditional or not: a
+// superset). The units nobody loaded on the shortest such way, nil for none
+// (or no light unit): taken in together, the loaded graph then answers
+// exactly, as the full analysis' does.
+function ReachPastLoaded(AA: TMcpAnalysis; AFrom, ATo: Integer): TArray<string>;
+var
+  LN, LAt, LNode, LMid, LWaveEnd, LBack: Integer;
+  LQueue, LParent: TList<Integer>;
+  LSeen: TDictionary<string, Boolean>;
+  LNL: TList<string>;   // not-loaded nodes: LN + index
+  LPaths, LWave: TArray<string>;
+  LTargets: TArray<Integer>;
+
+  procedure Add(ANode: Integer);
+  begin
+    LQueue.Add(ANode);
+    LParent.Add(LAt);
+  end;
+
+begin
+  Result := nil;
+  if (AA.Proj.LightCount = 0) or (AFrom < 0) or (ATo < 0) then
+    Exit;
+  LN := AA.Proj.ModelCount;
+  LQueue := TList<Integer>.Create;
+  LParent := TList<Integer>.Create;
+  LSeen := TDictionary<string, Boolean>.Create;
+  LNL := TList<string>.Create;
+  try
+    LAt := -1;
+    Add(AFrom);
+    LSeen.Add('#' + IntToStr(AFrom), True);
+    LAt := 0;
+    LWaveEnd := 0;
+    while LAt < LQueue.Count do
+    begin
+      // A wave's units nobody loaded are scanned together, in parallel.
+      if LAt = LWaveEnd then
+      begin
+        LWave := nil;
+        for var LI := LAt to LQueue.Count - 1 do
+          if LQueue[LI] >= LN then
+            LWave := LWave + [LNL[LQueue[LI] - LN]];
+        if LWave <> nil then
+          AA.Proj.ScanNotLoaded(LWave);
+        LWaveEnd := LQueue.Count;
+      end;
+      LNode := LQueue[LAt];
+      LTargets := nil;
+      if LNode < LN then
+      begin
+        for var LU in AA.Proj.Model(LNode).UsesList do
+          if (LU.UnitId >= 0) and (LU.UnitId < LN) then
+            LTargets := LTargets + [LU.UnitId];
+        LPaths := AA.Proj.NotLoadedImports(LNode);
+      end
+      else
+        LPaths := AA.Proj.NotLoadedUses(LNL[LNode - LN]);
+      for var LP in LPaths do
+      begin
+        LMid := AA.Proj.ModelIdOf(LP);
+        if LMid >= 0 then
+          LTargets := LTargets + [LMid]
+        else if LSeen.TryAdd(LowerCase(LP), True) then
+        begin
+          LNL.Add(LP);
+          Add(LN + LNL.Count - 1);
+        end;
+      end;
+      for var LT in LTargets do
+      begin
+        if LT = ATo then
+        begin
+          // The way back: its units nobody loaded.
+          LBack := LAt;
+          while LBack >= 0 do
+          begin
+            if LQueue[LBack] >= LN then
+              Result := Result + [LNL[LQueue[LBack] - LN]];
+            LBack := LParent[LBack];
+          end;
+          Exit;
+        end;
+        if LSeen.TryAdd('#' + IntToStr(LT), True) then
+          Add(LT);
+      end;
+      Inc(LAt);
+    end;
+  finally
+    LNL.Free;
+    LSeen.Free;
+    LParent.Free;
+    LQueue.Free;
+  end;
+end;
+
 function InactiveMentions(AWs: TMcpWorkspace; const ANameLower: string;
   const ADeclMids: TArray<Integer>): TArray<string>;
 var
@@ -3512,11 +3610,13 @@ var
   LKey, LDeclUnit: string;
   LUsers: TArray<Boolean>;
   LAsked: Boolean;
+  LTakeIn: TList<TPair<TMcpAnalysis, string>>;
 begin
   Result := nil;
   if Length(ANameLower) < 3 then
     Exit;
   LSeen := TDictionary<string, Boolean>.Create;
+  LTakeIn := TList<TPair<TMcpAnalysis, string>>.Create;
   try
     for var LA in AWs.Analyses do
     begin
@@ -3530,6 +3630,17 @@ begin
       begin
         if not AWs.IsOwnFile(LA.Proj.ModelFile(LMid)) then
           Continue;
+        // Light mode: an own file under a light tree (--light) is read only
+        // to its implementation `uses` - its branches past that stop are
+        // not there to scan. One whose implementation spells the name is
+        // made full first (deferred: the tool runs again after the scan).
+        if LA.Proj.IsLight(LMid) and LA.Proj.WordIndexHas(
+          LA.Proj.ModelFile(LMid), ANameLower) then
+        begin
+          LTakeIn.Add(TPair<TMcpAnalysis, string>.Create(LA,
+            LA.Proj.ModelFile(LMid)));
+          Continue;
+        end;
         LM := LA.Proj.Model(LMid);
         if LM.Demoted then
           Continue;
@@ -3548,7 +3659,13 @@ begin
               LUsers := UsersOf(LA, LDecl);
             if not LUsers[LMid] and (Length(SkippedWords(AWs, LM, LDeclUnit,
               True)) = 0) then
+            begin
+              // Light mode: the way may run through units nobody loaded -
+              // taken in after the scan, and the tool runs again.
+              for var LP in ReachPastLoaded(LA, LMid, LDecl) do
+                LTakeIn.Add(TPair<TMcpAnalysis, string>.Create(LA, LP));
               Break;
+            end;
             LAsked := True;
           end;
           LKey := Format('%s:%d', [AWs.RelPath(LM.Tree.Source.FileNames[
@@ -3558,7 +3675,12 @@ begin
         end;
       end;
     end;
+    // By path, after the scan: a take-in changes the models it read.
+    for var LT in LTakeIn do
+      QFile(AWs, LT.Key, LT.Value, True);
+    AWs.RaiseIfChanged;
   finally
+    LTakeIn.Free;
     LSeen.Free;
   end;
   TArray.Sort<string>(Result, TComparer<string>.Construct(
@@ -11103,10 +11225,14 @@ type
     FEffect: TDictionary<Integer, string>;
     // Light units LinkEffect was asked about: their initialization unknown.
     FLightAsked: TList<Integer>;
-    // Light mode: the library units EffectsFrom named ('Name (effect)'), and
-    // whether a light unit lists a unit nobody loads (-1: not looked yet).
-    FLibEffects: TDictionary<string, Boolean>;
-    FNotLoaded: Integer;
+    // Light mode, the reach past the loaded models (KeptPastLoaded): the
+    // units nobody loaded, as nodes ModelCount + index, by lower path; each
+    // node's `uses` targets; and the not-loaded imports a removal's answer
+    // needs taken in (EnsureLintEffects).
+    FNLNodes: TDictionary<string, Integer>;
+    FNLPaths: TList<string>;
+    FNLOut: TDictionary<Integer, TArray<Integer>>;
+    FLoadNeeded: TDictionary<string, Boolean>;
     // A program whose project's defines differ from the analysis' -> the
     // names they differ on; the uncertain edges per such set of names.
     FDiff: TDictionary<Integer, TArray<string>>;
@@ -11118,6 +11244,8 @@ type
     procedure BuildGraph;
     function ReachOf(ARoot, ASkipFrom, ASkipTo: Integer;
       AAlso: TDictionary<Int64, Boolean>): TArray<Boolean>;
+    function NLNode(const APath: string): Integer;
+    function PastLoadedOut(ANode: Integer): TArray<Integer>;
   public
     constructor Create(AWs: TMcpWorkspace; AA: TMcpAnalysis);
     destructor Destroy; override;
@@ -11163,12 +11291,17 @@ type
     property A: TMcpAnalysis read FA;
     property Roots: TArray<Integer> read FRoots;
     property LightAsked: TList<Integer> read FLightAsked;
-    // Light mode: whether a "leaves ... out" naming AEffect may say more than
-    // a full analysis would - AEffect a library unit, and a library unit
-    // only library implementations use not loaded, so a path through it to
-    // AEffect is not known (the safe side: a removal that seems to leave
-    // more out).
-    function MayOverstate(const AEffect: string): Boolean;
+    // Light mode: the units of ALost a full closure may still reach after
+    // the removal - through units nobody loaded, past a light unit's
+    // implementation `uses` (PasTree's TUsesLint.KeptPastLoaded, 0.123.0).
+    // The word index lists every name, conditional or not, so this
+    // over-approximates: such a unit is not called lost, and the first
+    // not-loaded unit of its path goes to LoadNeeded - taken in, the tool
+    // runs again and walks the loaded graph that far, until the answer is
+    // the full analysis'. nil when nothing lost is reached that way.
+    function KeptPastLoaded(const ALess,
+      ALost: TArray<Boolean>): TArray<Boolean>;
+    property LoadNeeded: TDictionary<string, Boolean> read FLoadNeeded;
   end;
 
 // The module node: the root itself, or its child.
@@ -11280,7 +11413,10 @@ begin
   FDiff := TDictionary<Integer, TArray<string>>.Create;
   FUncertain := TObjectDictionary<string, TDictionary<Int64, Boolean>>.Create(
     [doOwnsValues]);
-  FNotLoaded := -1;
+  FNLNodes := TDictionary<string, Integer>.Create;
+  FNLPaths := TList<string>.Create;
+  FNLOut := TDictionary<Integer, TArray<Integer>>.Create;
+  FLoadNeeded := TDictionary<string, Boolean>.Create;
   // Roots and Members are added together, one per member.
   for var LI := 0 to High(AA.Roots) do
   begin
@@ -11308,7 +11444,10 @@ end;
 
 destructor TLintAnalysis.Destroy;
 begin
-  FLibEffects.Free;
+  FLoadNeeded.Free;
+  FNLOut.Free;
+  FNLPaths.Free;
+  FNLNodes.Free;
   FLightAsked.Free;
   FTreeLight.Free;
   FTreeUnused.Free;
@@ -11531,24 +11670,124 @@ begin
   end;
 end;
 
-function TLintAnalysis.MayOverstate(const AEffect: string): Boolean;
+function TLintAnalysis.NLNode(const APath: string): Integer;
+var
+  LKey: string;
 begin
-  Result := False;
-  if (FLibEffects = nil) or not FLibEffects.ContainsKey(AEffect) then
-    Exit;
-  if FNotLoaded < 0 then
+  LKey := LowerCase(APath);
+  if not FNLNodes.TryGetValue(LKey, Result) then
   begin
-    FNotLoaded := 0;
-    for var LMid := 0 to FA.Proj.ModelCount - 1 do
-      if FA.Proj.IsLight(LMid) then
-        for var LU in FA.Proj.Model(LMid).UsesList do
-          if LU.UnitId = UNIT_NOT_LOADED then
-          begin
-            FNotLoaded := 1;
-            Break;
-          end;
+    Result := FA.Proj.ModelCount + FNLPaths.Count;
+    FNLPaths.Add(APath);
+    FNLNodes.Add(LKey, Result);
   end;
-  Result := FNotLoaded = 1;
+end;
+
+// The targets of ANode's `uses` past the loaded graph (FEdges): a loaded
+// model's not-loaded imports, a not-loaded unit's every listed unit - a
+// loaded one as its model id, the rest as NLNode.
+function TLintAnalysis.PastLoadedOut(ANode: Integer): TArray<Integer>;
+var
+  LPaths: TArray<string>;
+  LMid: Integer;
+begin
+  if FNLOut.TryGetValue(ANode, Result) then
+    Exit;
+  if ANode < FA.Proj.ModelCount then
+    LPaths := FA.Proj.NotLoadedImports(ANode)
+  else
+    LPaths := FA.Proj.NotLoadedUses(FNLPaths[ANode - FA.Proj.ModelCount]);
+  Result := nil;
+  for var LPath in LPaths do
+  begin
+    LMid := FA.Proj.ModelIdOf(LPath);
+    if LMid >= 0 then
+      Result := Result + [LMid]
+    else
+      Result := Result + [NLNode(LPath)];
+  end;
+  FNLOut.Add(ANode, Result);
+end;
+
+function TLintAnalysis.KeptPastLoaded(const ALess,
+  ALost: TArray<Boolean>): TArray<Boolean>;
+var
+  LN, LAt, LU, LLeft, LWaveEnd: Integer;
+  LSeen: TDictionary<Integer, Boolean>;
+  LQueue: TList<Integer>;
+  LTag: TDictionary<Integer, string>;   // node -> the frontier import's path
+  LWave: TArray<string>;
+
+  procedure Visit(ANode: Integer; const AFrontier: string);
+  begin
+    if LSeen.ContainsKey(ANode) or ((ANode < LN) and ALess[ANode]) then
+      Exit;
+    LSeen.Add(ANode, True);
+    LTag.Add(ANode, AFrontier);
+    LQueue.Add(ANode);
+  end;
+
+begin
+  Result := nil;
+  if FA.Proj.LightCount = 0 then
+    Exit;
+  BuildGraph;
+  LN := FA.Proj.ModelCount;
+  LSeen := TDictionary<Integer, Boolean>.Create;
+  LTag := TDictionary<Integer, string>.Create;
+  LQueue := TList<Integer>.Create;
+  try
+    // Only a light model has not-loaded imports; the loaded edges out of
+    // ALess stay inside it (the removed one aside).
+    for LU := 0 to LN - 1 do
+      if ALess[LU] and FA.Proj.IsLight(LU) then
+        for var LT in PastLoadedOut(LU) do
+          if LT >= LN then
+            Visit(LT, FNLPaths[LT - LN]);
+    // Done once every lost unit a row would name is reached.
+    LLeft := 0;
+    for LU := 0 to LN - 1 do
+      if ALost[LU] and (FA.Proj.IsLight(LU) or (LinkEffect(LU) <> '')) then
+        Inc(LLeft);
+    LAt := 0;
+    LWaveEnd := 0;
+    while (LAt < LQueue.Count) and (LLeft > 0) do
+    begin
+      // A wave's units nobody loaded are scanned together, in parallel.
+      if LAt = LWaveEnd then
+      begin
+        LWave := nil;
+        for var LI := LAt to LQueue.Count - 1 do
+          if (LQueue[LI] >= LN) and not FNLOut.ContainsKey(LQueue[LI]) then
+            LWave := LWave + [FNLPaths[LQueue[LI] - LN]];
+        if LWave <> nil then
+          FA.Proj.ScanNotLoaded(LWave);
+        LWaveEnd := LQueue.Count;
+      end;
+      LU := LQueue[LAt];
+      if LU < LN then
+      begin
+        if ALost[LU] then
+        begin
+          if Result = nil then
+            SetLength(Result, LN);
+          Result[LU] := True;
+          FLoadNeeded.AddOrSetValue(LTag[LU], True);
+          if FA.Proj.IsLight(LU) or (LinkEffect(LU) <> '') then
+            Dec(LLeft);
+        end;
+        for var LE := FStart[LU] to FStart[LU + 1] - 1 do
+          Visit(FEdges[LE], LTag[LU]);
+      end;
+      for var LT in PastLoadedOut(LU) do
+        Visit(LT, LTag[LU]);
+      Inc(LAt);
+    end;
+  finally
+    LQueue.Free;
+    LTag.Free;
+    LSeen.Free;
+  end;
 end;
 
 function TLintAnalysis.TreeLightDoubts(const AFile,
@@ -11737,17 +11976,8 @@ begin
     begin
       LU := LQueue[LAt];
       if LinkEffect(LU) <> '' then
-      begin
         Result := Result + [Format('%s (%s)', [UnitNameOfFile(
           FA.Proj.ModelFile(LU)), LinkEffect(LU)])];
-        if (FA.Proj.LightCount > 0) and not FWs.IsOwnFile(FA.Proj.ModelFile(LU))
-        then
-        begin
-          if FLibEffects = nil then
-            FLibEffects := TDictionary<string, Boolean>.Create;
-          FLibEffects.AddOrSetValue(Result[High(Result)], True);
-        end;
-      end;
       for var LE := FStart[LU] to FStart[LU + 1] - 1 do
         if ALost[FEdges[LE]] and not LSeen[FEdges[LE]] then
         begin
@@ -11766,7 +11996,7 @@ end;
 procedure TLintAnalysis.Drops(AFrom, ATo: Integer;
   var AUnits, APrograms: TArray<string>);
 var
-  LFull, LLess, LLost: TArray<Boolean>;
+  LFull, LLess, LLost, LKept: TArray<Boolean>;
   LEffects: TArray<string>;
   LName: string;
 begin
@@ -11783,6 +12013,22 @@ begin
       for var LMid := 0 to High(LFull) do
         LLost[LMid] := LFull[LMid] and not LLess[LMid];
       LEffects := EffectsFrom(ATo, LLost);
+      // Light mode: what a library body may still reach is not lost -
+      // walked only when something would be reported.
+      if LEffects <> nil then
+      begin
+        LKept := KeptPastLoaded(LLess, LLost);
+        if LKept <> nil then
+        begin
+          for var LMid := 0 to High(LKept) do
+            if LKept[LMid] then
+              LLost[LMid] := False;
+          if LKept[ATo] then
+            LEffects := nil
+          else
+            LEffects := EffectsFrom(ATo, LLost);
+        end;
+      end;
       for var LU in LEffects do
         if not MatchText(LU, AUnits) then
           AUnits := AUnits + [LU];
@@ -12412,7 +12658,7 @@ procedure LintTogether(ALints: TObjectList<TLintAnalysis>;
   ARows: TList<TLintRow>);
 var
   LSkip: TDictionary<Int64, Integer>;
-  LFull, LLess, LLost: TArray<Boolean>;
+  LFull, LLess, LLost, LKept: TArray<Boolean>;
   LChanged, LAny: Boolean;
   LFrom, LTarget: Integer;
   LUnits, LPrograms: TArray<TArray<string>>;
@@ -12451,6 +12697,21 @@ begin
           end;
           if not LAny then
             Continue;
+          // Light mode: what a library body may still reach is not lost.
+          LKept := ALints[LAi].KeptPastLoaded(LLess, LLost);
+          if LKept <> nil then
+          begin
+            LAny := False;
+            for var LMid := 0 to High(LKept) do
+            begin
+              if LKept[LMid] then
+                LLost[LMid] := False;
+              if LLost[LMid] and (ALints[LAi].LinkEffect(LMid) <> '') then
+                LAny := True;
+            end;
+            if not LAny then
+              Continue;
+          end;
           LName := ChangeFileExt(ExtractFileName(
             ALints[LAi].A.Proj.ModelFile(LRoot)), '');
           for var LPair in LSkip do
@@ -12495,9 +12756,11 @@ end;
 
 // Light mode (SPEC 9.9): this lint's own reach (the rows weighed together,
 // which PasTree's rule does not have) may meet a library unit read
-// interface-only whose initialization a removal leaves out (LinkEffect):
-// each is made full through the workspace (one file's demand), and once
-// they all are, the tool runs again over them (EMcpIndexChanged). A unit the
+// interface-only whose initialization a removal leaves out (LinkEffect), or
+// a lost unit a library body may still reach through units nobody loaded
+// (KeptPastLoaded: the first of them on the path). Each is made full - or
+// taken in - through the workspace (one file's demand), and once they all
+// are, the tool runs again over them (EMcpIndexChanged). A unit the
 // workspace cannot make full keeps "its initialization not known".
 procedure EnsureLintEffects(AWs: TMcpWorkspace;
   ALints: TObjectList<TLintAnalysis>);
@@ -12505,15 +12768,15 @@ var
   LFiles: TArray<string>;
 begin
   for var LL in ALints do
+  begin
+    // By path: a query may rebuild the project, and its ids with it.
+    LFiles := LL.LoadNeeded.Keys.ToArray;
     if LL.LightAsked <> nil then
-    begin
-      // By path: a query may rebuild the project, and its ids with it.
-      LFiles := nil;
       for var LMid in LL.LightAsked do
         LFiles := LFiles + [LL.A.Proj.ModelFile(LMid)];
-      for var LF in LFiles do
-        QFile(AWs, LL.A, LF, True);
-    end;
+    for var LF in LFiles do
+      QFile(AWs, LL.A, LF, True);
+  end;
   AWs.RaiseIfChanged;
 end;
 
@@ -12648,19 +12911,6 @@ begin
     if (LShown < Length(LArr)) and (LLimit > 0) then
       LSb.AppendLine(Format('... %d more (raise `limit`, or narrow with '
         + '`file`, `in` or `rules`)', [Length(LArr) - LShown]));
-    // Light mode: a "leaves ... out" naming a library unit is weighed
-    // without the paths through units only library implementations use.
-    LKey := '';
-    for var LI := 0 to Min(Length(LArr), LLimit) - 1 do
-      for var LE in LArr[LI].Effects do
-        for LL in LLints do
-          if (LKey = '') and LL.MayOverstate(LE) then
-            LKey := LE;
-    if LKey <> '' then
-      LSb.AppendLine(Format('(light mode: library units only library '
-        + 'implementations use are not loaded, so a removal may seem to leave '
-        + 'out a library unit - %s, ... - that one of them reaches: such a '
-        + '"leaves ... out" is on the safe side)', [LKey]));
     Result := LSb.ToString.TrimRight;
   finally
     LByFile.Free;
@@ -17854,19 +18104,25 @@ function RunTool(AWs: TMcpWorkspace; const AName: string; AArgs: TJSONObject;
   const AProgress: TProc<string>): string;
 const
   MAX_RUNS = 24;
-  // Past this many runs the next query escalates rather than make a few
-  // more units full: callees of a form's FormActivate at depth 2 on the
-  // client group ran 10 times (144 s) with PasTree 0.122.0's narrower
-  // demands, against 19 s escalated.
-  EAGER_AFTER = 4;
+  // Once the runs of one call have taken this long, the next query
+  // escalates rather than make a few more units full: callees of a form's
+  // FormActivate at depth 2 on the client group ran 10 times (144 s) with
+  // PasTree 0.122.0's narrower demands, against 19 s escalated - and a full
+  // rebuild of that group's largest analysis takes 3 to 7 s. By time, not
+  // by runs: a reference search over a group's three analyses takes four
+  // short runs (one per analysis made complete) and should stay light.
+  EAGER_AFTER_MS = 15000;
 var
   LJob: TCompileJob;
+  LSW: TStopwatch;
 begin
   ADeferred := nil;
   Result := '';
+  LSW := TStopwatch.StartNew;
   for var LRun := 1 to MAX_RUNS do
   try
-    AWs.SetPartialQueries(LRun = MAX_RUNS, LRun > EAGER_AFTER);
+    AWs.SetPartialQueries(LRun = MAX_RUNS, (LRun > 1) and
+      (LSW.ElapsedMilliseconds > EAGER_AFTER_MS));
     try
       if AName = 'status' then
         Result := ToolStatus(AWs, AArgs)
