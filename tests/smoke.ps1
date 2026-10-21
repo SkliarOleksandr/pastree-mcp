@@ -80,8 +80,11 @@ if ($light) {
     # System and the rest of the RTL the fixture uses: under the Studio's
     # source trees, read interface-only.
     Check 'status light' (Block $b 'status') @(' units are library units read interface-only (a query needing their bodies analyzes them in full first); ', 'queries completed in light mode: ') @('light mode off')
-    # What the index does not hold, said where a name is not found.
-    Check 'find nowhere light' (Block $b 'find {"query":"NothingAnywhere"}') @(' read interface-only (light mode: what their implementation sections declare, and the library units only those use, are not indexed)')
+    # What the index holds, said where a name is not found: the full
+    # closure's units, the library units only library implementations use
+    # counted - the full run's answer (compared below).
+    $script:findNowhereLight = Block $b 'find {"query":"NothingAnywhere"}'
+    Check 'find nowhere light' $script:findNowhereLight @('no declaration matches `NothingAnywhere` among the ') @('interface-only', 'light mode')
     # A body of Winapi.Windows read: the unit made full first, nothing said.
     Check 'source library light' (Block $b 'source {"symbol":"Winapi.Windows.SendMessage"}') @('SendMessage') @('light mode', 'interface-only', 'not searched')
     # The references of a library routine, the RTL's bodies included: the
@@ -94,6 +97,7 @@ if ($light) {
     $refsFull = Block $b 'references {"symbol":"System.SysUtils.IntToStr"'
     Check 'references library full' $refsFull @('IntToStr (function) - 2 overloads declared in ') @('light mode')
     if ($refsFull -ne $script:refsLight) { Write-Host "FAIL [references library: light differs from full]"; $script:failures++ }
+    if ((Block $b 'find {"query":"NothingAnywhere"}') -ne $script:findNowhereLight) { Write-Host "FAIL [find nowhere: light differs from full]"; $script:failures++ }
 }
 Check 'find' (Block $b 'find {"query":"TCircle"}') @('Shared\uShapes.pas:21  TCircle (class)')
 Check 'find wildcard' (Block $b 'find {"query":"*Circ*"') @('AppB\uAppB.pas:11  TBigCircle', 'Shared\uShapes.pas:21  TCircle')
@@ -601,6 +605,12 @@ foreach ($light in @($true, $false)) {
     Check 'light definition' (Block $lb 'definition {"symbol":"RegisterLib"}') @('lib\LibReg.pas:7', 'implemented at ', 'lib\LibReg.pas:14')
     Check 'light callees' (Block $lb 'callees {"symbol":"TLibWorker.DoWork"}') @('1 call reaching 1 routine', "lib\LibHidden.pas`n  7  [at 24]  procedure HiddenStep;")
     Check 'light callers after' (Block $lb 'callers {"symbol":"TOwnWorker.DoWork"} #2') @('2 calls in 2 routines', "  LibRun`n    34  [via TLibWorker.DoWork]  AWorker.DoWork;")
+    # A class LibMath's implementation declares (LibMath is used by LibInl's
+    # implementation alone): listed by name, member and wildcard either way.
+    Check 'light find impl' (Block $lb 'find {"query":"TMathCache"}') @('lib\LibMath.pas:16  TMathCache (class)')
+    Check 'light find member' (Block $lb 'find {"query":"TMathCache.Reset"}') @('lib\LibMath.pas:17  TMathCache.Reset (procedure)')
+    Check 'light find wildcard' (Block $lb 'find {"query":"*MathCach*"}') @('lib\LibMath.pas:16  TMathCache (class)')
+    Check 'light find unit' (Block $lb 'find {"query":"LibMath","kind":"unit"}') @('lib\LibMath.pas:1  LibMath (unit)')
     # dcc expands Twice only with LibMath in uses: no row for it either way,
     # and LibReg's initialization is the row's doubt.
     foreach ($k in @('lint {"file":"uOwn.pas"}', 'lint {"file":"uOwn.pas"} #2')) {

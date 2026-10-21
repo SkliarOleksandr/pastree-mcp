@@ -16,8 +16,12 @@ unit PasMcp.Version;
 interface
 
 const
-  PasTreeMcpVersion = '0.32.2';
-  // 0.123.0: the graph past the loaded models (NotLoadedImports,
+  PasTreeMcpVersion = '0.32.3';
+  // 0.124.0: a search by name completes itself in light mode (EnsureFind -
+  // DemandFind; the units nobody loaded, NotLoadedFiles): `find` lists what
+  // a full analysis lists, where an older PasTree misses the declarations of
+  // library implementation sections (a silent light gap).
+  // 0.123.0 before: the graph past the loaded models (NotLoadedImports,
   // NotLoadedUses, ScanNotLoaded) for lint's own reach, and a directive in
   // a `uses` clause spelling its words again (a light `defines` short).
   // 0.122.0 before: a unit's references and its rename through the workspace
@@ -28,7 +32,7 @@ const
   // overload (0.121.0). An older PasTree has no workspace (a compile error)
   // or a workspace whose demand misses a family (a silent light gap).
   // 0.117.1 before: light mode, promotion, LintPromotions (0.31.0).
-  cMinPasTreeVersion = '0.123.0';
+  cMinPasTreeVersion = '0.124.0';
 
 // 'pastree-mcp 0.1.0 (PasTree 0.50.1), built 2026-09-25 15:00' - the first
 // line of every log.

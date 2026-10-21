@@ -761,6 +761,14 @@ begin
   try
     for var LA in FAnalyses do
       if LA.Proj <> nil then
+      begin
+        // Light mode: what a full analysis reads beyond the loaded models -
+        // the units only library implementations use, and the include
+        // files of light implementations - is not outside the index.
+        var LUnits, LIncludes: TArray<string>;
+        LA.Proj.NotLoadedFiles(LUnits, LIncludes);
+        for var LFile in LUnits + LIncludes do
+          LIndexed.AddOrSetValue(LowerCase(LFile), True);
         for var LMid := 0 to LA.Proj.ModelCount - 1 do
         begin
           LIndexed.AddOrSetValue(LowerCase(LA.Proj.ModelFile(LMid)), True);
@@ -769,6 +777,7 @@ begin
             if LFile <> '' then
               LIndexed.AddOrSetValue(LowerCase(LFile), True);
         end;
+      end;
     Walk(FRoot, True);
     // A search path directory holds units by name, not by level. Its path
     // may be written `..\lib`: the index holds full paths.

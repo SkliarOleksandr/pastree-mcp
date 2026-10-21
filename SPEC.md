@@ -1062,18 +1062,44 @@ workers too) or PasTree refused a unit; its last line then says "(library
 implementations not searched: N units)". A completed answer says nothing:
 it is the full one.
 
+**Searches by name (0.32.3, PasTree 0.124.0).** A declaration in a light
+unit's implementation section, or in a unit only library implementations
+use (833 units on the client group: `Winapi.ShLwApi`,
+`Vcl.Shell.ShellCtrls`), is in no light model, and a search by name walks
+the models' symbols - so 0.32.2's `find` missed them, a wildcard listed
+fewer rows, its "N more" depended on what earlier calls had made full, and
+a tool given such a name as `symbol` answered "no declaration named".
+`find` (scope `all`) now asks `WS.EnsureFind` of every analysis first
+(QFind): PasTree makes full the light units whose implementation DECLARES
+a match - by its word index's declared names, so a unit that only calls
+`Min` is left alone - and loads light the units nobody loaded that declare
+one or whose unit name it is; a wildcard is matched against the
+spellings of the scanned texts. Then the walk lists what the full analysis
+lists. `scope: project` asks nothing (the own units are full). A member
+inherited through the qualifier (`TFoo.Bar`) asks the qualifier only when
+nothing matched, as the lookup itself does (InheritedMembers). Every other
+tool given a `symbol` asks the same when nothing of that name is loaded
+(ResolveName), so a name only an implementation declares resolves there
+too; a name matching loaded declarations is resolved among them alone, as
+before. A broad wildcard (`*Add*`, `*Create*`) is declared all over the
+library's implementations, and the query escalates, as a hub class's
+references do. Measured on the client group with the 400 `find` calls of
+the 0.32.2 audit (200 exact names, 200 wildcards; the server restarted
+after each escalated answer, so every call ran in a light session): **400
+equal** to `--no-light` (0.32.2: 60 differed), the full answers
+byte-identical to 0.32.2's; 17 calls escalated, every one a wildcard
+(`*Add*`, `*Create*`, `*Min*`, `*Pos*`, `*Format*`, `*Clear*`,
+`*TControl*` ...), none of the exact names.
+
+An answer that counts the index ("no declaration matches X among the N
+units indexed") or names the files outside it loads the rest of the
+closure light first (QClosure, `WS.EnsureClosure`; no body made full):
+the count and the outside-index note are the full analysis's, with no
+light-mode remark. The include files light implementations read
+(`NotLoadedFiles`) are not "outside the index" either.
+
 What the answers still say in light mode, because no query completes it:
 
-- `find` and every "no declaration matches": the index scope names how many
-  units are read interface-only, whose implementation-only declarations are
-  not indexed (a name search has no demand). Not only a note: a name
-  declared in a light unit's implementation section or in a unit only
-  library implementations use (on the client group 833 units:
-  `Winapi.ShLwApi`, `Vcl.Shell.ShellCtrls`) is not found by `find`, nor by
-  any tool given it as `symbol` (a `file` + `line` finds it), a wildcard
-  lists fewer rows, and its "N more" depends on what earlier calls made
-  full; the scope's unit counts are the light closure's. Needs a name
-  demand from PasTree (a declaration-names index).
 - `diagnostics` with `library: true` over the whole library: the light
   units report their interface only (`--no-light` checks every body; a
   library file asked about alone is made full first).
@@ -1113,7 +1139,8 @@ still light (the client group, seed 11, 200 symbols, `-Forms`,
 not call - `rename_plan`, `change_plan`, depth 2, `metrics`, `defines`,
 `unit_deps`, `diagnostics`, `lint`, wildcard `find`): 0.32.1 **2,498 and
 1,494 equal**, 0.32.2 (PasTree 0.123.0) **2,499 and 1,500** - all that
-differs is the 60 `find` answers of the list above. The full-mode answers
+differs is 60 `find` answers, equal since 0.32.3 ("Searches by name"
+above). The full-mode answers
 are byte-identical across 0.32.0-0.32.2. An escalation came every 30 to
 100 calls (`callees` of an own routine calling a VCL virtual, `callers` of
 a constructor, `references` of `Pos` or `Format`). The light lint costs
@@ -1148,7 +1175,9 @@ implementation `uses`, the exempt rules above, promotion (`PromoteUnit`,
 (batch promotion, escalation), and `TPasWorkspace`, which runs them inside
 the query; `PlanRename`'s uncompiled-uses overload through it (0.121.0).
 Its `docs/library-light-mode.md` is the reference; this server's 0.31.0
-needed 0.117.1, 0.32.0 needs 0.121.0 (`cMinPasTreeVersion`).
+needed 0.117.1, 0.32.0 needed 0.121.0, 0.32.3 needs 0.124.0 - the find
+family: `EnsureFind`, `EnsureClosure`, `NotLoadedFiles`
+(`cMinPasTreeVersion`).
 
 
 ## 10. What deep testing showed

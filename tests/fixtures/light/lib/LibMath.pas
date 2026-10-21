@@ -11,4 +11,14 @@ begin
   Result := A * 2;
 end;
 
+// Declared in the implementation alone: `find` lists it in light mode too.
+type
+  TMathCache = class
+    procedure Reset;
+  end;
+
+procedure TMathCache.Reset;
+begin
+end;
+
 end.

@@ -19,3 +19,8 @@ callers {"symbol":"TOwnWorker.DoWork"}
 lint {"file":"uOwn.pas"}
 lint {"file":"uOwn.pas"}
 status
+find {"query":"TMathCache"}
+find {"query":"TMathCache.Reset"}
+find {"query":"*MathCach*"}
+find {"query":"LibMath","kind":"unit"}
+find {"query":"NothingAnywhere"}

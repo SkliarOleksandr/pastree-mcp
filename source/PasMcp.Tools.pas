@@ -1063,6 +1063,36 @@ begin
   AWs.QueryDone(AA, ADefer);
 end;
 
+// A search by name (ResolveName, `find`) over every analysis: the units
+// whose declarations it can match made full - the light units whose
+// implementation declares the name, the units nobody loaded that declare it
+// or that AUnits names (WS.EnsureFind, PasTree 0.124.0) - so the walk over
+// the models' symbols lists what a full analysis lists. Nothing to do in a
+// full analysis.
+procedure QFind(AWs: TMcpWorkspace; const AQuery: string; AUnits: Boolean);
+begin
+  for var LA in AWs.Analyses do
+    if (LA.Proj <> nil) and (LA.Proj.LightCount > 0) then
+    begin
+      LA.WS.EnsureFind(AQuery, AUnits);
+      AWs.QueryDone(LA);
+    end;
+end;
+
+// Every unit the full analysis loads, loaded (the library ones light; WS.
+// EnsureClosure): what an answer counts as indexed, or as outside the
+// index, is the full analysis's. Asked only where an answer says so - a name
+// nothing declares.
+procedure QClosure(AWs: TMcpWorkspace);
+begin
+  for var LA in AWs.Analyses do
+    if (LA.Proj <> nil) and (LA.Proj.LightCount > 0) then
+    begin
+      LA.WS.EnsureClosure;
+      AWs.QueryDone(LA);
+    end;
+end;
+
 // The demand of a position question (WS.At: the file when it is light, and
 // the unit of the symbol there when it is light) met before the tool asks
 // the navigator what is there.
@@ -1264,6 +1294,10 @@ begin
   AMore := 0;
   LQual := string.Join('.', Copy(AParts, 0, High(AParts)));
   LNameLower := LowerCase(StripGenerics(AParts[High(AParts)]));
+  // The qualifier is a search of its own: a type an implementation section
+  // declares (light mode, QFind).
+  if not AOwnOnly then
+    QFind(AWs, LQual, False);
   LTypes := ResolveName(AWs, LQual, 'type', False, 12, LTypeMore);
   LSeen := TDictionary<string, Boolean>.Create;
   try
@@ -1393,7 +1427,13 @@ var
 begin
   AMore := 0;
   if SameText(AKind, 'unit') then
-    Exit(ResolveUnits(AWs, AQuery, AOwnOnly, ALimit, AMore));
+  begin
+    Result := ResolveUnits(AWs, AQuery, AOwnOnly, ALimit, AMore);
+    // A unit only library implementations use (light mode): taken in.
+    if (Result = nil) and (AMore = 0) and not AOwnOnly then
+      QFind(AWs, AQuery, True);
+    Exit;
+  end;
   LParts := AQuery.Split(['.']);
   if Length(LParts) = 0 then
     raise EToolError.Create('empty symbol name');
@@ -1569,6 +1609,12 @@ begin
           Break;
       end;
     Result := LList.ToArray;
+    // Nothing of that name in the models (light mode): the units that can
+    // declare it - a light unit's implementation, a unit only library
+    // implementations use - made full; when that changed the analysis,
+    // the tool runs again and finds it (`find` asked first, nothing new).
+    if (LRaw.Count = 0) and (LList.Count = 0) and not AOwnOnly then
+      QFind(AWs, AQuery, (AKind = '') and not LWild and not LWildQuals);
     if (LRaw.Count = 0) and (LList.Count = 0) and AClimb and
        (Length(LQuals) > 0) and not LWild and not LWildQuals then
       Result := InheritedMembers(AWs, LParts, AKind, AOwnOnly, ALimit, AMore);
@@ -1602,31 +1648,19 @@ end;
 
 // What was searched, for an answer that found nothing: `the 80 units indexed
 // - what pastree-mcp.dproj compiles: 9 of its own, 71 from libraries`.
+// Light mode: the closure's units all loaded first (QClosure), so the count
+// is the full analysis's; a search by name made the units that can declare
+// it full before (QFind).
 function IndexScope(AWs: TMcpWorkspace): string;
 var
   LAll, LOwn: Integer;
-  LLight: TDictionary<string, Boolean>;
 begin
+  QClosure(AWs);
   LAll := AWs.IndexedUnitCount(LOwn);
   Result := Format('the %d units indexed - what %s %s: %d of %s own, %d from '
     + 'libraries', [LAll, AWs.IndexedProjects, IfThen(Length(AWs.Members) = 1,
     'compiles', 'compile'), LOwn, IfThen(Length(AWs.Members) = 1, 'its',
     'their'), LAll - LOwn]);
-  // Light mode: what the library part does not hold.
-  LLight := TDictionary<string, Boolean>.Create;
-  try
-    for var LA in AWs.Analyses do
-      if LA.Proj <> nil then
-        for var LMid := 0 to LA.Proj.ModelCount - 1 do
-          if LA.Proj.IsLight(LMid) then
-            LLight.AddOrSetValue(LowerCase(LA.Proj.ModelFile(LMid)), True);
-    if LLight.Count > 0 then
-      Result := Result + Format(', %d of them read interface-only (light '
-        + 'mode: what their implementation sections declare, and the library '
-        + 'units only those use, are not indexed)', [LLight.Count]);
-  finally
-    LLight.Free;
-  end;
 end;
 
 type
@@ -1751,6 +1785,8 @@ begin
   LDotted := '';
   if Length(LSegs) > 1 then
     LDotted := string.Join('.', LSegs);
+  // Outside the index as the full analysis has it (light mode).
+  QClosure(AWs);
   LFiles := AWs.UnindexedSources;
   LSearched := 0;
   LSW := TStopwatch.StartNew;
@@ -2696,12 +2732,20 @@ begin
   LKind := ArgStr(AArgs, 'kind');
   LLimit := EnsureRange(ArgInt(AArgs, 'limit', 30), 0, 500);
   LOwnOnly := SameText(ArgStr(AArgs, 'scope'), 'project');
+  // Light mode: every unit that can declare a match made full first (the
+  // own units always are) - the units by name too where ResolveName lists
+  // them (`kind: unit`, or an exact name).
+  if not LOwnOnly then
+    QFind(AWs, LQuery, SameText(LKind, 'unit') or ((LKind = '') and
+      not IsWildPattern(LQuery)));
   LCands := ResolveName(AWs, LQuery, LKind, LOwnOnly, LLimit, LMore);
   LFallback := False;
   if (Length(LCands) = 0) and (LMore = 0) and (Pos('*', LQuery) = 0) and
      (Pos('?', LQuery) = 0) then
   begin
     // Nothing by that exact name: the agent often half-remembers one.
+    if not LOwnOnly then
+      QFind(AWs, '*' + LQuery + '*', SameText(LKind, 'unit'));
     LCands := ResolveName(AWs, '*' + LQuery + '*', LKind, LOwnOnly, LLimit,
       LMore);
     LFallback := True;
@@ -2715,6 +2759,7 @@ begin
     begin
       if LOwnOnly then
       begin
+        QClosure(AWs);
         LAll := AWs.IndexedUnitCount(LOwn);
         LSb.AppendLine(Format('no declaration%s matches `%s` among the group''s '
           + 'own %d units (%d with the libraries; `scope: all` searches those '
