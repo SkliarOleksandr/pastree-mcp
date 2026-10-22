@@ -50,7 +50,11 @@ function Run-Cli([string[]]$ExtraArgs) {
     # `compile` builds in a directory of its own: a fresh one per run, so the
     # run's first build of a member is a first build.
     $buildDir = Join-Path ([IO.Path]::GetTempPath()) ('pastree-mcp-smoke-build-' + [Guid]::NewGuid().ToString('N'))
-    $out = & $Exe --project $group --log none --build-dir $buildDir --script (Join-Path $here 'smoke.calls') @ExtraArgs 2>$null
+    # The fixture sits in this repository's work tree: what git says changed
+    # there is whatever the repository is in. Kept out (`compile {}`).
+    $env:GIT_DIR = Join-Path $buildDir 'no-git'
+    try { $out = & $Exe --project $group --log none --build-dir $buildDir --script (Join-Path $here 'smoke.calls') @ExtraArgs 2>$null }
+    finally { Remove-Item Env:GIT_DIR }
     $ErrorActionPreference = 'Stop'
     Remove-Item -Recurse -Force $buildDir -ErrorAction SilentlyContinue
     if ($LASTEXITCODE -ne 0) { throw "pastree-mcp exited with $LASTEXITCODE" }
@@ -347,7 +351,7 @@ Check 'compile file' (Block $b 'compile {"file"') @('compile - 2 members, those 
 Check 'compile rebuild' (Block $b 'compile {"member":"AppA", "rebuild"') @('351 lines compiled', "warnings - 1 in the group's files:`nAppA\uMembers.pas", '  37  W1055 PUBLISHED caused RTTI', "to be added to type 'TDerived' (in TDerived)`n        published") @('[new]')
 Check 'compile no member' (Block $b 'compile {"member":"NoSuch"}') @('no member named NoSuch - the group has: AppA, AppB, AppF')
 Check 'compile bad show' (Block $b 'compile {"show"') @("``show`` of ``compile`` is new, warnings or all (not ``some``)")
-Check 'compile nothing changed' (Block $b 'compile {}') @('no file has changed since the server started - name the `member` to build (the group has: AppA, AppB, AppF)')
+Check 'compile nothing changed' (Block $b 'compile {}') @('no file has changed since the server started, and git has nothing to say: not installed, or ', ' in no work tree',' - name the `member` to build (the group has: AppA, AppB, AppF)')
 # form: a form's components, their events and the components they name,
 # with the lines of the form file. An inline frame's child under the frame,
 # its handler the host's; a data module; a binary form file, said so. An
@@ -833,6 +837,53 @@ finally {
 }
 Check 'compile form malformed' $out @('compile AppF (Win32): FAILED in', 'errors - 2:', "AppF\uData.dfm`n  8  E2161 Error: RLINK32: Error opening file - the form file does not read from this line: Invalid string constant`n        Caption = 'Save") @('(no file)', 'uData.dfm"')
 Check 'compile form missing' $out @("AppF\uChildForm.pas`n  27  E1026 File not found: 'uChildForm.dfm'`n        {`$R *.dfm}`n")
+
+# ---- compile without arguments: what git says changed --------------------------------
+# Nothing edited this session (the user edits in the IDE before it starts):
+# the files not committed, else the branch's own since it left origin's
+# default branch - named in the answer. A copy under git of its own.
+Write-Host '--- CLI, compile from what git says changed'
+$gitCopy = Join-Path ([IO.Path]::GetTempPath()) ('pastree-mcp-smoke-git-' + [Guid]::NewGuid().ToString('N'))
+$gitCalls = $gitCopy + '.calls'
+Copy-Item -Recurse $fixture $gitCopy
+function Run-Git([string[]]$GitArgs) {
+    $ErrorActionPreference = 'Continue'
+    try { & git -C $gitCopy -c user.email=smoke@test -c user.name=smoke @GitArgs 2>$null | Out-Null }
+    finally { $ErrorActionPreference = 'Stop' }
+}
+function Run-GitCompile {
+    $ErrorActionPreference = 'Continue'
+    try { return (& $Exe --project (Join-Path $gitCopy 'Fixture.groupproj') --log none --build-dir ($gitCopy + '-build') --script $gitCalls 2>$null | ForEach-Object { "$_" }) -join "`n" }
+    finally { $ErrorActionPreference = 'Stop' }
+}
+try {
+    [IO.File]::WriteAllText($gitCalls, "compile {}`n")
+    Run-Git @('init', '-q', '-b', 'main')
+    Run-Git @('add', '-A')
+    Run-Git @('commit', '-q', '-m', 'base')
+    $gitClean = Run-GitCompile
+    $colors = Join-Path $gitCopy 'AppB\uColors.pas'
+    [IO.File]::AppendAllText($colors, "`r`n// touched`r`n")
+    $gitDirty = Run-GitCompile
+    # Committed, on a branch off origin's default: the branch's own changes.
+    Run-Git @('commit', '-q', '-am', 'colors')
+    Run-Git @('clone', '-q', '--bare', $gitCopy, ($gitCopy + '-origin'))
+    Run-Git @('remote', 'add', 'origin', ($gitCopy + '-origin'))
+    Run-Git @('fetch', '-q', 'origin')
+    Run-Git @('remote', 'set-head', 'origin', 'main')
+    Run-Git @('checkout', '-q', '-b', 'feature')
+    $shapes = Join-Path $gitCopy 'Shared\uShapes.pas'
+    [IO.File]::AppendAllText($shapes, "`r`n// on the branch`r`n")
+    Run-Git @('commit', '-q', '-am', 'shapes')
+    $gitBranch = Run-GitCompile
+}
+finally {
+    Remove-Item -Recurse -Force $gitCopy, ($gitCopy + '-build'), ($gitCopy + '-origin') -ErrorAction SilentlyContinue
+    Remove-Item -Force $gitCalls -ErrorAction SilentlyContinue
+}
+Check 'compile git clean' $gitClean @('no file has changed since the server started, and git reports no Pascal file changed under ', ' - name the `member` to build (the group has: AppA, AppB, AppF)')
+Check 'compile git not committed' $gitDirty @('compile AppB (Win32): built in', '  those compiling the 1 file changed (git: not committed): AppB\uColors.pas') @('AppA (Win32')
+Check 'compile git branch' $gitBranch @('compile - 2 members, those compiling the 1 file changed (git: committed on this branch since it left origin/main): Shared\uShapes.pas', 'AppA (Win32 Debug): built in', 'AppB (Win32): built in') @('AppF (')
 
 # ---- 3. MCP over stdio, with an edit in between ------------------------------------
 Write-Host '--- MCP over stdio'

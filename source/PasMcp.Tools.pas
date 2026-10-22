@@ -16863,17 +16863,20 @@ end;
 // `file`, else those the files changed this session reach. AWhy says which
 // rule chose them, for the answer.
 function CompileMembers(AWs: TMcpWorkspace; AArgs: TJSONObject;
-  out AWhy: string): TArray<Integer>;
+  out AWhy, ASince: string; out AChanged: TArray<string>): TArray<Integer>;
 var
   LNames, LChanged, LShown: TArray<string>;
   LV: TJSONValue;
   LFound: Integer;
   LReach: TMemberReach;
-  LFile, LAll: string;
+  LFile, LAll, LSince, LGitWhat: string;
   LIn: TArray<Boolean>;
+  LGitOk: Boolean;
 begin
   Result := nil;
   AWhy := '';
+  ASince := 'changed this session';
+  AChanged := nil;
   SetLength(LIn, Length(AWs.Members));
   LAll := '';
   for var LM in AWs.Members do
@@ -16922,12 +16925,30 @@ begin
       else
       begin
         LChanged := AWs.ChangedFiles;
+        LSince := 'changed this session';
+        // Nothing edited since the server started: the user edits in the IDE
+        // before the session starts, and "build what I changed" is then
+        // what git says changed (a field report: the call without arguments
+        // was empty exactly when it was wanted most).
+        if Length(LChanged) = 0 then
+        begin
+          for var LOne in GitChangedFiles(AWs.Root, LGitWhat, LGitOk) do
+            if MatchText(ExtractFileExt(LOne), ['.pas', '.inc', '.dpr',
+               '.dpk']) then
+              LChanged := LChanged + [LOne]
+            else if SameText(ExtractFileExt(LOne), '.dfm') and
+               FileExists(ChangeFileExt(LOne, '.pas')) then
+              LChanged := LChanged + [ChangeFileExt(LOne, '.pas')];
+          LSince := 'changed (git: ' + LGitWhat + ')';
+        end;
         if Length(LChanged) = 0 then
         begin
           if Length(AWs.Members) <> 1 then
             raise EToolError.CreateFmt('no file has changed since the server '
-              + 'started - name the `member` to build (the group has: %s), or a '
-              + '`file`', [LAll]);
+              + 'started, and %s - name the `member` to build (the group has: '
+              + '%s), or a `file`', [IfThen(LGitOk, 'git reports no Pascal '
+              + 'file changed under ' + AWs.Root, 'git has nothing to say: '
+              + 'not installed, or ' + AWs.Root + ' in no work tree'), LAll]);
           LIn[0] := True;
         end
         else
@@ -16935,18 +16956,21 @@ begin
           for var LOne in LChanged do
             for var LIdx in ReachingMembers(AWs, LReach, LOne) do
               LIn[LIdx] := True;
-          AWhy := 'those compiling the ' + Plural(Length(LChanged), 'file') +
-            ' changed this session';
+          LShown := nil;
+          for var LOne in LChanged do
+            if Length(LShown) < 5 then
+              LShown := LShown + [AWs.RelPath(LOne)];
+          if Length(LChanged) > Length(LShown) then
+            LShown := LShown + [Format('%d more', [Length(LChanged) -
+              Length(LShown)])];
+          ASince := LSince;
+          AChanged := LChanged;
+          AWhy := Format('those compiling the %s %s: %s', [Plural(
+            Length(LChanged), 'file'), LSince, String.Join(', ', LShown)]);
           if not HasTrue(LIn) then
-          begin
-            LShown := nil;
-            for var LOne in LChanged do
-              if Length(LShown) < 3 then
-                LShown := LShown + [AWs.RelPath(LOne)];
             raise EToolError.CreateFmt('no member of the group compiles the '
-              + 'files changed this session (%s) - name the `member` to build '
-              + '(the group has: %s)', [String.Join(', ', LShown), LAll]);
-          end;
+              + 'files %s (%s) - name the `member` to build (the group has: '
+              + '%s)', [LSince, String.Join(', ', LShown), LAll]);
         end;
       end;
     finally
@@ -17165,7 +17189,7 @@ begin
 end;
 
 function CompileAnswer(AWs: TMcpWorkspace; const AResults: TArray<TBuildResult>;
-  const AWhy, AShow: string; ALimit: Integer): string;
+  const AWhy, AShow: string; ALimit: Integer; const ASince: string): string;
 var
   LSb: TStringBuilder;
   LGone: TList<TCompileRow>;
@@ -17344,9 +17368,9 @@ var
     if ALib > 0 then
       LRest := LRest + [Format('%d in library units', [ALib])];
     if LFirstOnly then
-      LSb.Append(Format('%s - %s in files changed this session', [ANoun,
+      LSb.Append(Format('%s - %s in files %s', [ANoun,
         IfThen(Length(LListedRows) > 0, IntToStr(Length(LListedRows)),
-        'none')]))
+        'none'), ASince]))
     else if Length(LListedRows) > 0 then
       LSb.Append(Format('%s - %d new', [ANoun, Length(LListedRows)]))
     else
@@ -17513,7 +17537,13 @@ begin
       LFirstOnly := False;
 
     if not LMulti then
-      LSb.AppendLine('compile ' + MemberLine(AResults[0], '  '))
+    begin
+      LSb.AppendLine('compile ' + MemberLine(AResults[0], '  '));
+      // Chosen by what git says changed: which files, said - the session
+      // did not edit them, and the agent may not know them.
+      if ASince.StartsWith('changed (git') and (AWhy <> '') then
+        LSb.AppendLine('  ' + AWhy);
+    end
     else
     begin
       LSb.AppendLine(Format('compile - %d members%s', [Length(AResults),
@@ -17675,7 +17705,8 @@ type
     FWs: TMcpWorkspace;
     FSpecs: TArray<TBuildSpec>;
     FResults: TArray<TBuildResult>;
-    FWhy, FShow, FFresh: string;
+    FWhy, FShow, FFresh, FSince: string;
+    FChanged: TArray<string>;
     FLimit: Integer;
     FRebuild: Boolean;
     FProgress: TProc<string>;
@@ -17683,7 +17714,8 @@ type
   public
     constructor Create(AWs: TMcpWorkspace; const AMembers: TArray<Integer>;
       const AWhy, AShow: string; ALimit: Integer; ARebuild: Boolean;
-      const AProgress: TProc<string>);
+      const AProgress: TProc<string>; const ASince: string;
+      const AChanged: TArray<string>);
     destructor Destroy; override;
     procedure Work; override;
     function Finish(out AIsError: Boolean): string; override;
@@ -17694,10 +17726,13 @@ type
 
 constructor TCompileJob.Create(AWs: TMcpWorkspace;
   const AMembers: TArray<Integer>; const AWhy, AShow: string; ALimit: Integer;
-  ARebuild: Boolean; const AProgress: TProc<string>);
+  ARebuild: Boolean; const AProgress: TProc<string>; const ASince: string;
+  const AChanged: TArray<string>);
 begin
   inherited Create;
   FWs := AWs;
+  FSince := ASince;
+  FChanged := AChanged;
   for var LIdx in AMembers do
     FSpecs := FSpecs + [MemberBuildSpec(AWs, LIdx)];
   FWhy := AWhy;
@@ -17742,9 +17777,9 @@ begin
     begin
       ResolveTruncated(FWs, FResults[LI]);
       ResolveFormFiles(FWs, FResults[LI]);
-      CompareWithBaseline(FResults[LI], FWs.ChangedFiles);
+      CompareWithBaseline(FResults[LI], FWs.ChangedFiles + FChanged);
     end;
-  Result := CompileAnswer(FWs, FResults, FWhy, FShow, FLimit);
+  Result := CompileAnswer(FWs, FResults, FWhy, FShow, FLimit, FSince);
   LNotes := nil;
   if Trim(FFresh) <> '' then
     LNotes := LNotes + [FFresh.TrimRight([' ', ';'])];
@@ -17762,16 +17797,17 @@ end;
 function NewCompileJob(AWs: TMcpWorkspace; AArgs: TJSONObject;
   const AProgress: TProc<string>): TCompileJob;
 var
-  LShow, LWhy: string;
+  LShow, LWhy, LSince: string;
   LMembers: TArray<Integer>;
+  LChanged: TArray<string>;
 begin
   LShow := LowerCase(ArgStr(AArgs, 'show', 'new'));
   if not MatchText(LShow, ['new', 'warnings', 'all']) then
     raise EToolError.Create('`show` is new, warnings or all');
-  LMembers := CompileMembers(AWs, AArgs, LWhy);
+  LMembers := CompileMembers(AWs, AArgs, LWhy, LSince, LChanged);
   Result := TCompileJob.Create(AWs, LMembers, LWhy, LShow,
     EnsureRange(ArgInt(AArgs, 'limit', 60), 1, 5000),
-    ArgBool(AArgs, 'rebuild', False), AProgress);
+    ArgBool(AArgs, 'rebuild', False), AProgress, LSince, LChanged);
 end;
 
 { ---- the catalogue ----------------------------------------------------------- }
@@ -18011,7 +18047,9 @@ const
     + 'in and its source line, then the warnings and hints new since that '
     + 'member''s previous compile (the old ones are counted). With no '
     + 'arguments it builds the members of the group that compile the files '
-    + 'changed this session. Everything is written to a directory of the '
+    + 'changed this session - none changed, those git reports changed (not '
+    + 'committed, else the branch''s own since it left origin''s default '
+    + 'branch), named in the answer. Everything is written to a directory of the '
     + 'server''s own (the answer names the exe it built - a build '
     + 'check, not a copy to run: a console test runner may run from there, an '
     + 'application or server misses the files beside the project''s own output): the project''s output, its .dcu files and the source tree '

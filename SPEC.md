@@ -560,6 +560,15 @@ of `diagnostics`: relative paths, grouped by file, de-duplicated (one missing
 unit repeats once per importer), capped, errors first. `hints: false` by
 default.
 
+- **Without arguments: what changed** - the members compiling the files
+  edited this session; none edited, the files git reports changed (not
+  committed; all committed, the branch's own since it left origin's default
+  branch), named in the answer, and their warnings treated as this
+  session's (0.34.0). A field report: the server starts with the session,
+  the user edits in the IDE before it, and the call without arguments was
+  refused exactly when "build what I changed" was wanted. A refusal says
+  whether git had nothing changed or nothing to say.
+
 - **Output goes to a temporary directory** (`DCC_ExeOutput`, `DCC_DcuOutput`
   overridden), never to the project's own output: an agent's check must not
   replace the binary a developer is running, nor leave `.dcu` files from

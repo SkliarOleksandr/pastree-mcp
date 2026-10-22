@@ -184,6 +184,16 @@ function BuildMember(const ASpec: TBuildSpec; ARebuild: Boolean;
 procedure CompareWithBaseline(var AResult: TBuildResult;
   const AChangedFiles: TArray<string>);
 
+// The files git reports changed under ADir, full paths, those on disk only:
+// the ones not committed (staged, unstaged, untracked); when there are none,
+// the ones the branch changed since it left origin's default branch. AWhat
+// says which, empty with no files - git missing, no work tree, nothing
+// changed; AGitOk False when git is missing or ADir in no work tree. For
+// `compile` without arguments when no file changed this
+// session: the user edits in the IDE before the session starts.
+function GitChangedFiles(const ADir: string; out AWhat: string;
+  out AGitOk: Boolean): TArray<string>;
+
 implementation
 
 uses
@@ -489,7 +499,8 @@ begin
     UniqueString(LCmd);   // CreateProcessW may write into the buffer
     if not CreateProcess(PChar(AExe), PChar(LCmd), nil, nil, True,
       CREATE_NO_WINDOW or CREATE_UNICODE_ENVIRONMENT or CREATE_SUSPENDED,
-      PChar(AEnvBlock), PChar(ADir), LSI, LPI) then
+      // An empty block is the server's own environment (nil, not '').
+      PChar(Pointer(AEnvBlock)), PChar(ADir), LSI, LPI) then
     begin
       Result.Error := 'cannot start ' + AExe + ': ' +
         SysErrorMessage(GetLastError);
@@ -575,6 +586,84 @@ begin
   end
   else
     Result := AArg;
+end;
+
+{ ---- what git says changed --------------------------------------------------- }
+
+// One git command in ADir: its output lines, or False when git is not on the
+// PATH, ADir is in no work tree, or the command fails.
+function RunGit(const ADir, AArgs: string; out ALines: TArray<string>): Boolean;
+var
+  LGit: string;
+  LRun: TRunOutcome;
+begin
+  ALines := nil;
+  LGit := FileSearch('git.exe', GetEnvironmentVariable('PATH'));
+  if LGit = '' then
+    Exit(False);
+  LRun := RunProcess(LGit, '-c core.quotepath=off ' + AArgs, ADir, '', 15000,
+    nil, nil);
+  Result := LRun.Started and not LRun.TimedOut and (LRun.ExitCode = 0);
+  if Result then
+    ALines := TEncoding.UTF8.GetString(LRun.Output).Split([#13#10, #10],
+      TStringSplitOptions.ExcludeEmpty);
+end;
+
+function GitChangedFiles(const ADir: string; out AWhat: string;
+  out AGitOk: Boolean): TArray<string>;
+var
+  LLines, LMore: TArray<string>;
+  LBase, LFull: string;
+  LSeen: TDictionary<string, Boolean>;
+
+  procedure Add(const ARel: string);
+  begin
+    LFull := TPath.GetFullPath(TPath.Combine(ADir, ARel.Replace('/', '\')));
+    if TFile.Exists(LFull) and not LSeen.ContainsKey(LowerCase(LFull)) then
+    begin
+      LSeen.Add(LowerCase(LFull), True);
+      Result := Result + [LFull];
+    end;
+  end;
+
+begin
+  Result := nil;
+  AWhat := '';
+  AGitOk := False;
+  LSeen := TDictionary<string, Boolean>.Create;
+  try
+    // Not committed: staged or not, and the files git does not track yet.
+    AGitOk := RunGit(ADir, 'diff --name-only --relative HEAD', LLines);
+    if not AGitOk then
+      Exit;
+    if RunGit(ADir, 'ls-files --others --exclude-standard', LMore) then
+      LLines := LLines + LMore;
+    for var LRel in LLines do
+      Add(LRel);
+    if Length(Result) > 0 then
+    begin
+      AWhat := 'not committed';
+      Exit;
+    end;
+    // All committed: the branch's own commits, since it left the remote's
+    // default branch.
+    if not RunGit(ADir, 'rev-parse --abbrev-ref origin/HEAD', LLines) or
+       (Length(LLines) = 0) then
+      Exit;
+    LBase := Trim(LLines[0]);
+    if not RunGit(ADir, 'merge-base HEAD ' + LBase, LLines) or
+       (Length(LLines) = 0) then
+      Exit;
+    if not RunGit(ADir, 'diff --name-only --relative ' + Trim(LLines[0]),
+       LLines) then
+      Exit;
+    for var LRel in LLines do
+      Add(LRel);
+    if Length(Result) > 0 then
+      AWhat := 'committed on this branch since it left ' + LBase;
+  finally
+    LSeen.Free;
+  end;
 end;
 
 // A dcc switch with a value: -U"a;b", as the DCC task writes them.
