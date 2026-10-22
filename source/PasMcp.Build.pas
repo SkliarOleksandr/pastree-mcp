@@ -193,9 +193,9 @@ procedure CompareWithBaseline(var AResult: TBuildResult;
 
 // The files git reports changed under ADir, full paths, those on disk only:
 // the ones not committed (staged, unstaged, untracked) and the ones the
-// branch's own commits changed since it left ABase - by default the nearest
-// of origin's long-lived branches (NearestBase). AWhat counts each part,
-// empty with no files; AGitOk False when git is missing or ADir in no work
+// branch's own commits changed since it left ABase - by default the remote's
+// default branch (DefaultBase). AWhat counts each part and names the base;
+// AGitOk False when git is missing or ADir in no work
 // tree; AError when git knows no ABase. For `compile` without arguments when
 // no file changed this session: the user edits in the IDE before it starts.
 function GitChangedFiles(const ADir, ABase: string; out AWhat, AError: string;
@@ -616,51 +616,40 @@ begin
       TStringSplitOptions.ExcludeEmpty);
 end;
 
-// The branch HEAD left: of origin's long-lived branches - its default one,
-// main, master, develop, release/*, release-* - the one with the fewest of
-// HEAD's commits on top. A branch off release/5.1 diffed against the default
-// branch would take in every commit of the release (a field report).
-// Feature branches are not candidates: one branched from this one would
-// look nearest. '' when origin has none of them.
-function NearestBase(const ADir: string): string;
+// The branch to diff HEAD's own commits against when the call names none:
+// the default branch of the remote HEAD's branch tracks (origin when it
+// tracks none) - `<remote>/HEAD`, which git itself marks as the default.
+// No branch names are guessed: a repository's own conventions (release/*,
+// rel/, stable) are the agent's to know, and passed as `base`. '' when the
+// remote has no HEAD.
+function DefaultBase(const ADir: string): string;
 var
-  LLines, LCands: TArray<string>;
-  LBest, LCount: Integer;
+  LLines: TArray<string>;
+  LRemote: string;
 begin
   Result := '';
-  LCands := nil;
-  if RunGit(ADir, 'rev-parse --abbrev-ref origin/HEAD', LLines) and
+  LRemote := 'origin';
+  if RunGit(ADir, 'symbolic-ref --short HEAD', LLines) and
+     (Length(LLines) > 0) and RunGit(ADir, 'config --get branch.' +
+     Trim(LLines[0]) + '.remote', LLines) and (Length(LLines) > 0) and
+     (Trim(LLines[0]) <> '.') then
+    LRemote := Trim(LLines[0]);
+  if RunGit(ADir, 'rev-parse --abbrev-ref ' + LRemote + '/HEAD', LLines) and
      (Length(LLines) > 0) then
-    LCands := LCands + [Trim(LLines[0])];
-  if RunGit(ADir, 'for-each-ref --format=%(refname:short) '
-     + 'refs/remotes/origin/main refs/remotes/origin/master '
-     + 'refs/remotes/origin/develop refs/remotes/origin/release '
-     + 'refs/remotes/origin/release-* refs/remotes/origin/release_*', LLines)
-  then
-    for var LRef in LLines do
-      if (Trim(LRef) <> '') and (IndexText(Trim(LRef), LCands) < 0) then
-        LCands := LCands + [Trim(LRef)];
-  LBest := MaxInt;
-  for var LCand in LCands do
-    if RunGit(ADir, 'rev-list --count ' + LCand + '..HEAD', LLines) and
-       (Length(LLines) > 0) then
-    begin
-      LCount := StrToIntDef(Trim(LLines[0]), MaxInt);
-      if LCount < LBest then
-      begin
-        LBest := LCount;
-        Result := LCand;
-      end;
-    end;
+    Result := Trim(LLines[0]);
 end;
 
 function GitChangedFiles(const ADir, ABase: string; out AWhat, AError: string;
   out AGitOk: Boolean): TArray<string>;
+const
+  // Past this many of HEAD's own commits the default base is said to be
+  // likely wrong.
+  MANY_COMMITS = 20;
 var
   LLines, LMore, LFiles: TArray<string>;
   LBase, LFull, LMergeBase: string;
   LSeen: TDictionary<string, Boolean>;
-  LOpen, LBranch: Integer;
+  LOpen, LBranch, LCommits: Integer;
   LParts: TArray<string>;
 
   function Add(const ARel: string): Boolean;
@@ -701,12 +690,16 @@ begin
     // committed part reaches (a field report).
     LBase := ABase;
     if LBase = '' then
-      LBase := NearestBase(ADir);
+      LBase := DefaultBase(ADir);
     LBranch := 0;
+    LCommits := 0;
     if (LBase <> '') and RunGit(ADir, 'merge-base HEAD ' + Quoted(LBase),
        LLines) and (Length(LLines) > 0) then
     begin
       LMergeBase := Trim(LLines[0]);
+      if RunGit(ADir, 'rev-list --count ' + LMergeBase + '..HEAD', LLines) and
+         (Length(LLines) > 0) then
+        LCommits := StrToIntDef(Trim(LLines[0]), 0);
       if RunGit(ADir, 'diff --name-only --relative ' + LMergeBase + ' HEAD',
          LLines) then
         for var LRel in LLines do
@@ -719,9 +712,19 @@ begin
     LParts := nil;
     if LOpen > 0 then
       LParts := LParts + [Format('%d not committed', [LOpen])];
-    if LBranch > 0 then
-      LParts := LParts + [Format('%d committed on this branch since it left '
-        + '%s', [LBranch, LBase])];
+    // The base always said - the agent sees what was taken, and corrects it.
+    if LBase = '' then
+      LParts := LParts + ['the branch''s commits not taken: no remote default '
+        + 'branch to diff against - pass `base`']
+    else
+      LParts := LParts + [Format('%d in the %s since the branch left %s', [
+        LBranch, IfThen(LCommits = 1, '1 commit', IntToStr(LCommits) +
+        ' commits'), LBase])];
+    // Many commits on top of the default base: likely a branch off another
+    // branch (a release), whose commits are not this change (a field report).
+    if (ABase = '') and (LCommits > MANY_COMMITS) then
+      LParts := LParts + [Format('more than %d: if the branch left another '
+        + 'branch, pass that as `base`', [MANY_COMMITS])];
     AWhat := String.Join(', ', LParts);
     Result := LFiles;
   finally

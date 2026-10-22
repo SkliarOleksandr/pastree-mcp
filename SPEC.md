@@ -581,16 +581,17 @@ default.
 
 - **Without arguments: what changed** - the members compiling the files
   edited this session; none edited (or `base` given), the files git reports
-  changed: not committed, and the branch's own commits since it left the
-  nearest of origin's long-lived branches (its default one, main, master,
-  develop, release/*, release-*: the fewest of HEAD's commits on top) or
-  `base` - both parts, each counted (0.40.0; 0.34.0 took the uncommitted
-  part alone when there was one, and diffed against the default branch, so
-  a branch off a release built the whole release). Named in the answer, and their warnings treated as this
-  session's (0.34.0). A field report: the server starts with the session,
-  the user edits in the IDE before it, and the call without arguments was
-  refused exactly when "build what I changed" was wanted. A refusal says
-  whether git had nothing changed or nothing to say.
+  changed: not committed, and the branch's own commits since it left `base`
+  - by default the remote's default branch (`<remote>/HEAD`, the remote the
+  branch tracks, else origin). Both parts, each counted, and the base and
+  its commit count named; past 20 commits the answer says to pass `base`.
+  No branch names are guessed (0.41.0): 0.40.0 picked the nearest of
+  main/master/develop/release/*, a convention of one repository - the
+  agent knows the branch it works from, from the user or from git, and
+  passes it. A field report: a branch off release/... diffed against the
+  default branch took in the whole release, and a change part committed,
+  part not, built only what the uncommitted part reaches (0.34.0). A
+  refusal says whether git had nothing changed or nothing to say.
 - **What an incremental build did not compile again** still has the
   warnings and hints the last compile here reported for it (0.39.0): they
   count as old, and `show: warnings` lists them tagged `[earlier

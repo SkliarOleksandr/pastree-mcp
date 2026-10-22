@@ -17433,7 +17433,8 @@ begin
             raise EToolError.CreateFmt('no file has changed since the server '
               + 'started, and %s - name the `member` to build (the group has: '
               + '%s), or a `file`', [IfThen(LGitOk, 'git reports no Pascal '
-              + 'file changed under ' + AWs.Root, 'git has nothing to say: '
+              + 'file changed under ' + AWs.Root + ' (' + LGitWhat + ')',
+              'git has nothing to say: '
               + 'not installed, or ' + AWs.Root + ' in no work tree'), LAll]);
           LIn[0] := True;
         end
@@ -18585,8 +18586,9 @@ const
     + 'only what changed (default false)"},'
     + '"base":{"type":"string","description":"Without member or file: build '
     + 'what git says changed - not committed, and committed on this branch '
-    + 'since it left this branch or commit (default: the nearest of origin''s '
-    + 'main, master, develop, release/*, its default branch)"},'
+    + 'since it left this branch or commit. Pass it when you know the branch '
+    + 'this one left (a release branch, say); default: the remote''s default '
+    + 'branch (<remote>/HEAD), named in the answer"},'
     + '"limit":{"type":"integer","description":"Max rows (default 60)"}}}},' +
 
     '{"name":"related","description":"Relations across the group. '

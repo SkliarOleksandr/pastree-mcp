@@ -904,32 +904,34 @@ try {
     Run-Git @('remote', 'add', 'origin', ($gitCopy + '-origin'))
     Run-Git @('fetch', '-q', 'origin')
     Run-Git @('remote', 'set-head', 'origin', 'main')
-    # A release branch on origin, ahead of main by a commit of its own; the
-    # branch worked on leaves the release, not main: the release's commit is
-    # not the branch's change.
+    # A release branch on origin, 21 commits ahead of main; the branch worked
+    # on leaves the release. The default base (origin/HEAD, main) takes the
+    # release's commits in, and the answer says to pass `base`; the agent
+    # that knows the branch passes it.
     Run-Git @('checkout', '-q', '-b', 'release/1')
     [IO.File]::AppendAllText((Join-Path $gitCopy 'AppA\uAppA.pas'), "`r`n// the release`r`n")
     Run-Git @('commit', '-q', '-am', 'release')
+    foreach ($i in 1..20) { Run-Git @('commit', '-q', '--allow-empty', '-m', "release $i") }
     Run-Git @('push', '-q', 'origin', 'release/1')
     Run-Git @('checkout', '-q', '-b', 'feature')
     [IO.File]::AppendAllText((Join-Path $gitCopy 'Shared\uShapes.pas'), "`r`n// on the branch`r`n")
     Run-Git @('commit', '-q', '-am', 'shapes')
-    $gitBranch = Run-GitCompile
+    $gitDefault = Run-GitCompile
+    $gitBase = Run-GitCompile 'compile {"base":"origin/release/1"}'
     # Part committed, part not: one change, both parts built.
     [IO.File]::AppendAllText($colors, "`r`n// not yet`r`n")
-    $gitMixed = Run-GitCompile
-    $gitBase = Run-GitCompile 'compile {"base":"origin/main"}'
+    $gitMixed = Run-GitCompile 'compile {"base":"origin/release/1"}'
     $gitBadBase = Run-GitCompile 'compile {"base":"no-such-branch"}'
 }
 finally {
     Remove-Item -Recurse -Force $gitCopy, ($gitCopy + '-build'), ($gitCopy + '-origin') -ErrorAction SilentlyContinue
     Remove-Item -Force $gitCalls -ErrorAction SilentlyContinue
 }
-Check 'compile git clean' $gitClean @('no file has changed since the server started, and git reports no Pascal file changed under ', ' - name the `member` to build (the group has: AppA, AppB, AppF)')
-Check 'compile git not committed' $gitDirty @('compile AppB (Win32): built in', '  those compiling the 1 file changed (git: 1 not committed): AppB\uColors.pas') @('AppA (Win32')
-Check 'compile git branch' $gitBranch @('compile - 2 members, those compiling the 1 file changed (git: 1 committed on this branch since it left origin/release/1): Shared\uShapes.pas', 'AppA (Win32 Debug): built in', 'AppB (Win32): built in') @('AppF (', 'uAppA.pas')
-Check 'compile git mixed' $gitMixed @('those compiling the 2 files changed (git: 1 not committed, 1 committed on this branch since it left origin/release/1): AppB\uColors.pas, Shared\uShapes.pas') @('uAppA.pas')
-Check 'compile git base' $gitBase @('those compiling the 3 files changed (git: 1 not committed, 2 committed on this branch since it left origin/main): ', 'AppA\uAppA.pas')
+Check 'compile git clean' $gitClean @("no file has changed since the server started, and git reports no Pascal file changed under ", " (the branch's commits not taken: no remote default branch to diff against - pass ``base``) - name the ``member`` to build (the group has: AppA, AppB, AppF)")
+Check 'compile git not committed' $gitDirty @('compile AppB (Win32): built in', "  those compiling the 1 file changed (git: 1 not committed, the branch's commits not taken: no remote default branch to diff against - pass ``base``): AppB\uColors.pas") @('AppA (Win32')
+Check 'compile git default base' $gitDefault @('compile - 2 members, those compiling the 2 files changed (git: 2 in the 22 commits since the branch left origin/main, more than 20: if the branch left another branch, pass that as `base`): AppA\uAppA.pas, Shared\uShapes.pas')
+Check 'compile git base' $gitBase @('compile - 2 members, those compiling the 1 file changed (git: 1 in the 1 commit since the branch left origin/release/1): Shared\uShapes.pas', 'AppA (Win32 Debug): built in', 'AppB (Win32): built in') @('AppF (', 'uAppA.pas', 'more than')
+Check 'compile git mixed' $gitMixed @('those compiling the 2 files changed (git: 1 not committed, 1 in the 1 commit since the branch left origin/release/1): AppB\uColors.pas, Shared\uShapes.pas') @('uAppA.pas')
 Check 'compile git bad base' $gitBadBase @('git knows no branch or commit `no-such-branch` to diff against')
 
 # ---- 3. MCP over stdio, with an edit in between ------------------------------------
