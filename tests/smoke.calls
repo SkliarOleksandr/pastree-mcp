@@ -18,6 +18,11 @@ find {"query":"TBigCirle"}
 source {"symbol":"TCircleBig"}
 source {"symbol":"TCircle.Areaa"}
 source {"symbol":"Zzzqqq"}
+find {"query":"*Circ*", "scope":"project", "limit":2}
+find {"query":"*Circ*", "scope":"project", "limit":0}
+find {"query":"*Circ*", "in":"Shared"}
+find {"query":"*Circ*", "in":"*TLB*"}
+find {"query":"*Circ*", "in":"NoSuchDir"}
 references {"symbol":"TTint.tnRed"}
 references {"symbol":"tnBlue"}
 references {"symbol":"Dark"}

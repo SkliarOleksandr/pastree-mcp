@@ -117,6 +117,23 @@ type
     Analysis, Mid, Sym: Integer;
     ModelFile: string;
     Own: Boolean;
+    // An own unit a tool wrote (GeneratedUnit): listed after the others.
+    Generated: Boolean;
+  end;
+
+  // What `find` asks of ResolveName beyond its rows: only the files an `in`
+  // filter matches, and every match counted by unit - where a wide pattern
+  // cut at `limit` has its rows, to narrow it by (a field report: 71 rows
+  // for *Customer*, 17 of them the ones wanted, the rest SOAP imports).
+  TFindExtras = class
+  public
+    InFilter: string;
+    ByUnit: TDictionary<string, Integer>;   // unit name -> matches
+    OwnUnits: TDictionary<string, Boolean>; // the group's own, by name
+    Own: Integer;                             // matches in own units
+    Generated: Integer;                       // of them, in generated ones
+    constructor Create;
+    destructor Destroy; override;
   end;
 
   THit = record
@@ -915,7 +932,55 @@ end;
 
 function ResolveName(AWs: TMcpWorkspace; const AQuery, AKind: string;
   AOwnOnly: Boolean; ALimit: Integer; out AMore: Integer;
-  AClimb: Boolean = True): TArray<TTarget>; forward;
+  AClimb: Boolean = True; AExtras: TFindExtras = nil): TArray<TTarget>;
+  forward;
+
+function InFilterMatches(AWs: TMcpWorkspace; const AFile,
+  AFilter: string): Boolean; forward;
+
+constructor TFindExtras.Create;
+begin
+  inherited Create;
+  ByUnit := TDictionary<string, Integer>.Create;
+  OwnUnits := TDictionary<string, Boolean>.Create;
+end;
+
+destructor TFindExtras.Destroy;
+begin
+  OwnUnits.Free;
+  ByUnit.Free;
+  inherited;
+end;
+
+var
+  // GeneratedUnit's answers by file (lower case), on the executor thread.
+  GGenerated: TDictionary<string, Boolean>;
+
+// Was an own unit written by a tool - a type library import (*_TLB), a WSDL
+// import, an XML data binding? Their names flood a wide `find` (TLB enums,
+// SOAP classes) and are rarely what is asked for: listed after the others.
+// By the name and the header the tools write.
+function GeneratedUnit(LM: TPasSemaModel; const AFile: string): Boolean;
+var
+  LText: string;
+begin
+  if GGenerated.TryGetValue(LowerCase(AFile), Result) then
+    Exit;
+  Result := TPath.GetFileNameWithoutExtension(AFile).EndsWith('_TLB', True);
+  if not Result and (LM <> nil) and (Length(LM.Tree.Source.Files) > 0) then
+    for var LLine := 1 to Min(40, Length(LM.Tree.Source.Files[0].LineStarts)) do
+    begin
+      LText := LowerCase(LM.Tree.Source.Files[0].LineText(LLine));
+      if (Pos('were generated from data read from', LText) > 0) or
+         (Pos('xml data binding', LText) > 0) or
+         (Pos('this unit was generated', LText) > 0) then
+      begin
+        Result := True;
+        Break;
+      end;
+    end;
+  GGenerated.AddOrSetValue(LowerCase(AFile), Result);
+end;
 
 // Model AMid with its text, or an error naming its file: a library unit
 // demoted after the build is read back from disk, and one whose file changed
@@ -1592,7 +1657,7 @@ end;
 // qualifier's type inherits (InheritedMembers).
 function ResolveName(AWs: TMcpWorkspace; const AQuery, AKind: string;
   AOwnOnly: Boolean; ALimit: Integer; out AMore: Integer;
-  AClimb: Boolean = True): TArray<TTarget>;
+  AClimb: Boolean = True; AExtras: TFindExtras = nil): TArray<TTarget>;
 var
   LParts, LQuals, LChain: TArray<string>;
   LName: string;
@@ -1608,7 +1673,7 @@ var
   LHit: TPasRefHit;
   LKey, LFile: string;
   LIdx, LSeenIdx: Integer;
-  LOk: Boolean;
+  LOk, LGen: Boolean;
 begin
   AMore := 0;
   if SameText(AKind, 'unit') then
@@ -1664,7 +1729,11 @@ begin
           LFile := LA.Proj.ModelFile(LMid);
           if AOwnOnly and not AWs.IsOwnFile(LFile) then
             Continue;
+          if (AExtras <> nil) and (AExtras.InFilter <> '') and
+             not InFilterMatches(AWs, LFile, AExtras.InFilter) then
+            Continue;
           LM := LA.Proj.Model(LMid);
+          LGen := AWs.IsOwnFile(LFile) and GeneratedUnit(LM, LFile);
           for var LSym := 0 to LM.SymCount - 1 do
           begin
             if LWild then
@@ -1709,6 +1778,7 @@ begin
             LMatch.Sym := LSym;
             LMatch.ModelFile := LFile;
             LMatch.Own := AWs.IsOwnFile(LFile);
+            LMatch.Generated := LGen;
             // A scoped enum's value not written as TEnum.Value is taken only
             // when nothing else has the name, as the compiler never reads it
             // so: the RTL's scoped `Exception` value would make the class
@@ -1729,6 +1799,8 @@ begin
       begin
         Result := Ord(R.Own) - Ord(L.Own);
         if Result = 0 then
+          Result := Ord(L.Generated) - Ord(R.Generated);
+        if Result = 0 then
           Result := CompareText(L.ModelFile, R.ModelFile);
         if Result = 0 then
           Result := L.Sym - R.Sym;
@@ -1736,6 +1808,29 @@ begin
           Result := L.Analysis - R.Analysis;
       end));
 
+    // Every match by unit, for `find` to say where a cut list has the rest.
+    // A declaration in two analyses is one, as below.
+    if AExtras <> nil then
+      for LIdx := 0 to LRaw.Count - 1 do
+      begin
+        LMatch := LRaw[LIdx];
+        LKey := LowerCase(LMatch.ModelFile) + '|' + IntToStr(AWs.Analyses[
+          LMatch.Analysis].Proj.Model(LMatch.Mid).Symbols[LMatch.Sym].DeclNode);
+        if not LMoreKeys.TryAdd(LKey, True) then
+          Continue;
+        LKey := UnitNameOfFile(LMatch.ModelFile);
+        if not AExtras.ByUnit.TryGetValue(LKey, LSeenIdx) then
+          LSeenIdx := 0;
+        AExtras.ByUnit.AddOrSetValue(LKey, LSeenIdx + 1);
+        if LMatch.Own then
+        begin
+          Inc(AExtras.Own);
+          AExtras.OwnUnits.AddOrSetValue(LKey, LMatch.Generated);
+        end;
+        if LMatch.Generated then
+          Inc(AExtras.Generated);
+      end;
+    LMoreKeys.Clear;
     // Declaration sites only for the ones shown: a site costs a rehydration
     // of a demoted library unit, and `Create` matches 25000 times on the
     // client group. The rest are counted by model file + declaration node,
@@ -3038,6 +3133,54 @@ begin
   Result := AWs.StatusText;
 end;
 
+// `by unit: uFoo 20, uBar_TLB 13 [generated]; libraries: Vcl.Controls 4,
+// ...` - the group's own units first, the most first in each, at most
+// SHOWN of each.
+function UnitCounts(AExtras: TFindExtras): string;
+const
+  SHOWN = 12;
+var
+  LPairs: TArray<TPair<string, Integer>>;
+  LOwn, LLib: TArray<string>;
+  LOwnMore, LLibMore: Integer;
+  LGen: Boolean;
+begin
+  LPairs := AExtras.ByUnit.ToArray;
+  TArray.Sort<TPair<string, Integer>>(LPairs,
+    TComparer<TPair<string, Integer>>.Construct(
+      function(const L, R: TPair<string, Integer>): Integer
+      begin
+        Result := R.Value - L.Value;
+        if Result = 0 then
+          Result := CompareText(L.Key, R.Key);
+      end));
+  LOwn := nil;
+  LLib := nil;
+  LOwnMore := 0;
+  LLibMore := 0;
+  for var LP in LPairs do
+    if AExtras.OwnUnits.TryGetValue(LP.Key, LGen) then
+    begin
+      if Length(LOwn) < SHOWN then
+        LOwn := LOwn + [Format('%s %d%s', [LP.Key, LP.Value, IfThen(LGen,
+          ' [generated]')])]
+      else
+        Inc(LOwnMore);
+    end
+    else if Length(LLib) < SHOWN then
+      LLib := LLib + [Format('%s %d', [LP.Key, LP.Value])]
+    else
+      Inc(LLibMore);
+  if LOwnMore > 0 then
+    LOwn := LOwn + [Format('... (+%d units)', [LOwnMore])];
+  if LLibMore > 0 then
+    LLib := LLib + [Format('... (+%d units)', [LLibMore])];
+  Result := 'by unit: ' + String.Join(', ', LOwn);
+  if Length(LLib) > 0 then
+    Result := Result + IfThen(Length(LOwn) > 0, '; ') + 'libraries: ' +
+      String.Join(', ', LLib);
+end;
+
 procedure AppendLike(ASb: TStringBuilder; AWs: TMcpWorkspace;
   const ALike: TArray<TTarget>);
 begin
@@ -3056,6 +3199,8 @@ var
   LSb: TStringBuilder;
   LFallback, LOwnOnly: Boolean;
   LAll, LOwn: Integer;
+  LExtras: TFindExtras;
+  LIn: string;
 begin
   LLike := nil;
   LQuery := ArgStr(AArgs, 'query');
@@ -3070,24 +3215,34 @@ begin
   if not LOwnOnly then
     QFind(AWs, LQuery, SameText(LKind, 'unit') or ((LKind = '') and
       not IsWildPattern(LQuery)));
-  LCands := ResolveName(AWs, LQuery, LKind, LOwnOnly, LLimit, LMore);
-  LFallback := False;
-  if (Length(LCands) = 0) and (LMore = 0) and (Pos('*', LQuery) = 0) and
-     (Pos('?', LQuery) = 0) then
-  begin
-    // Nothing by that exact name: the agent often half-remembers one.
-    if not LOwnOnly then
-      QFind(AWs, '*' + LQuery + '*', SameText(LKind, 'unit'));
-    LCands := ResolveName(AWs, '*' + LQuery + '*', LKind, LOwnOnly, LLimit,
-      LMore);
-    LFallback := True;
-    // A half-remembered name rarely contains the real one: TaviCreditStatus
-    // for TCreditStatus (a field report). The same words, or a misspelling.
-    if LLimit > 0 then
-      LLike := SimilarNames(AWs, LQuery, LKind, LOwnOnly, Min(LLimit, 8));
-  end;
-  LSb := TStringBuilder.Create;
+  LSb := nil;
+  LExtras := TFindExtras.Create;
   try
+    LExtras.InFilter := Trim(ArgStr(AArgs, 'in'));
+    LIn := IfThen(LExtras.InFilter <> '', Format(' in files matching `%s`',
+      [LExtras.InFilter]));
+    LCands := ResolveName(AWs, LQuery, LKind, LOwnOnly, LLimit, LMore, True,
+      LExtras);
+    LFallback := False;
+    if (Length(LCands) = 0) and (LMore = 0) and (Pos('*', LQuery) = 0) and
+       (Pos('?', LQuery) = 0) then
+    begin
+      // Nothing by that exact name: the agent often half-remembers one.
+      if not LOwnOnly then
+        QFind(AWs, '*' + LQuery + '*', SameText(LKind, 'unit'));
+      LExtras.ByUnit.Clear;
+      LExtras.OwnUnits.Clear;
+      LExtras.Own := 0;
+      LExtras.Generated := 0;
+      LCands := ResolveName(AWs, '*' + LQuery + '*', LKind, LOwnOnly, LLimit,
+        LMore, True, LExtras);
+      LFallback := True;
+      // A half-remembered name rarely contains the real one: TaviCreditStatus
+      // for TCreditStatus (a field report). The same words, or a misspelling.
+      if LLimit > 0 then
+        LLike := SimilarNames(AWs, LQuery, LKind, LOwnOnly, Min(LLimit, 8));
+    end;
+    LSb := TStringBuilder.Create;
     // Nothing of that name in the index: say what the index is, and where
     // the name is written outside it - a unit no project uses is invisible
     // to every tool, and nothing else would say so.
@@ -3097,14 +3252,15 @@ begin
       begin
         QClosure(AWs);
         LAll := AWs.IndexedUnitCount(LOwn);
-        LSb.AppendLine(Format('no declaration%s matches `%s` among the group''s '
-          + 'own %d units (%d with the libraries; `scope: all` searches those '
-          + 'too)', [IfThen(LKind <> '', ' of kind ' + LKind), LQuery, LOwn,
-          LAll]));
+        LSb.AppendLine(Format('no declaration%s matches `%s`%s among the '
+          + 'group''s own %d units (%d with the libraries; `scope: all` searches '
+          + 'those too)', [IfThen(LKind <> '', ' of kind ' + LKind), LQuery,
+          LIn, LOwn, LAll]));
       end
       else
-        LSb.AppendLine(Format('no declaration%s matches `%s` among %s',
-          [IfThen(LKind <> '', ' of kind ' + LKind), LQuery, IndexScope(AWs)]));
+        LSb.AppendLine(Format('no declaration%s matches `%s`%s among %s',
+          [IfThen(LKind <> '', ' of kind ' + LKind), LQuery, LIn,
+          IndexScope(AWs)]));
       AppendLike(LSb, AWs, LLike);
       LSb.AppendLine(OutsideIndexNote(AWs, LQuery, True));
       Exit(LSb.ToString.TrimRight);
@@ -3119,8 +3275,15 @@ begin
       LSb.AppendLine(Format('%s match (limit 0: none listed)', [Plural(LMore,
         'declaration')]))
     else if LMore > 0 then
-      LSb.AppendLine(Format('... %d more (narrow the query, add `kind`, or '
-        + 'raise `limit`)', [LMore]));
+      LSb.AppendLine(Format('... %d more (narrow the query, add `kind` or '
+        + '`in`, or raise `limit`)', [LMore]));
+    if (LMore > 0) and (LExtras.ByUnit.Count > 1) then
+      LSb.AppendLine(UnitCounts(LExtras));
+    // Said where it reorders: some own matches are generated, some not.
+    if (LExtras.Generated > 0) and (LExtras.Generated < LExtras.Own) then
+      LSb.AppendLine(Format('(%d in generated units - type library, WSDL and '
+        + 'XML binding imports - listed after the others)',
+        [LExtras.Generated]));
     AppendLike(LSb, AWs, LLike);
     // The names containing it may be the wrong ones when the name itself is
     // declared in a unit nothing uses.
@@ -3129,6 +3292,7 @@ begin
     Result := LSb.ToString.TrimRight;
   finally
     LSb.Free;
+    LExtras.Free;
   end;
 end;
 
@@ -18170,6 +18334,9 @@ const
     + 'field, property, enum (a value), unit"},'
     + '"scope":{"type":"string","enum":["all","project"],"description":'
     + '"project = only the group''s own units (default all)"},'
+    + '"in":{"type":"string","description":"Only the declarations in files '
+    + 'whose path relative to the group contains this (a directory, a file '
+    + 'name) or matches it as a wildcard (Payments\\*, *Stripe*)"},'
     + '"limit":{"type":"integer","description":"Max rows (default 30; '
     + '0: the counts and notes alone, no rows)"}},'
     + '"required":["query"]}},' +
@@ -18890,8 +19057,10 @@ end;
 
 initialization
   LoadToolProps;
+  GGenerated := TDictionary<string, Boolean>.Create;
 
 finalization
+  GGenerated.Free;
   GToolProps.Free;
   GToolCatalogue.Free;
 

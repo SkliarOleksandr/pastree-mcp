@@ -130,7 +130,15 @@ Check 'find similar misspelt' (Block $b 'find {"query":"TBigCirle"}') @("names l
 Check 'source similar' (Block $b 'source {"symbol":"TCircleBig"}') @('no declaration named `TCircleBig` among ', "names like it in the group's own units:`n  AppB\uAppB.pas:11  TBigCircle (class)")
 Check 'source similar member' (Block $b 'source {"symbol":"TCircle.Areaa"}') @("names like it in the group's own units:`n  Shared\uShapes.pas:26  TCircle.Area (function)")
 Check 'source nothing like' (Block $b 'source {"symbol":"Zzzqqq"}') @("no name of the group's own units contains ``Zzzqqq`` or is like it either")
-Check 'references enum value'(Block $b 'references {"symbol":"TTint.tnRed"}') @('TTint.tnRed (enum value) declared at AppB\uColors.pas:11 - 1 references in 1 files', "  TintName`n    25  tnRed: Result := 'red';")
+# A type library import's names after the others; where a cut list has the
+# rest, by unit; only the files `in` names.
+Check 'find generated last' (Block $b 'find {"query":"*Circ*", "scope":"project"}') @("Shared\uShapes.pas:21  TCircle (class)  TCircle = class(TShape)`nAppB\Shapes_TLB.pas:16  TCircleStyle (type)", 'AppB\Shapes_TLB.pas:18  ICircleDisp (interface)', '(2 in generated units - type library, WSDL and XML binding imports - listed after the others)')
+Check 'find by unit' (Block $b 'find {"query":"*Circ*", "scope":"project", "limit":2}') @("AppB\uAppB.pas:11  TBigCircle (class)", '... 2 more (narrow the query, add `kind` or `in`, or raise `limit`)', 'by unit: Shapes_TLB 2 [generated], uAppB 1, uShapes 1') @('Shapes_TLB.pas:16', 'libraries:')
+Check 'find by unit count' (Block $b 'find {"query":"*Circ*", "scope":"project", "limit":0}') @('4 declarations match (limit 0: none listed)', 'by unit: Shapes_TLB 2 [generated], uAppB 1, uShapes 1')
+Check 'find in' (Block $b 'find {"query":"*Circ*", "in":"Shared"}') @('Shared\uShapes.pas:21  TCircle (class)') @('TBigCircle', 'Shapes_TLB', 'Embarcadero')
+Check 'find in wildcard' (Block $b 'find {"query":"*Circ*", "in":"*TLB*"}') @('AppB\Shapes_TLB.pas:16  TCircleStyle (type)', 'AppB\Shapes_TLB.pas:18  ICircleDisp (interface)') @('uShapes', 'generated units')
+Check 'find in nothing' (Block $b 'find {"query":"*Circ*", "in":"NoSuchDir"}') @('no declaration matches `*Circ*` in files matching `NoSuchDir` among ')
+Check 'references enum value' (Block $b 'references {"symbol":"TTint.tnRed"}') @('TTint.tnRed (enum value) declared at AppB\uColors.pas:11 - 1 references in 1 files', "  TintName`n    25  tnRed: Result := 'red';")
 Check 'references enum value unused' (Block $b 'references {"symbol":"tnBlue"}') @('TTint.tnBlue (enum value) declared at AppB\uColors.pas:11 - 0 references in 0 files')
 Check 'references scoped value bare' (Block $b 'references {"symbol":"Dark"}') @('TShade.Dark (enum value) declared at AppB\uColors.pas:14 - 1 references', '    34  Result := AShade = TShade.Dark;')
 # By name: the identifier, not the same word in a string before it; and the
@@ -145,7 +153,7 @@ Check 'definition inactive' (Block $b 'definition {"file":"AppB/uBoxes.pas","lin
 Check 'find joined cut' (Block $b 'find {"query":"TWideBox.Many"}') @('AppB\uBoxes.pas:74  TWideBox.Many (procedure)  procedure Many(const AAlphaName, ABetaName, AGammaName: string; ADeltaCount, AEpsilonCount, AZetaCount: Integer; const AEtaText, AThetaText, ...); virtual;')
 # A name no declaration matches: what the index is, and where the name is
 # written outside it - in a unit no project uses - or that it is nowhere.
-Check 'find outside the index' (Block $b 'find {"query":"OrphanRoutine"}') @('no declaration matches `OrphanRoutine` among the ', ' units indexed - what the 3 projects of Fixture.groupproj compile: 46 of their own, ', "``OrphanRoutine`` is written in 1 file(s) that no indexed project uses - no tool here sees them:`n  AppB\uOrphan.pas:8  procedure OrphanRoutine;")
+Check 'find outside the index' (Block $b 'find {"query":"OrphanRoutine"}') @('no declaration matches `OrphanRoutine` among the ', ' units indexed - what the 3 projects of Fixture.groupproj compile: 47 of their own, ', "``OrphanRoutine`` is written in 1 file(s) that no indexed project uses - no tool here sees them:`n  AppB\uOrphan.pas:8  procedure OrphanRoutine;")
 Check 'find nowhere' (Block $b 'find {"query":"NothingAnywhere"}') @('no declaration matches `NothingAnywhere` among the ', 'no Pascal file outside them writes `NothingAnywhere` either (1 searched, under the group directory')
 Check 'definition' (Block $b 'definition {"symbol":"TCircle.Area"') @('declared at Shared\uShapes.pas:26', 'implemented at Shared\uShapes.pas:53', 'Result := Pi * FRadius * FRadius;')
 Check 'source' (Block $b 'source {"symbol":"TCircle.Area"}') @('TCircle.Area (function) implemented at Shared\uShapes.pas:53-56', "53  function TCircle.Area: Double;`n54  begin", "56  end;`n") @('declared at')
@@ -575,7 +583,7 @@ Check 'lint none in' (Block $b 'lint {"in":"AppF","rules":"uses-to-implementatio
 # of an ancestor of one (TLabel's TGraphicControl: Vcl.Controls) - the
 # designer puts those back on save (PasTree.Sema.Lint, 0.93.3).
 Check 'lint form file' (Block $b 'lint {"file":"AppF/uMainForm.pas"}') @('no findings (unused-uses, uses-to-implementation) in AppF\uMainForm.pas')
-Check 'lint count only' (Block $b 'lint {"limit":0}') @('15 findings in 9 files of 43 own units: unused-uses 12, uses-to-implementation 3 - 7 with a "but"') @('AppB\', 'more (raise')
+Check 'lint count only' (Block $b 'lint {"limit":0}') @('15 findings in 9 files of 44 own units: unused-uses 12, uses-to-implementation 3 - 7 with a "but"') @('AppB\', 'more (raise')
 Check 'lint cut' (Block $b 'lint {"limit":2}') @('AppB\uBoxes.pas:10:19: unused-uses uColors', '... 13 more (raise `limit`, or narrow with `file`, `in` or `rules`)')
 Check 'lint together' (Block $b 'lint {"file":"AppB/uLintBase.pas"}') @('AppB\uLintBase.pas:10:3: unused-uses uLintReg - no name of it is used here; but removed with the other unused-uses rows that have no "but", it leaves uLintReg (initialization) out of AppB - keep it, or another row saying so')
 # uLintDef lists uLintOnce under FIXTURE_A, which the shared analysis takes
@@ -594,14 +602,14 @@ Check 'lint program' (Block $b 'lint {"file":"AppB/AppB.dpr"}') @('AppB\AppB.dpr
 # uRcD.TRcD, uRcN through uRcM.RcM), not uRcB, which lists uRcA and binds
 # nothing, nor uRcF; an inline routine's and a generic's bodies are part of
 # them (uRcG, uRcQ); a method reached through a value is its class (uRcH).
-Check 'metrics recompile unit' (Block $b 'metrics {"metric":"recompile","file":"AppB/uRcA.pas"}') @('a change to the interface of AppB\uRcA.pas recompiles 8 own units besides uRcA - AppB 8 of its 34', 'except in the bodies of its inline routines and generic types, part of their declarations: TRcGen and RcInline', 'by declaration, the units a change to each recompiles: RcA 3, TRcRec 2, RcInline 1, RcObj 1, TRcGen 1 and TRcObj 1; 2 recompile no other unit', 'uRcD.TRcD (takes in uRcA.TRcRec) 1 and uRcM.RcM (takes in uRcA.RcA) 1', '  AppB\uRcE.pas - binds TRcRec and uRcD.TRcD', '  AppB\uRcH.pas - binds TRcObj and RcObj', '  AppB\uRcN.pas - binds uRcM.RcM', '  AppB\uRcQ.pas - binds TRcGen') @('uRcB.pas', 'uRcF.pas')
+Check 'metrics recompile unit' (Block $b 'metrics {"metric":"recompile","file":"AppB/uRcA.pas"}') @('a change to the interface of AppB\uRcA.pas recompiles 8 own units besides uRcA - AppB 8 of its 35', 'except in the bodies of its inline routines and generic types, part of their declarations: TRcGen and RcInline', 'by declaration, the units a change to each recompiles: RcA 3, TRcRec 2, RcInline 1, RcObj 1, TRcGen 1 and TRcObj 1; 2 recompile no other unit', 'uRcD.TRcD (takes in uRcA.TRcRec) 1 and uRcM.RcM (takes in uRcA.RcA) 1', '  AppB\uRcE.pas - binds TRcRec and uRcD.TRcD', '  AppB\uRcH.pas - binds TRcObj and RcObj', '  AppB\uRcN.pas - binds uRcM.RcM', '  AppB\uRcQ.pas - binds TRcGen') @('uRcB.pas', 'uRcF.pas')
 Check 'metrics recompile symbol' (Block $b 'metrics {"metric":"recompile","symbol":"TRcRec"}') @('a change to TRcRec (AppB\uRcA.pas:16) recompiles 2 own units besides uRcA', '  AppB\uRcD.pas - binds TRcRec', '  AppB\uRcE.pas - binds TRcRec and uRcD.TRcD') @('uRcC')
 Check 'metrics recompile member' (Block $b 'metrics {"metric":"recompile","symbol":"TRcObj.Touch"}') @('TRcObj.Touch is part of TRcObj', 'a change to its body recompiles uRcA.pas alone', '  AppB\uRcH.pas - binds TRcObj and RcObj')
 Check 'metrics recompile nothing' (Block $b 'metrics {"metric":"recompile","symbol":"RcB"}') @('a change to RcB (AppB\uRcA.pas:13) recompiles no own unit but uRcA - none binds what changes')
 Check 'metrics recompile unit nothing' (Block $b 'metrics {"metric":"recompile","file":"AppB/uRcN.pas"}') @('a change to the interface of AppB\uRcN.pas recompiles no own unit but uRcN')
 # uShapes is in both of AppA's and AppB's builds: the units of each.
-Check 'metrics recompile shared' (Block $b 'metrics {"metric":"recompile","file":"Shared/uShapes.pas"}') @('recompiles 2 own units besides uShapes - AppA 1 of its 3 and AppB 1 of its 34', '  AppA\uAppA.pas - binds TShape and TCircle', '  AppB\uAppB.pas - binds TCircle, TSquare and TotalArea')
-Check 'metrics recompile ranked' (Block $b 'metrics {"metric":"recompile","limit":1}') @('17 of 43 own units recompile other own units when their interface changes', 'AppB\uRcA.pas: 8 (AppB 8) - most through RcA 3, TRcRec 2 and 4 more', '... 16 more (raise `limit`')
+Check 'metrics recompile shared' (Block $b 'metrics {"metric":"recompile","file":"Shared/uShapes.pas"}') @('recompiles 2 own units besides uShapes - AppA 1 of its 3 and AppB 1 of its 35', '  AppA\uAppA.pas - binds TShape and TCircle', '  AppB\uAppB.pas - binds TCircle, TSquare and TotalArea')
+Check 'metrics recompile ranked' (Block $b 'metrics {"metric":"recompile","limit":1}') @('17 of 44 own units recompile other own units when their interface changes', 'AppB\uRcA.pas: 8 (AppB 8) - most through RcA 3, TRcRec 2 and 4 more', '... 16 more (raise `limit`')
 Check 'metrics recompile cut' (Block $b 'metrics {"metric":"recompile","file":"AppB/uRcA.pas","limit":2}') @('  AppB\uRcD.pas - binds TRcRec', '  ... 6 more (raise `limit`)') @('uRcE.pas')
 Check 'metrics recompile program' (Block $b 'metrics {"metric":"recompile","file":"AppB/AppB.dpr"}') @('AppB\AppB.dpr is no unit whose interface declares anything')
 Check 'metrics recompile library' (Block $b 'metrics {"metric":"recompile","symbol":"Winapi.Windows.SendMessage"}') @('not in the group''s own code - its .dcu is prebuilt')
@@ -609,10 +617,10 @@ Check 'metrics bad metric' (Block $b 'metrics {"metric":"nope"}') @('unknown met
 Check 'metrics no metric' (Block $b 'metrics {}') @('give `metric`: recompile')
 # uCycA -> uCycB ~> uCycA, and uCycA ~> uCycC ~> uCycA through an entry lint
 # finds unused: without it the cycle is two units.
-Check 'metrics cycles' (Block $b 'metrics {"metric":"cycles"}') @('1 `uses` cycle among the 43 own units, 3 units on it', 'cycle of 3 units in AppB, 4 `uses` entries among them (3 in implementation): uCycA, uCycB and uCycC', '  shortest through uCycA: uCycA -> uCycB ~> uCycA', '  unused (lint): AppB\uCycA.pas:16 uCycC - without those with no `but`, the largest cycle left is 2 units: uCycB and uCycA')
+Check 'metrics cycles' (Block $b 'metrics {"metric":"cycles"}') @('1 `uses` cycle among the 44 own units, 3 units on it', 'cycle of 3 units in AppB, 4 `uses` entries among them (3 in implementation): uCycA, uCycB and uCycC', '  shortest through uCycA: uCycA -> uCycB ~> uCycA', '  unused (lint): AppB\uCycA.pas:16 uCycC - without those with no `but`, the largest cycle left is 2 units: uCycB and uCycA')
 Check 'metrics cycles file' (Block $b 'metrics {"metric":"cycles","file":"AppB/uCycC.pas"}') @('  shortest through uCycC: uCycC ~> uCycA ~> uCycC')
 Check 'metrics cycles none' (Block $b 'metrics {"metric":"cycles","file":"AppB/uRcA.pas"}') @('AppB\uRcA.pas is on no `uses` cycle')
-Check 'metrics cycles count only' (Block $b 'metrics {"metric":"cycles","limit":0}') @('1 `uses` cycle among the 43 own units') @('shortest')
+Check 'metrics cycles count only' (Block $b 'metrics {"metric":"cycles","limit":0}') @('1 `uses` cycle among the 44 own units') @('shortest')
 }
 $script:mode = ''
 
@@ -693,11 +701,11 @@ Check 'strict rename_plan' (Block $b 'rename_plan {"symbol":"TCircle","new_name"
 Check 'strict rename_plan unit' (Block $b 'rename_plan {"symbol":"uShapes"') @('to uShapesNew - 5 edits in 4 files')
 Check 'strict change_plan' (Block $b 'change_plan {"symbol":"TShape.Area"}') @('the signature on 8 lines in 2 files, 4 other routines tied to it; 3 calls in 3 routines')
 Check 'strict descendants' (Block $b 'related {"relation":"descendants"') @('descendants of TShape (Shared\uShapes.pas:15): 3', 'TBigCircle <- TCircle')
-Check 'strict lint' (Block $b 'lint {"limit":0}') @('14 findings in 8 files of 43 own units: unused-uses 12, uses-to-implementation 2 - 7 with a "but"')
+Check 'strict lint' (Block $b 'lint {"limit":0}') @('14 findings in 8 files of 44 own units: unused-uses 12, uses-to-implementation 2 - 7 with a "but"')
 # AppB's own analysis does not compile uLintDef's FIXTURE_A entries.
 Check 'strict lint conditional' (Block $b 'lint {"file":"AppB/uLintDef.pas"}') @('no findings (unused-uses, uses-to-implementation) in AppB\uLintDef.pas')
-Check 'strict metrics recompile shared' (Block $b 'metrics {"metric":"recompile","file":"Shared/uShapes.pas"}') @('recompiles 2 own units besides uShapes - AppA 1 of its 3 and AppB 1 of its 34', '  AppA\uAppA.pas - binds TShape and TCircle', '  AppB\uAppB.pas - binds TCircle, TSquare and TotalArea')
-Check 'strict metrics recompile unit' (Block $b 'metrics {"metric":"recompile","file":"AppB/uRcA.pas"}') @('recompiles 8 own units besides uRcA - AppB 8 of its 34')
+Check 'strict metrics recompile shared' (Block $b 'metrics {"metric":"recompile","file":"Shared/uShapes.pas"}') @('recompiles 2 own units besides uShapes - AppA 1 of its 3 and AppB 1 of its 35', '  AppA\uAppA.pas - binds TShape and TCircle', '  AppB\uAppB.pas - binds TCircle, TSquare and TotalArea')
+Check 'strict metrics recompile unit' (Block $b 'metrics {"metric":"recompile","file":"AppB/uRcA.pas"}') @('recompiles 8 own units besides uRcA - AppB 8 of its 35')
 Check 'strict metrics cycles' (Block $b 'metrics {"metric":"cycles"}') @('cycle of 3 units in AppB', 'the largest cycle left is 2 units')
 Check 'strict overrides' (Block $b 'related {"relation":"overrides"') @('overrides of TShape.Area (Shared\uShapes.pas:17): 4')
 # Rows of both analyses in one walk: RunA is project A's, the rest project B's.

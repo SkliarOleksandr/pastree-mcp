@@ -93,6 +93,15 @@ Common rules:
   column). A search runs in every analysis holding that site and the rows are
   merged and de-duplicated by hit site.
 - **Order**: the group's own files first, then libraries; by file and line.
+  An own unit a tool wrote - a type library import (`*_TLB`), a WSDL
+  import, an XML data binding, told by its name and the header the tool
+  writes - after the other own ones, and `find` says how many (0.38.0).
+- **`find` narrows** (0.38.0): `in` takes the files whose path contains it
+  or matches it as a wildcard, as `references` does; a list cut at `limit`
+  (and `limit: 0`) counts the matches by unit, the own units first - where
+  the rest are, to narrow by. A field report: `*Customer*` gave 71 rows, 17
+  of them the ones wanted, the rest SOAP and TLB imports, with nothing to
+  say where; `path` was taken for a filter and dropped without a word.
 - **The cap and the count**: `limit` caps the rows; the header counts every
   row, cut or not, and the cut says how many it left out. `limit: 0` (0.19.0,
   every tool that lists rows: `find`, `references`, `callers`, `callees`,
