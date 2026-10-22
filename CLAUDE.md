@@ -72,10 +72,13 @@ be a wrong answer rather than a compile error.
 ## Building and testing
 
 ```
-build.bat [RAD Studio version] [--yes]
+build.bat [RAD Studio version] [--yes] [--test]
 ```
 
-It must end with `built, smoke test passed`. `tests\smoke.ps1` runs every tool
+Without `--test` it only builds (`built, smoke test not run`) - the quick
+rebuild before restarting a session. A change is verified by
+`build.bat --test`, which must end with `built, smoke test passed`.
+`tests\smoke.ps1` runs every tool
 through the CLI (both group policies) and once through real MCP stdio with an
 edit on disk in between; the expectations pin fixture line numbers. `compile`
 really builds the fixture - AppA with MSBuild (its `.dproj` imports the

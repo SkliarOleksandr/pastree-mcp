@@ -1,10 +1,20 @@
 @echo off
-rem Build pastree-mcp.exe (Win64) and run the smoke test over the fixture group.
-rem It must end with "built, smoke test passed"; anything else is a failure.
+rem Build pastree-mcp.exe (Win64) and, with --test, run the smoke test over the
+rem fixture group.
 rem
 rem Takes the same arguments as scripts\ide.bat (copied from pastree-lsp): an
-rem explicit RAD Studio version and/or --yes. The IDE does NOT have to be
-rem closed - nothing here is loaded by it - but a Claude Code session may be
+rem explicit RAD Studio version and/or --yes. Plus one of its own:
+rem
+rem   --test   run tests\smoke.ps1 after building.
+rem
+rem THE SMOKE TEST RUNS ONLY ON REQUEST, as in pastree-lsp. It starts the
+rem server over the fixture many times, compiles the fixture for real and grows
+rem with every tool; a rebuild before restarting a session gets nothing from
+rem that wait (Alex, 2026-10-22). A change is not verified until
+rem "build.bat --test" ends with "built, smoke test passed"; anything else is
+rem a failure.
+rem
+rem The IDE does NOT have to be closed - nothing here is loaded by it - but a Claude Code session may be
 rem running out\pastree-mcp.exe as its MCP server; see the rename below.
 rem
 rem Requires PasTree as a sibling: ..\object-pascal-tree. It is the only
@@ -15,7 +25,25 @@ rem session, whose half-done change would otherwise go into this exe.
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
-call "%~dp0scripts\ide.bat" %*
+rem --test is this script's alone: scripts\ide.bat takes any word it does not
+rem know for a RAD Studio version, so it is taken out before the rest goes on.
+rem SHIFT MOVES %0 TOO, so the script's own directory is kept before the loop:
+rem %~dp0 after it names wherever the last argument pointed.
+set "LHERE=%~dp0"
+set "LRUNTESTS="
+set "LIDEARGS="
+:args
+if "%~1"=="" goto :argsdone
+if /i "%~1"=="--test" (
+  set "LRUNTESTS=1"
+) else (
+  set "LIDEARGS=!LIDEARGS! %1"
+)
+shift
+goto :args
+:argsdone
+
+call "%LHERE%scripts\ide.bat" %LIDEARGS%
 if errorlevel 1 exit /b 1
 call "%BDSROOT%\bin\rsvars.bat"
 
@@ -62,6 +90,12 @@ for %%F in (out\pastree-mcp.exe.old*) do del /q "%%F" >nul 2>&1
 
 "out\pastree-mcp.exe" --version
 if errorlevel 1 goto :fail
+
+if not defined LRUNTESTS (
+  echo.
+  echo built, smoke test not run ^(build.bat --test runs it^)
+  exit /b 0
+)
 
 echo === smoke test ===
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\smoke.ps1 -Exe "%CD%\out\pastree-mcp.exe"

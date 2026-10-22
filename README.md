@@ -81,8 +81,8 @@ checked out next to this repository as `..\object-pascal-tree`.
 build.bat 37.0
 ```
 
-builds `out\pastree-mcp.exe` (Win64) and runs the smoke test. It must end with
-`built, smoke test passed`.
+builds `out\pastree-mcp.exe` (Win64). `build.bat 37.0 --test` also runs the
+smoke test (`tests\smoke.ps1`) and must end with `built, smoke test passed`.
 
 `pastree-mcp.dproj` builds the same exe by hand - in RAD Studio, or with
 `msbuild pastree-mcp.dproj /p:Config=Release` from a RAD Studio command

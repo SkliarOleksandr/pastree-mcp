@@ -39,7 +39,7 @@
         <SanitizedProjectName>pastree_mcp</SanitizedProjectName>
         <VerInfo_IncludeVerInfo>false</VerInfo_IncludeVerInfo>
         <VerInfo_Locale>1033</VerInfo_Locale>
-        <!-- build.bat is the reference build (it also runs the smoke test);
+        <!-- build.bat is the reference build (with --test it also runs the smoke test);
              this project builds the same exe by hand - in the IDE or with
              msbuild - and is what the server reads to index this repository
              (.mcp.json). Keep the namespaces, the search path and the output
