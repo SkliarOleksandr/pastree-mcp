@@ -17350,7 +17350,7 @@ var
   LV: TJSONValue;
   LFound: Integer;
   LReach: TMemberReach;
-  LFile, LAll, LSince, LGitWhat: string;
+  LFile, LAll, LSince, LGitWhat, LGitError: string;
   LIn: TArray<Boolean>;
   LGitOk: Boolean;
 begin
@@ -17411,15 +17411,20 @@ begin
         // before the session starts, and "build what I changed" is then
         // what git says changed (a field report: the call without arguments
         // was empty exactly when it was wanted most).
-        if Length(LChanged) = 0 then
+        // `base` asks git whatever this session edited.
+        LGitOk := True;
+        if (Length(LChanged) = 0) or (ArgStr(AArgs, 'base') <> '') then
         begin
-          for var LOne in GitChangedFiles(AWs.Root, LGitWhat, LGitOk) do
-            if MatchText(ExtractFileExt(LOne), ['.pas', '.inc', '.dpr',
-               '.dpk']) then
+          LChanged := nil;
+          for var LOne in GitChangedFiles(AWs.Root, ArgStr(AArgs, 'base'),
+            LGitWhat, LGitError, LGitOk) do
+            if not SameText(ExtractFileExt(LOne), '.dfm') then
               LChanged := LChanged + [LOne]
-            else if SameText(ExtractFileExt(LOne), '.dfm') and
-               FileExists(ChangeFileExt(LOne, '.pas')) then
+            else if FileExists(ChangeFileExt(LOne, '.pas')) and
+               (IndexText(ChangeFileExt(LOne, '.pas'), LChanged) < 0) then
               LChanged := LChanged + [ChangeFileExt(LOne, '.pas')];
+          if LGitError <> '' then
+            raise EToolError.Create(LGitError);
           LSince := 'changed (git: ' + LGitWhat + ')';
         end;
         if Length(LChanged) = 0 then
@@ -18556,8 +18561,8 @@ const
     + 'member''s previous compile (the old ones are counted). With no '
     + 'arguments it builds the members of the group that compile the files '
     + 'changed this session - none changed, those git reports changed (not '
-    + 'committed, else the branch''s own since it left origin''s default '
-    + 'branch), named in the answer. Everything is written to a directory of the '
+    + 'committed, and the branch''s own commits since it left its base - '
+    + '`base`), named in the answer. Everything is written to a directory of the '
     + 'server''s own (the answer names the exe it built - a build '
     + 'check, not a copy to run: a console test runner may run from there, an '
     + 'application or server misses the files beside the project''s own output): the project''s output, its .dcu files and the source tree '
@@ -18578,6 +18583,10 @@ const
     + 'too"},'
     + '"rebuild":{"type":"boolean","description":"Recompile every unit, not '
     + 'only what changed (default false)"},'
+    + '"base":{"type":"string","description":"Without member or file: build '
+    + 'what git says changed - not committed, and committed on this branch '
+    + 'since it left this branch or commit (default: the nearest of origin''s '
+    + 'main, master, develop, release/*, its default branch)"},'
     + '"limit":{"type":"integer","description":"Max rows (default 60)"}}}},' +
 
     '{"name":"related","description":"Relations across the group. '

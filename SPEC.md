@@ -580,9 +580,13 @@ unit repeats once per importer), capped, errors first. `hints: false` by
 default.
 
 - **Without arguments: what changed** - the members compiling the files
-  edited this session; none edited, the files git reports changed (not
-  committed; all committed, the branch's own since it left origin's default
-  branch), named in the answer, and their warnings treated as this
+  edited this session; none edited (or `base` given), the files git reports
+  changed: not committed, and the branch's own commits since it left the
+  nearest of origin's long-lived branches (its default one, main, master,
+  develop, release/*, release-*: the fewest of HEAD's commits on top) or
+  `base` - both parts, each counted (0.40.0; 0.34.0 took the uncommitted
+  part alone when there was one, and diffed against the default branch, so
+  a branch off a release built the whole release). Named in the answer, and their warnings treated as this
   session's (0.34.0). A field report: the server starts with the session,
   the user edits in the IDE before it, and the call without arguments was
   refused exactly when "build what I changed" was wanted. A refusal says

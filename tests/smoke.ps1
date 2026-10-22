@@ -873,8 +873,9 @@ Check 'compile form missing' $out @("AppF\uChildForm.pas`n  27  E1026 File not f
 
 # ---- compile without arguments: what git says changed --------------------------------
 # Nothing edited this session (the user edits in the IDE before it starts):
-# the files not committed, else the branch's own since it left origin's
-# default branch - named in the answer. A copy under git of its own.
+# the files not committed and the branch's own commits since it left the
+# nearest of origin's long-lived branches - named in the answer. A copy
+# under git of its own.
 Write-Host '--- CLI, compile from what git says changed'
 $gitCopy = Join-Path ([IO.Path]::GetTempPath()) ('pastree-mcp-smoke-git-' + [Guid]::NewGuid().ToString('N'))
 $gitCalls = $gitCopy + '.calls'
@@ -884,13 +885,13 @@ function Run-Git([string[]]$GitArgs) {
     try { & git -C $gitCopy -c user.email=smoke@test -c user.name=smoke @GitArgs 2>$null | Out-Null }
     finally { $ErrorActionPreference = 'Stop' }
 }
-function Run-GitCompile {
+function Run-GitCompile([string]$Calls = "compile {}") {
+    [IO.File]::WriteAllText($gitCalls, $Calls + "`n")
     $ErrorActionPreference = 'Continue'
     try { return (& $Exe --project (Join-Path $gitCopy 'Fixture.groupproj') --log none --build-dir ($gitCopy + '-build') --script $gitCalls 2>$null | ForEach-Object { "$_" }) -join "`n" }
     finally { $ErrorActionPreference = 'Stop' }
 }
 try {
-    [IO.File]::WriteAllText($gitCalls, "compile {}`n")
     Run-Git @('init', '-q', '-b', 'main')
     Run-Git @('add', '-A')
     Run-Git @('commit', '-q', '-m', 'base')
@@ -898,25 +899,38 @@ try {
     $colors = Join-Path $gitCopy 'AppB\uColors.pas'
     [IO.File]::AppendAllText($colors, "`r`n// touched`r`n")
     $gitDirty = Run-GitCompile
-    # Committed, on a branch off origin's default: the branch's own changes.
     Run-Git @('commit', '-q', '-am', 'colors')
     Run-Git @('clone', '-q', '--bare', $gitCopy, ($gitCopy + '-origin'))
     Run-Git @('remote', 'add', 'origin', ($gitCopy + '-origin'))
     Run-Git @('fetch', '-q', 'origin')
     Run-Git @('remote', 'set-head', 'origin', 'main')
+    # A release branch on origin, ahead of main by a commit of its own; the
+    # branch worked on leaves the release, not main: the release's commit is
+    # not the branch's change.
+    Run-Git @('checkout', '-q', '-b', 'release/1')
+    [IO.File]::AppendAllText((Join-Path $gitCopy 'AppA\uAppA.pas'), "`r`n// the release`r`n")
+    Run-Git @('commit', '-q', '-am', 'release')
+    Run-Git @('push', '-q', 'origin', 'release/1')
     Run-Git @('checkout', '-q', '-b', 'feature')
-    $shapes = Join-Path $gitCopy 'Shared\uShapes.pas'
-    [IO.File]::AppendAllText($shapes, "`r`n// on the branch`r`n")
+    [IO.File]::AppendAllText((Join-Path $gitCopy 'Shared\uShapes.pas'), "`r`n// on the branch`r`n")
     Run-Git @('commit', '-q', '-am', 'shapes')
     $gitBranch = Run-GitCompile
+    # Part committed, part not: one change, both parts built.
+    [IO.File]::AppendAllText($colors, "`r`n// not yet`r`n")
+    $gitMixed = Run-GitCompile
+    $gitBase = Run-GitCompile 'compile {"base":"origin/main"}'
+    $gitBadBase = Run-GitCompile 'compile {"base":"no-such-branch"}'
 }
 finally {
     Remove-Item -Recurse -Force $gitCopy, ($gitCopy + '-build'), ($gitCopy + '-origin') -ErrorAction SilentlyContinue
     Remove-Item -Force $gitCalls -ErrorAction SilentlyContinue
 }
 Check 'compile git clean' $gitClean @('no file has changed since the server started, and git reports no Pascal file changed under ', ' - name the `member` to build (the group has: AppA, AppB, AppF)')
-Check 'compile git not committed' $gitDirty @('compile AppB (Win32): built in', '  those compiling the 1 file changed (git: not committed): AppB\uColors.pas') @('AppA (Win32')
-Check 'compile git branch' $gitBranch @('compile - 2 members, those compiling the 1 file changed (git: committed on this branch since it left origin/main): Shared\uShapes.pas', 'AppA (Win32 Debug): built in', 'AppB (Win32): built in') @('AppF (')
+Check 'compile git not committed' $gitDirty @('compile AppB (Win32): built in', '  those compiling the 1 file changed (git: 1 not committed): AppB\uColors.pas') @('AppA (Win32')
+Check 'compile git branch' $gitBranch @('compile - 2 members, those compiling the 1 file changed (git: 1 committed on this branch since it left origin/release/1): Shared\uShapes.pas', 'AppA (Win32 Debug): built in', 'AppB (Win32): built in') @('AppF (', 'uAppA.pas')
+Check 'compile git mixed' $gitMixed @('those compiling the 2 files changed (git: 1 not committed, 1 committed on this branch since it left origin/release/1): AppB\uColors.pas, Shared\uShapes.pas') @('uAppA.pas')
+Check 'compile git base' $gitBase @('those compiling the 3 files changed (git: 1 not committed, 2 committed on this branch since it left origin/main): ', 'AppA\uAppA.pas')
+Check 'compile git bad base' $gitBadBase @('git knows no branch or commit `no-such-branch` to diff against')
 
 # ---- 3. MCP over stdio, with an edit in between ------------------------------------
 Write-Host '--- MCP over stdio'

@@ -192,13 +192,13 @@ procedure CompareWithBaseline(var AResult: TBuildResult;
   const AChangedFiles: TArray<string>);
 
 // The files git reports changed under ADir, full paths, those on disk only:
-// the ones not committed (staged, unstaged, untracked); when there are none,
-// the ones the branch changed since it left origin's default branch. AWhat
-// says which, empty with no files - git missing, no work tree, nothing
-// changed; AGitOk False when git is missing or ADir in no work tree. For
-// `compile` without arguments when no file changed this
-// session: the user edits in the IDE before the session starts.
-function GitChangedFiles(const ADir: string; out AWhat: string;
+// the ones not committed (staged, unstaged, untracked) and the ones the
+// branch's own commits changed since it left ABase - by default the nearest
+// of origin's long-lived branches (NearestBase). AWhat counts each part,
+// empty with no files; AGitOk False when git is missing or ADir in no work
+// tree; AError when git knows no ABase. For `compile` without arguments when
+// no file changed this session: the user edits in the IDE before it starts.
+function GitChangedFiles(const ADir, ABase: string; out AWhat, AError: string;
   out AGitOk: Boolean): TArray<string>;
 
 implementation
@@ -616,26 +616,72 @@ begin
       TStringSplitOptions.ExcludeEmpty);
 end;
 
-function GitChangedFiles(const ADir: string; out AWhat: string;
+// The branch HEAD left: of origin's long-lived branches - its default one,
+// main, master, develop, release/*, release-* - the one with the fewest of
+// HEAD's commits on top. A branch off release/5.1 diffed against the default
+// branch would take in every commit of the release (a field report).
+// Feature branches are not candidates: one branched from this one would
+// look nearest. '' when origin has none of them.
+function NearestBase(const ADir: string): string;
+var
+  LLines, LCands: TArray<string>;
+  LBest, LCount: Integer;
+begin
+  Result := '';
+  LCands := nil;
+  if RunGit(ADir, 'rev-parse --abbrev-ref origin/HEAD', LLines) and
+     (Length(LLines) > 0) then
+    LCands := LCands + [Trim(LLines[0])];
+  if RunGit(ADir, 'for-each-ref --format=%(refname:short) '
+     + 'refs/remotes/origin/main refs/remotes/origin/master '
+     + 'refs/remotes/origin/develop refs/remotes/origin/release '
+     + 'refs/remotes/origin/release-* refs/remotes/origin/release_*', LLines)
+  then
+    for var LRef in LLines do
+      if (Trim(LRef) <> '') and (IndexText(Trim(LRef), LCands) < 0) then
+        LCands := LCands + [Trim(LRef)];
+  LBest := MaxInt;
+  for var LCand in LCands do
+    if RunGit(ADir, 'rev-list --count ' + LCand + '..HEAD', LLines) and
+       (Length(LLines) > 0) then
+    begin
+      LCount := StrToIntDef(Trim(LLines[0]), MaxInt);
+      if LCount < LBest then
+      begin
+        LBest := LCount;
+        Result := LCand;
+      end;
+    end;
+end;
+
+function GitChangedFiles(const ADir, ABase: string; out AWhat, AError: string;
   out AGitOk: Boolean): TArray<string>;
 var
-  LLines, LMore: TArray<string>;
-  LBase, LFull: string;
+  LLines, LMore, LFiles: TArray<string>;
+  LBase, LFull, LMergeBase: string;
   LSeen: TDictionary<string, Boolean>;
+  LOpen, LBranch: Integer;
+  LParts: TArray<string>;
 
-  procedure Add(const ARel: string);
+  function Add(const ARel: string): Boolean;
   begin
     LFull := TPath.GetFullPath(TPath.Combine(ADir, ARel.Replace('/', '\')));
-    if TFile.Exists(LFull) and not LSeen.ContainsKey(LowerCase(LFull)) then
+    // Sources and forms only: the counts said are of what can be built.
+    Result := MatchText(TPath.GetExtension(LFull), ['.pas', '.inc', '.dpr',
+      '.dpk', '.dfm']) and TFile.Exists(LFull) and
+      not LSeen.ContainsKey(LowerCase(LFull));
+    if Result then
     begin
       LSeen.Add(LowerCase(LFull), True);
-      Result := Result + [LFull];
+      LFiles := LFiles + [LFull];
     end;
   end;
 
 begin
   Result := nil;
+  LFiles := nil;
   AWhat := '';
+  AError := '';
   AGitOk := False;
   LSeen := TDictionary<string, Boolean>.Create;
   try
@@ -645,29 +691,39 @@ begin
       Exit;
     if RunGit(ADir, 'ls-files --others --exclude-standard', LMore) then
       LLines := LLines + LMore;
+    LOpen := 0;
     for var LRel in LLines do
-      Add(LRel);
-    if Length(Result) > 0 then
+      if Add(LRel) then
+        Inc(LOpen);
+    // And the branch's own commits, since it left its base: some of a
+    // change committed, the rest not, is still one change - building what
+    // the uncommitted part reaches alone skipped the members only the
+    // committed part reaches (a field report).
+    LBase := ABase;
+    if LBase = '' then
+      LBase := NearestBase(ADir);
+    LBranch := 0;
+    if (LBase <> '') and RunGit(ADir, 'merge-base HEAD ' + Quoted(LBase),
+       LLines) and (Length(LLines) > 0) then
     begin
-      AWhat := 'not committed';
-      Exit;
-    end;
-    // All committed: the branch's own commits, since it left the remote's
-    // default branch.
-    if not RunGit(ADir, 'rev-parse --abbrev-ref origin/HEAD', LLines) or
-       (Length(LLines) = 0) then
-      Exit;
-    LBase := Trim(LLines[0]);
-    if not RunGit(ADir, 'merge-base HEAD ' + LBase, LLines) or
-       (Length(LLines) = 0) then
-      Exit;
-    if not RunGit(ADir, 'diff --name-only --relative ' + Trim(LLines[0]),
-       LLines) then
-      Exit;
-    for var LRel in LLines do
-      Add(LRel);
-    if Length(Result) > 0 then
-      AWhat := 'committed on this branch since it left ' + LBase;
+      LMergeBase := Trim(LLines[0]);
+      if RunGit(ADir, 'diff --name-only --relative ' + LMergeBase + ' HEAD',
+         LLines) then
+        for var LRel in LLines do
+          if Add(LRel) then
+            Inc(LBranch);
+    end
+    else if ABase <> '' then
+      AError := Format('git knows no branch or commit `%s` to diff against',
+        [ABase]);
+    LParts := nil;
+    if LOpen > 0 then
+      LParts := LParts + [Format('%d not committed', [LOpen])];
+    if LBranch > 0 then
+      LParts := LParts + [Format('%d committed on this branch since it left '
+        + '%s', [LBranch, LBase])];
+    AWhat := String.Join(', ', LParts);
+    Result := LFiles;
   finally
     LSeen.Free;
   end;
