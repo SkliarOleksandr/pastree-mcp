@@ -119,6 +119,9 @@ type
     // warnings count as new only in a file this session changed - and the
     // answer must say that the rest were not compared.
     Uncompared: Boolean;
+    // In TBuildResult.Kept: what an earlier compile here reported for a unit
+    // this one did not compile again.
+    Kept: Boolean;
   end;
 
   TBuildResult = record
@@ -138,6 +141,10 @@ type
     SeededCount: Integer;
     NotRun: TArray<string>;    // build events skipped: 'pre-build event: cmd'
     Gone: TArray<TBuildMsg>;   // CompareWithBaseline: no longer reported
+    // CompareWithBaseline: the warnings and hints earlier compiles here
+    // reported for units this one did not compile again - unchanged, so
+    // still so. An incremental build reports none of them.
+    Kept: TArray<TBuildMsg>;
     Error: string;
     // Built twice: the first build stopped at these internal errors of dcc
     // (F2084) after FirstMs; the rest of the record is the second build's -
@@ -1755,6 +1762,28 @@ begin
         end;
       end;
     end;
+
+    // Still so where this build did not compile the unit again: `show:
+    // warnings` lists them - it listed nothing after an incremental build (a
+    // field report: "1 old warning, not listed", then none with `show`).
+    AResult.Kept := nil;
+    for var LPair in LStored do
+      if not LErrFiles.ContainsKey(LPair.Key) and not CompiledNow(LPair.Key)
+      then
+        for var LOne in LPair.Value do
+        begin
+          LGone := Default(TBuildMsg);
+          if LOne.Kind = 'W' then
+            LGone.Kind := bmWarning
+          else
+            LGone.Kind := bmHint;
+          LGone.FileName := LOne.FileName;
+          LGone.Line := LOne.Line;
+          LGone.Code := LOne.Code;
+          LGone.Text := LOne.Text;
+          LGone.Kept := True;
+          AResult.Kept := AResult.Kept + [LGone];
+        end;
 
     // The baseline for the next compile.
     for var LOne in AResult.Compiled do

@@ -371,12 +371,15 @@ Check 'impact nothing' (Block $b 'impact {}') @('give `diff`')
 # program - uMembers is not recompiled, so its warning is not reported again,
 # and not gone either.
 Check 'compile' (Block $b 'compile {"member":"AppA"}') @('compile AppA (Win32 Debug): built in', '351 lines compiled', 'AppA-Win32-Debug\exe\AppA.exe', 'first build here: every unit compiled', 'warnings - none in files changed this session (1 elsewhere, not listed)')
-Check 'compile again' (Block $b 'compile {"member":"AppA", "limit"') @('compile AppA (Win32 Debug): built in', '13 lines compiled', 'no errors, warnings or hints') @('first build here')
+# An incremental build compiles none of the units with warnings: theirs as
+# the last compile here reported them - counted old, listed by `show`.
+Check 'compile again' (Block $b 'compile {"member":"AppA", "limit"') @('compile AppA (Win32 Debug): built in', '13 lines compiled', 'warnings - none new (1 old, not listed)') @('first build here', 'no errors, warnings or hints')
+Check 'compile again show' (Block $b 'compile {"member":"AppA", "show":"warnings"}') @('13 lines compiled', "warnings - 1 in the group's files:", "37  W1055 PUBLISHED caused RTTI (`$M+) to be added to type 'TDerived' (in TDerived) [earlier compile]", '(1 marked [earlier compile]: in units this build did not compile again - unchanged, as the last compile here reported them)')
 Check 'compile bare dpr' (Block $b 'compile {"member":"AppB"}') @('compile AppB (Win32): built in', 'AppB-Win32\exe\AppB.exe', 'first build here', 'no errors, warnings or hints')
 # The forms member: dcc converts its text form files to binary as it links
 # them, so a malformed one fails here; the binary one is linked as it is.
 Check 'compile forms' (Block $b 'compile {"member":"AppF"}') @('compile AppF (Win32): built in', 'AppF-Win32\exe\AppF.exe', 'no errors, warnings or hints')
-Check 'compile file' (Block $b 'compile {"file"') @('compile - 2 members, those compiling Shared\uShapes.pas', '  AppA (Win32 Debug): built in', '  AppB (Win32): built in', 'no errors, warnings or hints')
+Check 'compile file' (Block $b 'compile {"file"') @('compile - 2 members, those compiling Shared\uShapes.pas', '  AppA (Win32 Debug): built in', '  AppB (Win32): built in', 'warnings - none new (1 old, not listed)') @('no errors, warnings or hints')
 # A rebuild recompiles uMembers: its warning again, known, so not new.
 Check 'compile rebuild' (Block $b 'compile {"member":"AppA", "rebuild"') @('351 lines compiled', "warnings - 1 in the group's files:`nAppA\uMembers.pas", '  37  W1055 PUBLISHED caused RTTI', "to be added to type 'TDerived' (in TDerived)`n        published") @('[new]')
 Check 'compile no member' (Block $b 'compile {"member":"NoSuch"}') @('no member named NoSuch - the group has: AppA, AppB, AppF')

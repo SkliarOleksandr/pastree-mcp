@@ -17782,6 +17782,8 @@ var
         LLine := LLine + ' (in ' + LWhere + ')';
       if ANewTag and LRow.Msg.IsNew then
         LLine := LLine + ' [new]';
+      if LRow.Msg.Kept then
+        LLine := LLine + ' [earlier compile]';
       if LMulti and (Length(LRow.Members) < LBuilt) then
         LLine := LLine + ' [' + String.Join(', ', LRow.Members) + ']';
       if LRow.Msg.Truncated and (LRow.Msg.Line > 0) then
@@ -17827,6 +17829,14 @@ var
         AOwn, IfThen(Length(LRest) > 0, ' (' + String.Join(', ', LRest) + ')',
         '')]));
       AppendRows(LListedRows, True);
+      LUncompared := 0;
+      for var LRow in LListedRows do
+        if LRow.Msg.Kept then
+          Inc(LUncompared);
+      if LUncompared > 0 then
+        LSb.AppendLine(Format('(%d marked [earlier compile]: in units this '
+          + 'build did not compile again - unchanged, as the last compile '
+          + 'here reported them)', [LUncompared]));
       Exit;
     end;
     LListedRows := Filter(AList, True, True);
@@ -18054,6 +18064,17 @@ begin
         end;
       for var LMsg in R.Gone do
         Merge(LGone, LMsg, LName, True);
+      // The warnings and hints of the units this build did not compile
+      // again, as the last compile here reported them: counted old, and
+      // listed by `show`. Left out, an incremental build answered "no
+      // warnings", and `show: warnings` listed none.
+      for var LMsg in R.Kept do
+        case LMsg.Kind of
+          bmWarning:
+            Merge(LWarn, LMsg, LName, True);
+          bmHint:
+            Merge(LHint, LMsg, LName, True);
+        end;
     end;
 
     LBudget := ALimit;

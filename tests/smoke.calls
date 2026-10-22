@@ -143,6 +143,7 @@ impact {"diff":"not a diff"}
 impact {}
 compile {"member":"AppA"}
 compile {"member":"AppA", "limit":60}
+compile {"member":"AppA", "show":"warnings"}
 compile {"member":"AppB"}
 compile {"member":"AppF"}
 compile {"file":"Shared\\uShapes.pas"}

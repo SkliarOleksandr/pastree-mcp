@@ -587,6 +587,12 @@ default.
   the user edits in the IDE before it, and the call without arguments was
   refused exactly when "build what I changed" was wanted. A refusal says
   whether git had nothing changed or nothing to say.
+- **What an incremental build did not compile again** still has the
+  warnings and hints the last compile here reported for it (0.39.0): they
+  count as old, and `show: warnings` lists them tagged `[earlier
+  compile]`. dcc reports only what it compiles, so a build after a build
+  answered "no errors, warnings or hints", and `show: warnings` after
+  "1 old warning, not listed" listed none (a field report).
 
 - **Output goes to a temporary directory** (`DCC_ExeOutput`, `DCC_DcuOutput`
   overridden), never to the project's own output: an agent's check must not
