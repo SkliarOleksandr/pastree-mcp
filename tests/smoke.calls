@@ -10,6 +10,14 @@ find {"query":"NothingAnywhere"}
 find {"query":"TOuterBox.Depth"}
 find {"query":"tnGreen"}
 find {"query":"TShade.TSquare"}
+find {"query":"TDerived.*Count*"}
+find {"query":"TBigCircle.*Rad*"}
+find {"query":"TSmallCircle"}
+find {"query":"TCircleBig"}
+find {"query":"TBigCirle"}
+source {"symbol":"TCircleBig"}
+source {"symbol":"TCircle.Areaa"}
+source {"symbol":"Zzzqqq"}
 references {"symbol":"TTint.tnRed"}
 references {"symbol":"tnBlue"}
 references {"symbol":"Dark"}

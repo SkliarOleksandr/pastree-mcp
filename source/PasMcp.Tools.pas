@@ -204,6 +204,66 @@ end;
 
 { ---- small text helpers --------------------------------------------------- }
 
+// Levenshtein distance of two short strings; more than AMax once their
+// lengths differ by more.
+function EditDistance(const AA, AB: string; AMax: Integer): Integer;
+var
+  LPrev, LCur: TArray<Integer>;
+begin
+  if Abs(Length(AA) - Length(AB)) > AMax then
+    Exit(AMax + 1);
+  SetLength(LPrev, Length(AB) + 1);
+  SetLength(LCur, Length(AB) + 1);
+  for var LJ := 0 to Length(AB) do
+    LPrev[LJ] := LJ;
+  for var LI := 1 to Length(AA) do
+  begin
+    LCur[0] := LI;
+    for var LJ := 1 to Length(AB) do
+      LCur[LJ] := Min(Min(LPrev[LJ] + 1, LCur[LJ - 1] + 1),
+        LPrev[LJ - 1] + Ord(AA[LI] <> AB[LJ]));
+    LPrev := Copy(LCur);
+  end;
+  Result := LPrev[Length(AB)];
+end;
+
+// The words of an identifier, lower case: TaviCreditStatus -> avi, credit,
+// status. A type's or an interface's prefix letter (T, I, E before a
+// capital) is not a word; nor are digits and underscores.
+function NameWords(const AName: string): TArray<string>;
+var
+  LWord: string;
+  LStart: Integer;
+begin
+  Result := nil;
+  LStart := 1;
+  if (Length(AName) > 1) and CharInSet(AName[1], ['T', 'I', 'E']) and
+     AName[2].IsUpper then
+    LStart := 2;
+  LWord := '';
+  for var LI := LStart to Length(AName) do
+  begin
+    if not AName[LI].IsLetter then
+    begin
+      if LWord <> '' then
+        Result := Result + [LowerCase(LWord)];
+      LWord := '';
+      Continue;
+    end;
+    // A capital starts a word - but not inside a run of capitals, unless the
+    // next letter is small: XMLParser -> xml, parser.
+    if AName[LI].IsUpper and (LWord <> '') and (not AName[LI - 1].IsUpper or
+       ((LI < Length(AName)) and AName[LI + 1].IsLower)) then
+    begin
+      Result := Result + [LowerCase(LWord)];
+      LWord := '';
+    end;
+    LWord := LWord + AName[LI];
+  end;
+  if LWord <> '' then
+    Result := Result + [LowerCase(LWord)];
+end;
+
 function CleanLine(const AText: string; AMax: Integer = 160): string;
 var
   LSb: TStringBuilder;
@@ -1375,6 +1435,93 @@ begin
   end;
 end;
 
+{ `TDerived.*Bar*`: the members its ancestors declare that match, after the
+  type's own (AHave) - as `TDerived.Bar` finds an inherited one. Without it
+  the wildcard found nothing where the exact name found the member (a field
+  report: `IFoo.*Detail*` empty, `IFoo.Detail` the property IFoo's ancestor
+  declares). A name already found lower down - an override, a
+  redeclaration - is not listed again from above. }
+function InheritedWildMembers(AWs: TMcpWorkspace;
+  const AParts: TArray<string>; const AKind: string; AOwnOnly: Boolean;
+  ALimit: Integer; const AHave: TArray<TTarget>;
+  var AMore: Integer): TArray<TTarget>;
+var
+  LTypes, LFound: TArray<TTarget>;
+  LNames, LSites: TDictionary<string, Boolean>;
+  LQual, LPattern, LShort: string;
+  LTypeMore, LMore: Integer;
+  LId: TSymId;
+  LX, LNext: TSemaXType;
+  LAnc: TPasSemaModel;
+begin
+  Result := nil;
+  LQual := string.Join('.', Copy(AParts, 0, High(AParts)));
+  LPattern := AParts[High(AParts)];
+  LTypes := ResolveName(AWs, LQual, 'type', AOwnOnly, 12, LTypeMore, False);
+  LNames := TDictionary<string, Boolean>.Create;
+  LSites := TDictionary<string, Boolean>.Create;
+  try
+    for var LT in AHave do
+    begin
+      LShort := LT.Name.Substring(LT.Name.LastIndexOf('.') + 1);
+      LNames.AddOrSetValue(LowerCase(LShort), True);
+      LSites.AddOrSetValue(LowerCase(LT.DeclFile) + ':' + IntToStr(LT.DeclLine),
+        True);
+    end;
+    for var LT in LTypes do
+      for var LA in AWs.Analyses do
+      begin
+        LId := LT.Ids[LA.Index];
+        if (LId.Mid < 0) or not LA.Proj.EnsureHydrated(LId.Mid) then
+          Continue;
+        if LA.Proj.Model(LId.Mid).Symbols[LId.Sym].Kind <> skType then
+          Break;
+        LX := LA.Proj.CanonTypeX(XPlain(LId.Mid, LId.Sym));
+        if not XValid(LX) then
+          LX := XPlain(LId.Mid, LId.Sym);
+        for var LDepth := 1 to 64 do
+        begin
+          LNext := LA.Proj.AncestorOfX(LX);
+          if not XValid(LNext) or ((LNext.UnitId = LX.UnitId) and
+             (LNext.Sym = LX.Sym)) then
+            Break;
+          LX := LNext;
+          if not LA.Proj.EnsureHydrated(LX.UnitId) then
+            Break;
+          LAnc := LA.Proj.Model(LX.UnitId);
+          LFound := ResolveName(AWs, UnitNameOfFile(LA.Proj.ModelFile(
+            LX.UnitId)) + '.' + QualifiedName(LAnc, LX.Sym) + '.' + LPattern,
+            AKind, AOwnOnly, 500, LMore, False);
+          for var LC in LFound do
+          begin
+            LShort := LC.Name.Substring(LC.Name.LastIndexOf('.') + 1);
+            if LNames.ContainsKey(LowerCase(LShort)) or LSites.ContainsKey(
+               LowerCase(LC.DeclFile) + ':' + IntToStr(LC.DeclLine)) then
+              Continue;
+            LSites.Add(LowerCase(LC.DeclFile) + ':' + IntToStr(LC.DeclLine),
+              True);
+            if Length(AHave) + Length(Result) >= ALimit then
+            begin
+              Inc(AMore);
+              Continue;
+            end;
+            var LI := LC;
+            LI.Inherits := LQual;
+            Result := Result + [LI];
+          end;
+          // The names this ancestor declares hide its own ancestors' ones.
+          for var LC in LFound do
+            LNames.AddOrSetValue(LowerCase(LC.Name.Substring(
+              LC.Name.LastIndexOf('.') + 1)), True);
+        end;
+        Break;
+      end;
+  finally
+    LSites.Free;
+    LNames.Free;
+  end;
+end;
+
 // The units whose name is AQuery (a wildcard pattern too), own first, at most
 // ALimit; AMore counts the rest. A unit analyzed in several analyses is one
 // target with each one's id.
@@ -1656,6 +1803,10 @@ begin
     if (LRaw.Count = 0) and (LList.Count = 0) and AClimb and
        (Length(LQuals) > 0) and not LWild and not LWildQuals then
       Result := InheritedMembers(AWs, LParts, AKind, AOwnOnly, ALimit, AMore);
+    if AClimb and LWild and (Length(LQuals) > 0) and not LWildQuals and
+       not SameText(AKind, 'type') then
+      Result := Result + InheritedWildMembers(AWs, LParts, AKind, AOwnOnly,
+        ALimit, Result, AMore);
   finally
     LList.Free;
     LSeen.Free;
@@ -1937,16 +2088,148 @@ begin
   end;
 end;
 
+// Declarations whose name is like the last part of AQuery but neither is
+// nor contains it - what `find`'s `*name*` fallback cannot reach: the same
+// words with one more or one less (TaviCreditStatus for TCreditStatus, a
+// field report), or a misspelling. Best first, at most ALimit; the
+// qualifiers of AQuery kept.
+function SimilarNames(AWs: TMcpWorkspace; const AQuery, AKind: string;
+  AOwnOnly: Boolean; ALimit: Integer): TArray<TTarget>;
+type
+  TScored = record
+    Name: string;
+    Score: Double;
+  end;
+var
+  LParts, LWords, LCand: TArray<string>;
+  LName, LNameLower, LQual, LLong: string;
+  LSeen: TDictionary<string, Boolean>;
+  LScored: TList<TScored>;
+  LS: TScored;
+  LCommon, LMore, LDist: Integer;
+  LFound: TArray<TTarget>;
+begin
+  Result := nil;
+  LParts := AQuery.Split(['.']);
+  if Length(LParts) = 0 then
+    Exit;
+  LName := StripGenerics(LParts[High(LParts)]);
+  if (LName = '') or IsWildPattern(LName) then
+    Exit;
+  LNameLower := LowerCase(LName);
+  LQual := string.Join('.', Copy(LParts, 0, High(LParts)));
+  LWords := NameWords(LName);
+  // The longest word a candidate must contain - most names share none,
+  // and are passed over without a word split.
+  LLong := '';
+  for var LW in LWords do
+    if Length(LW) > Length(LLong) then
+      LLong := LW;
+  LSeen := TDictionary<string, Boolean>.Create;
+  LScored := TList<TScored>.Create;
+  try
+    for var LA in AWs.Analyses do
+      for var LMid := 0 to LA.Proj.ModelCount - 1 do
+      begin
+        if AOwnOnly and not AWs.IsOwnFile(LA.Proj.ModelFile(LMid)) then
+          Continue;
+        var LM := LA.Proj.Model(LMid);
+        if LM = nil then
+          Continue;
+        for var LSym := 0 to LM.SymCount - 1 do
+        begin
+          var LLower := LM.Symbols[LSym].NameLower;
+          // An anonymous symbol has no name to be like.
+          if (LLower = '') or (LLower = LNameLower) or (Pos(LNameLower, LLower) > 0) or
+             not LSeen.TryAdd(LLower, True) then
+            Continue;
+          LS.Score := 0;
+          if (Length(LLong) >= 4) and (Pos(LLong, LLower) > 0) then
+          begin
+            LCand := NameWords(LM.Symbols[LSym].Name);
+            LCommon := 0;
+            for var LW in LWords do
+              if MatchStr(LW, LCand) then
+                Inc(LCommon);
+            // Dice: 2 shared of 2 + 3 words is 0.8.
+            LS.Score := 2 * LCommon / (Length(LWords) + Length(LCand));
+            if LS.Score < 0.6 then
+              LS.Score := 0;
+          end;
+          if (LS.Score = 0) and (Length(LNameLower) >= 5) and
+             (LLower[1] = LNameLower[1]) then
+          begin
+            LDist := EditDistance(LNameLower, LLower, 2);
+            if LDist <= IfThen(Length(LNameLower) >= 10, 2, 1) then
+              LS.Score := 0.7 - LDist * 0.05;
+          end;
+          if LS.Score = 0 then
+            Continue;
+          if not IsDeclSymbol(LM, LSym) or not KindMatches(LM, LSym, AKind)
+          then
+            Continue;
+          LS.Name := LM.Symbols[LSym].Name;
+          LScored.Add(LS);
+        end;
+      end;
+    LScored.Sort(TComparer<TScored>.Construct(
+      function(const L, R: TScored): Integer
+      begin
+        Result := CompareValue(R.Score, L.Score);
+        if Result = 0 then
+          Result := CompareText(L.Name, R.Name);
+      end));
+    for LS in LScored do
+    begin
+      if Length(Result) >= ALimit then
+        Break;
+      LFound := ResolveName(AWs, IfThen(LQual <> '', LQual + '.', '') +
+        LS.Name, AKind, AOwnOnly, ALimit - Length(Result), LMore, False);
+      Result := Result + LFound;
+    end;
+  finally
+    LScored.Free;
+    LSeen.Free;
+  end;
+end;
+
 // The refusal of a name no declaration matches, for every tool that takes
 // `symbol`: what was searched, and where the name is written outside it.
 function NoSuchDeclaration(AWs: TMcpWorkspace; const ASymbol: string): string;
+const
+  LIKE_ROWS = 6;
 var
-  LNote: string;
+  LNote, LLast, LQual: string;
+  LLike: TArray<TTarget>;
+  LMore: Integer;
 begin
-  Result := Format('no declaration named `%s` among %s - try `find` with a '
-    + 'wildcard: *%s*; a local or a parameter is addressed by `file` + '
-    + '`line` + `name`', [ASymbol, IndexScope(AWs),
-    StripGenerics(ASymbol.Split(['.'])[High(ASymbol.Split(['.']))])]);
+  LLast := StripGenerics(ASymbol.Split(['.'])[High(ASymbol.Split(['.']))]);
+  Result := Format('no declaration named `%s` among %s - a local or a '
+    + 'parameter is addressed by `file` + `line` + `name`', [ASymbol,
+    IndexScope(AWs)]);
+  // The names like it, said here: the agent's next call was `find` with
+  // `*name*`, and a guessed name rarely contains the real one (a field
+  // report). Among the group's own units: a wildcard over the libraries
+  // would make them full in light mode, for a hint.
+  if (LLast <> '') and not IsWildPattern(LLast) then
+  begin
+    LQual := Copy(ASymbol, 1, Length(ASymbol) - Length(ASymbol.Split(['.'])[
+      High(ASymbol.Split(['.']))]));
+    LLike := ResolveName(AWs, LQual + '*' + LLast + '*', '', True,
+      LIKE_ROWS, LMore);
+    LLike := LLike + SimilarNames(AWs, ASymbol, '', True, LIKE_ROWS -
+      Length(LLike));
+    if Length(LLike) > 0 then
+    begin
+      Result := Result + sLineBreak + 'names like it in the group''s own '
+        + 'units:';
+      for var LT in LLike do
+        Result := Result + sLineBreak + '  ' + DescribeTarget(AWs, LT);
+    end
+    else
+      Result := Result + sLineBreak + Format('no name of the group''s own '
+        + 'units contains `%s` or is like it either', [LLast]);
+  end;
   LNote := OutsideIndexNote(AWs, ASymbol, False);
   if LNote <> '' then
     Result := Result + sLineBreak + LNote;
@@ -2755,15 +3038,26 @@ begin
   Result := AWs.StatusText;
 end;
 
+procedure AppendLike(ASb: TStringBuilder; AWs: TMcpWorkspace;
+  const ALike: TArray<TTarget>);
+begin
+  if Length(ALike) = 0 then
+    Exit;
+  ASb.AppendLine('names like it:');
+  for var LT in ALike do
+    ASb.AppendLine(DescribeTarget(AWs, LT));
+end;
+
 function ToolFind(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
 var
   LQuery, LKind: string;
   LLimit, LMore: Integer;
-  LCands: TArray<TTarget>;
+  LCands, LLike: TArray<TTarget>;
   LSb: TStringBuilder;
   LFallback, LOwnOnly: Boolean;
   LAll, LOwn: Integer;
 begin
+  LLike := nil;
   LQuery := ArgStr(AArgs, 'query');
   if LQuery = '' then
     raise EToolError.Create('`query` is required');
@@ -2787,6 +3081,10 @@ begin
     LCands := ResolveName(AWs, '*' + LQuery + '*', LKind, LOwnOnly, LLimit,
       LMore);
     LFallback := True;
+    // A half-remembered name rarely contains the real one: TaviCreditStatus
+    // for TCreditStatus (a field report). The same words, or a misspelling.
+    if LLimit > 0 then
+      LLike := SimilarNames(AWs, LQuery, LKind, LOwnOnly, Min(LLimit, 8));
   end;
   LSb := TStringBuilder.Create;
   try
@@ -2807,6 +3105,7 @@ begin
       else
         LSb.AppendLine(Format('no declaration%s matches `%s` among %s',
           [IfThen(LKind <> '', ' of kind ' + LKind), LQuery, IndexScope(AWs)]));
+      AppendLike(LSb, AWs, LLike);
       LSb.AppendLine(OutsideIndexNote(AWs, LQuery, True));
       Exit(LSb.ToString.TrimRight);
     end;
@@ -2822,6 +3121,7 @@ begin
     else if LMore > 0 then
       LSb.AppendLine(Format('... %d more (narrow the query, add `kind`, or '
         + 'raise `limit`)', [LMore]));
+    AppendLike(LSb, AWs, LLike);
     // The names containing it may be the wrong ones when the name itself is
     // declared in a unit nothing uses.
     if LFallback then
@@ -17854,12 +18154,14 @@ const
     '{"name":"find","description":"Find declarations by name across the '
     + 'whole closure of the project group (project units first, then '
     + 'libraries and the RTL). Exact name, qualified name (TFoo.Bar, '
-    + 'Unit.TFoo; TFoo.Bar finds a member TFoo inherits too) or wildcards in '
-    + 'any part (*Customer*, *.Save, *Form.Save). Returns file:line, the qualified '
+    + 'Unit.TFoo; TFoo.Bar and TFoo.*Ba* find the members TFoo inherits too) '
+    + 'or wildcards in any part (*Customer*, *.Save, *Form.Save). Returns file:line, the qualified '
     + 'name, its kind and the declaration (one written over several lines '
     + 'joined). Faster and more precise than grep for Object Pascal '
-    + 'declarations. A name the index does not hold is answered with the '
-    + 'Pascal files outside it - units no project uses - that write it.",'
+    + 'declarations. A name nothing declares is answered with the names '
+    + 'containing it and the names like it (the same words, a misspelling), '
+    + 'and the Pascal files outside the index - units no project uses - that '
+    + 'write it.",'
     + '"inputSchema":{"type":"object","properties":{'
     + '"query":{"type":"string","description":"Name, qualified name or '
     + 'wildcard pattern"},'
@@ -18388,28 +18690,6 @@ begin
         raise;
     end;
   end;
-end;
-
-// Levenshtein distance of two short strings, AMax + 1 once it is past AMax.
-function EditDistance(const AA, AB: string; AMax: Integer): Integer;
-var
-  LPrev, LCur: TArray<Integer>;
-begin
-  if Abs(Length(AA) - Length(AB)) > AMax then
-    Exit(AMax + 1);
-  SetLength(LPrev, Length(AB) + 1);
-  SetLength(LCur, Length(AB) + 1);
-  for var LJ := 0 to Length(AB) do
-    LPrev[LJ] := LJ;
-  for var LI := 1 to Length(AA) do
-  begin
-    LCur[0] := LI;
-    for var LJ := 1 to Length(AB) do
-      LCur[LJ] := Min(Min(LPrev[LJ] + 1, LCur[LJ - 1] + 1),
-        LPrev[LJ - 1] + Ord(AA[LI] <> AB[LJ]));
-    LPrev := Copy(LCur);
-  end;
-  Result := LPrev[Length(AB)];
 end;
 
 var

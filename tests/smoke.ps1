@@ -117,7 +117,20 @@ Check 'find nested' (Block $b 'find {"query":"TOuterBox.Depth"}') @('AppB\uBoxes
 # only when nothing else has it (TSquare stays the class: `source TSquare`).
 Check 'find enum value' (Block $b 'find {"query":"tnGreen"}') @('AppB\uColors.pas:11  TTint.tnGreen (enum value)  TTint = (tnRed, tnGreen, tnBlue);') @('no declaration matches')
 Check 'find scoped enum value' (Block $b 'find {"query":"TShade.TSquare"}') @('AppB\uColors.pas:14  TShade.TSquare (enum value)') @('uShapes.pas')
-Check 'references enum value' (Block $b 'references {"symbol":"TTint.tnRed"}') @('TTint.tnRed (enum value) declared at AppB\uColors.pas:11 - 1 references in 1 files', "  TintName`n    25  tnRed: Result := 'red';")
+# A wildcard member through the type that inherits it, as the exact name is
+# found: the ancestors' matches after the type's own, a name found lower down
+# (TDerived's Count) not listed again from above.
+Check 'find inherited wildcard' (Block $b 'find {"query":"TDerived.*Count*"}') @('AppA\uMembers.pas:38  TDerived.Count (property)', 'AppA\uMembers.pas:19  TBase.FCount (field)  FCount: Integer;  [inherited by TDerived]', 'AppA\uMembers.pas:23  TBase.GetCount (function)  function GetCount: Integer;  [inherited by TDerived]') @('TBase.Count (property)')
+Check 'find inherited wildcard only' (Block $b 'find {"query":"TBigCircle.*Rad*"}') @('Shared\uShapes.pas:23  TCircle.FRadius (field)  FRadius: Double;  [inherited by TBigCircle]', 'Shared\uShapes.pas:27  TCircle.Radius (property)') @('no declaration')
+# A name nothing declares: the names like it - the same words, one more or
+# one less or in another order, or one edit away - which `*name*` misses.
+Check 'find similar words' (Block $b 'find {"query":"TSmallCircle"}') @('no declaration matches `TSmallCircle` among ', "names like it:`nShared\uShapes.pas:21  TCircle (class)") @('TBigCircle')
+Check 'find similar order' (Block $b 'find {"query":"TCircleBig"}') @("names like it:`nAppB\uAppB.pas:11  TBigCircle (class)")
+Check 'find similar misspelt' (Block $b 'find {"query":"TBigCirle"}') @("names like it:`nAppB\uAppB.pas:11  TBigCircle (class)")
+Check 'source similar' (Block $b 'source {"symbol":"TCircleBig"}') @('no declaration named `TCircleBig` among ', "names like it in the group's own units:`n  AppB\uAppB.pas:11  TBigCircle (class)")
+Check 'source similar member' (Block $b 'source {"symbol":"TCircle.Areaa"}') @("names like it in the group's own units:`n  Shared\uShapes.pas:26  TCircle.Area (function)")
+Check 'source nothing like' (Block $b 'source {"symbol":"Zzzqqq"}') @("no name of the group's own units contains ``Zzzqqq`` or is like it either")
+Check 'references enum value'(Block $b 'references {"symbol":"TTint.tnRed"}') @('TTint.tnRed (enum value) declared at AppB\uColors.pas:11 - 1 references in 1 files', "  TintName`n    25  tnRed: Result := 'red';")
 Check 'references enum value unused' (Block $b 'references {"symbol":"tnBlue"}') @('TTint.tnBlue (enum value) declared at AppB\uColors.pas:11 - 0 references in 0 files')
 Check 'references scoped value bare' (Block $b 'references {"symbol":"Dark"}') @('TShade.Dark (enum value) declared at AppB\uColors.pas:14 - 1 references', '    34  Result := AShade = TShade.Dark;')
 # By name: the identifier, not the same word in a string before it; and the

@@ -64,6 +64,16 @@ Common rules:
   declaration: `find` tags each row `[inherited by TDerived]`, the other
   tools answer for the ancestor's declaration, which their header names. It
   was "no declaration matches", taken for "no such member" (0.22.0).
+  `TDerived.*Bar*` lists the ancestors' matches after the type's own, a
+  name found lower down not again from above (0.37.0): the wildcard found
+  nothing where the exact name found the member (a field report).
+- **A name nothing declares** is answered with the names like it (0.37.0):
+  `find` after the names containing it, every other tool in its refusal
+  (the group's own units: a wildcard over the libraries would make them
+  full in light mode, for a hint). Like it: Dice of the CamelCase words at
+  0.6 or more (a type's T or I prefix not a word), or one edit away (two in
+  a name of ten letters or more). An agent's guess, TaviCreditStatus, rarely
+  contains the real TCreditStatus, and `*name*` missed it (a field report).
 - **Wildcards in any segment** (`*.Save`, `*Form.Save`, `TFoo*.Bar`): a
   qualifier is matched against the declaration's unit + owner chain as the
   last segment against its name. Only the last segment took them, and `*.X`
