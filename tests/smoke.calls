@@ -47,6 +47,17 @@ members {"symbol":"RunA"}
 members {"symbol":"TWideBox"}
 members {"symbol":"TBufRec.Buf"}
 members {"symbol":"TBufRec.Code"}
+members {"symbol":"TDerived", "filter":"Add"}
+members {"symbol":"TDerived", "membr_kind":"field"}
+members {"symbol":"TDerived", "kind":"method"}
+members {"symbol":"TDerived", "match":"Guard|Count"}
+find {"query":"*Circ*", "scope":"own"}
+source {"symbol":"RunB", "range":"29-31"}
+status {"verbose":true}
+source {"file":"AppB/uAppB.pas", "line":30}
+source {"file":"AppA/uMembers.pas", "line":92}
+source {"file":"AppB/uAppB.pas", "line":1}
+outline {"file":"AppB/uAppB.pas", "line":30}
 outline {"file":"AppA\tuAppA.pas"}
 references {"symbol":"TShape.Area"}
 references {"symbol":"TCircle"}

@@ -172,7 +172,7 @@ Check 'members other unit' (Block $b 'members {"symbol":"TBigCircle"}') @('4 mem
 Check 'members var' (Block $b 'members {"file"') @('LShape (var) is a TShape <- TInterfacedObject <- TObject (Shared\uShapes.pas:15): 2 members', '17  function Area: Double; virtual; abstract;') @('QueryInterface')
 Check 'members streams' (Block $b 'members {"symbol":"TPanelModel"}') @("TPanelModel  AppA\uMembers.pas`n  published`n    44  Source: TComponent;", '45  procedure SourceChange(Sender: TObject);', 'TPersistent ')
 Check 'members library' (Block $b 'members {"symbol":"IShape"') @('IShape <- IInterface (Shared\uShapes.pas:10): 4 members', "IShape  Shared\uShapes.pas`n  12  function Area: Double;", 'function QueryInterface(', 'function _AddRef: Integer; stdcall;') @('(library ancestors')
-Check 'members none match' (Block $b 'members {"symbol":"TCircle", "match"') @('no members named like *Nothing*')
+Check 'members none match' (Block $b 'members {"symbol":"TCircle", "match"') @('no members named like *nothing*')
 Check 'members empty' (Block $b 'members {"symbol":"TEmpty"}') @('TEmpty (AppA\uMembers.pas:48): no members') @('(library')
 Check 'members not a type' (Block $b 'members {"symbol":"RunA"}') @('RunA is a procedure - `members` takes a type')
 Check 'members joined' (Block $b 'members {"symbol":"TWideBox"}') @("  public`n    71  function Configure(const AFirstName: string; ASecondValue: Integer; const AThirdName: string = 'third'; AFourthFlag: Boolean = False): Boolean;`n", '74  procedure Many(const AAlphaName, ABetaName, AGammaName: string; ADeltaCount, AEpsilonCount, AZetaCount: Integer; const AEtaText, AThetaText, ...); virtual;')
@@ -180,6 +180,22 @@ Check 'members joined' (Block $b 'members {"symbol":"TWideBox"}') @("  public`n 
 # `string[6]` is typed ShortString since PasTree 0.101.0, and said so.
 Check 'members in-place array' (Block $b 'members {"symbol":"TBufRec.Buf"}') @('TBufRec.Buf (field) is `array[0..3] of Byte` - a type written in place, with no members')
 Check 'members in-place string' (Block $b 'members {"symbol":"TBufRec.Code"}') @('TBufRec.Code (field) is a ShortString: no members')
+# Arguments checked against the catalogue: a name the tool does not take, or
+# a value outside its enum, refused with what it takes - it was dropped
+# without a word, and the answer read as the filtered one.
+Check 'args unknown' (Block $b 'members {"symbol":"TDerived", "filter"') @('`members` takes no argument `filter` (did you mean `match`?) - its arguments: `symbol`, `file`, ') @('TDerived (class)')
+Check 'args misspelt' (Block $b 'members {"symbol":"TDerived", "membr_kind"') @('`members` takes no argument `membr_kind` (did you mean `member_kind`?)')
+Check 'args kind for member_kind' (Block $b 'members {"symbol":"TDerived", "kind":"method"') @('`kind` narrows the name you give (a type, a variable) - to list only its methods, pass `member_kind: method`')
+Check 'args bad enum' (Block $b 'find {"query":"*Circ*", "scope":"own"') @("``scope`` of ``find`` is all or project (not ``own``) - project = only") @('TCircle')
+Check 'args synonym' (Block $b 'source {"symbol":"RunB", "range"') @('`source` takes no argument `range` (did you mean `lines`?)')
+Check 'args none taken' (Block $b 'status {"verbose"') @('`status` takes no argument `verbose` - its arguments: none')
+# `file` + `line` alone: the routine around the line (an agent asked
+# `outline` for it, which takes no line - and is told where to ask).
+Check 'source around a line' (Block $b 'source {"file":"AppB/uAppB.pas", "line":30}') @('RunB (procedure) implemented at AppB\uAppB.pas:26-32', '32  end;')
+Check 'source around a method line' (Block $b 'source {"file":"AppA/uMembers.pas", "line":92}') @('TDerived.Guarded (procedure) implemented at AppA\uMembers.pas:90-93')
+Check 'source around no routine' (Block $b 'source {"file":"AppB/uAppB.pas", "line":1}') @('line 1 of AppB\uAppB.pas is in no routine - give `name`')
+Check 'outline line' (Block $b 'outline {"file":"AppB/uAppB.pas", "line":30}') @('`outline` takes no argument `line` (the routine around a line: `source` with `file` + `line`)')
+Check 'members match alternatives' (Block $b 'members {"symbol":"TDerived", "match":"Guard|Count"') @('named like *guard* or *count*', '33  procedure Guarded; override;', '38  property Count;') @('procedure Add(')
 # "AppA\tuAppA.pas" in JSON is a tab, not a backslash: say so, not "invalid characters in path".
 Check 'control character' (Block $b 'outline {"file":"AppA') @('`file` holds a control character (#9)')
 Check 'references' (Block $b 'references {"symbol":"TShape.Area"}') @('1 references in 1 files', "  RunA`n    22  Writeln(LShape.Describe")
@@ -330,7 +346,7 @@ Check 'compile file' (Block $b 'compile {"file"') @('compile - 2 members, those 
 # A rebuild recompiles uMembers: its warning again, known, so not new.
 Check 'compile rebuild' (Block $b 'compile {"member":"AppA", "rebuild"') @('351 lines compiled', "warnings - 1 in the group's files:`nAppA\uMembers.pas", '  37  W1055 PUBLISHED caused RTTI', "to be added to type 'TDerived' (in TDerived)`n        published") @('[new]')
 Check 'compile no member' (Block $b 'compile {"member":"NoSuch"}') @('no member named NoSuch - the group has: AppA, AppB, AppF')
-Check 'compile bad show' (Block $b 'compile {"show"') @('`show` is new, warnings or all')
+Check 'compile bad show' (Block $b 'compile {"show"') @("``show`` of ``compile`` is new, warnings or all (not ``some``)")
 Check 'compile nothing changed' (Block $b 'compile {}') @('no file has changed since the server started - name the `member` to build (the group has: AppA, AppB, AppF)')
 # form: a form's components, their events and the components they name,
 # with the lines of the form file. An inline frame's child under the frame,
@@ -417,7 +433,7 @@ Check 'outline' (Block $b 'outline {"file":"Shared') @('21  type TCircle = class
 Check 'outline limit' (Block $b 'outline {"file":"Shared/uShapes.pas", "limit"') @('(24 rows in all - the 10 member declarations of its types are left out: `owner` lists one type''s', "30  type TSquare = class`n38  function TotalArea", '... 2 more rows (raise `limit`') @('property Radius')
 Check 'outline limit members' (Block $b 'outline {"file":"Shared/uShapes.pas", "members"') @("10  type IShape = interface`n12    function Area: Double`n15  type TShape = class`n... 19 more rows") @('left out')
 Check 'outline no declarations' (Block $b 'outline {"file":"AppA/AppA.dpr"}') @("AppA\AppA.dpr (12 lines)`n1 program AppA`n5   uses`n9 begin") @('more rows', 'left out')
-Check 'outline signature' (Block $b 'outline {"file":"AppB')@("71    function Configure(const AFirstName: string; ASecondValue: Integer; const AThirdName: string = 'third'; AFourthFlag: Boolean = False): Boolean`n", '85  procedure TWideBox.Many(const AAlphaName, ABetaName, AGammaName: string; ADeltaCount, AEpsilonCount, AZetaCount: Integer; const AEtaText, AThetaText, AIotaText: string)') @('...')
+Check 'outline signature' (Block $b 'outline {"file":"AppB\\uBoxes')@("71    function Configure(const AFirstName: string; ASecondValue: Integer; const AThirdName: string = 'third'; AFourthFlag: Boolean = False): Boolean`n", '85  procedure TWideBox.Many(const AAlphaName, ABetaName, AGammaName: string; ADeltaCount, AEpsilonCount, AZetaCount: Integer; const AEtaText, AThetaText, AIotaText: string)') @('...')
 Check 'unit_deps' (Block $b 'unit_deps') @('uShapes is used by 3 units', 'AppB\uAppB.pas:8')
 Check 'diagnostics' (Block $b 'diagnostics') @('no diagnostics')
 Check 'ambiguous' (Block $b 'references {"symbol":"Area"}') @('is ambiguous - 5 declarations', 'IShape.Area', 'TBigCircle.Area')
@@ -492,7 +508,7 @@ Check 'references in header' (Block $b 'references {"symbol":"TfrmMain.btnSave",
 Check 'references in none' (Block $b 'references {"symbol":"TShape.Area","in":"*.dpr"}') @('1 references in 1 files', '(in `*.dpr`: none of them)') @('uAppA')
 Check 'references files cut' (Block $b 'references {"symbol":"TfrmMain.btnSave","mode":"files","limit":1}') @("AppF\`n  uMainForm.pas  2", '... 3 more files (raise `limit`)') @('.dfm  1')
 Check 'references count' (Block $b 'references {"symbol":"TShape.Area","mode":"count"}') @('1 references in 1 files', '... 1 more (raise `limit`)') @('RunA')
-Check 'references bad mode' (Block $b 'references {"symbol":"TShape.Area","mode":"bogus"}') @('`mode` is lines (the default), files (a count per file) or count (the counts alone) - not `bogus`')
+Check 'references bad mode' (Block $b 'references {"symbol":"TShape.Area","mode":"bogus"}') @("``mode`` of ``references`` is lines, files or count (not ``bogus``)")
 Check 'references files none' (Block $b 'references {"symbol":"NeverCalled","mode":"files"}') @('0 references in 0 files')
 
 # defines: Shared\uFlags.pas, lines pinned. AppB shares AppA's analysis and

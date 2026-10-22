@@ -118,6 +118,18 @@ Common rules:
   closure, wrong relation for the symbol) are tool results with `isError`
   set, as MCP specifies - the agent reads those; a protocol error would only
   be logged.
+- **Arguments are checked against the catalogue** (0.33.0): a name the tool
+  does not take is refused with the ones it does, and the likely one
+  (`filter` - `match`, `path` - `in`, a misspelling); a value outside an
+  enum is refused with the values. Before, both were dropped without a word
+  and the answer read as the filtered one: a field report counted "the
+  filters of `members` and `find` are silently ignored" among what slowed an
+  agent down (`find` with `path`, `members` with `filter`, `outline` with
+  `line`). The schemas stay open (no `additionalProperties: false`): a
+  client refusing first would not say which argument was meant.
+- **`file` + `line` alone** (0.33.0) is the routine around that line - the
+  innermost one, named on its header - for every tool addressed by
+  position.
 - **Freshness note**: when the call had to re-analyze changed files first,
   the answer starts with `(index: re-analyzed N changed file(s) in X ms: a.pas,
   b.pas)` - the files named, 8 of them and the rest counted, a unit shared by

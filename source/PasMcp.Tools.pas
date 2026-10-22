@@ -375,6 +375,30 @@ begin
   Result := LP > Length(APattern);
 end;
 
+// `match`: a part of the name or a wildcard, several joined by `|` - an
+// agent writes `Invoice|Detail` for either, and a `|` matched literally
+// found nothing. Lowercased, a bare part wrapped in `*`.
+function MatchAlternatives(const AMatch: string): TArray<string>;
+begin
+  Result := nil;
+  for var LAlt in AMatch.Split(['|'], TStringSplitOptions.ExcludeEmpty) do
+    if Trim(LAlt) <> '' then
+      if (Pos('*', LAlt) = 0) and (Pos('?', LAlt) = 0) then
+        Result := Result + ['*' + LowerCase(Trim(LAlt)) + '*']
+      else
+        Result := Result + [LowerCase(Trim(LAlt))];
+end;
+
+// No patterns match everything.
+function WildMatchAny(const APatterns: TArray<string>;
+  const ATextLower: string): Boolean;
+begin
+  Result := Length(APatterns) = 0;
+  for var LP in APatterns do
+    if WildMatch(LP, ATextLower) then
+      Exit(True);
+end;
+
 function IsWildPattern(const AText: string): Boolean;
 begin
   Result := (Pos('*', AText) > 0) or (Pos('?', AText) > 0);
@@ -1122,6 +1146,10 @@ begin
 end;
 
 // file + line + (name | column) -> what is there.
+function RoutineHeaderAt(AWs: TMcpWorkspace; const AFile: string;
+  ALine: Integer; out AName: string; out AHeadLine, AHeadCol: Integer): Boolean;
+  forward;
+
 function ResolvePosition(AWs: TMcpWorkspace; AArgs: TJSONObject): TTarget;
 var
   LFile, LName, LText: string;
@@ -1158,6 +1186,16 @@ begin
   if LLine <= 0 then
     raise EToolError.Create('`line` is required with `file` (a file alone '
       + 'names its unit, and this one is no unit the index holds)');
+  // `file` + `line` alone: the routine around that line, named on its
+  // header - an agent asked `outline` for "the routine around line 7716".
+  if (LCol <= 0) and (LName = '') then
+  begin
+    if not RoutineHeaderAt(AWs, LFile, LLine, LName, LMore, LCol) then
+      raise EToolError.CreateFmt('line %d of %s is in no routine - give `name` '
+        + '(the identifier on that line) or `column`', [LLine,
+        AWs.RelPath(LFile)]);
+    LLine := LMore;
+  end;
   if LCol <= 0 then
   begin
     if LName = '' then
@@ -3017,6 +3055,63 @@ begin
       Result := LNode;
       LBestLine := LFromLine;
       LBestCol := LFromCol;
+    end;
+  end;
+end;
+
+// The innermost routine around ALine of AFile: the name its header
+// declares (the last part of TFoo.Bar) and where that name is written.
+function RoutineHeaderAt(AWs: TMcpWorkspace; const AFile: string;
+  ALine: Integer; out AName: string; out AHeadLine, AHeadCol: Integer): Boolean;
+var
+  LMid, LFileId, LNode, LCol, LEndFile, LEndLine: Integer;
+  LM: TPasSemaModel;
+  LLines: TArray<string>;
+  LHead: TMatch;
+begin
+  Result := False;
+  AName := '';
+  AHeadLine := 0;
+  AHeadCol := 0;
+  LLines := ReadLines(AFile);
+  if (ALine < 1) or (ALine > Length(LLines)) then
+    Exit;
+  // The first character written on the line: a position inside the
+  // routine whichever column its header starts at.
+  LCol := 1;
+  while (LCol < Length(LLines[ALine - 1])) and
+        (LLines[ALine - 1][LCol] <= ' ') do
+    Inc(LCol);
+  for var LA in AWs.Analyses do
+  begin
+    LMid := LA.Nav.ModelIdOf(AFile);
+    if (LMid < 0) or not LA.Proj.EnsureHydrated(LMid) then
+      Continue;
+    LM := LA.Proj.Model(LMid);
+    LFileId := FileIdOf(LM, AFile);
+    if LFileId < 0 then
+      Continue;
+    LNode := RoutineNodeAt(LM, LFileId, ALine, LCol);
+    if (LNode = NIL_NODE) or not VisPos(LM, LM.Tree.NodeLeftmostVis(LNode),
+       LFileId, AHeadLine, LCol) or not VisPos(LM, LM.Tree.Nodes[LNode]
+       .LastToken, LEndFile, LEndLine, LCol) then
+      Continue;
+    // The header may run over lines: its name is on the first line that
+    // writes the routine keyword.
+    for var LLine := AHeadLine to Min(LEndLine, Length(LLines)) do
+    begin
+      LHead := TRegEx.Match(LLines[LLine - 1], '\b(procedure|function|'
+        + 'constructor|destructor|operator)\s+([A-Za-z_][\w.]*)',
+        [roIgnoreCase]);
+      if LHead.Success then
+      begin
+        AName := LHead.Groups[2].Value;
+        AName := Copy(AName, LastDelimiter('.', AName) + 1, MaxInt);
+        AHeadLine := LLine;
+        AHeadCol := LHead.Groups[2].Index + Length(LHead.Groups[2].Value) -
+          Length(AName);
+        Exit(True);
+      end;
     end;
   end;
 end;
@@ -8785,7 +8880,7 @@ var
   LT: TTarget;
   LA: TMcpAnalysis;
   LM, LDM: TPasSemaModel;
-  LVisArg, LKind, LMatch, LMatchLower, LUnitFile, LHead, LHeading,
+  LVisArg, LKind, LMatch, LUnitFile, LHead, LHeading,
     LLastHeading, LIndent, LList, LText: string;
   LMid, LSym, LLimit, LScope, LGroupIdx, LNotVisible, LShown, LLastGroup,
     LPrevLine: Integer;
@@ -8803,6 +8898,7 @@ var
   LSorted: TArray<TMemberRow>;
   LRemain: TArray<Integer>;
   LIsVar, LListLibrary, LPass: Boolean;
+  LMatches: TArray<string>;
   LSb: TStringBuilder;
 begin
   LVisArg := LowerCase(ArgStr(AArgs, 'visibility'));
@@ -8819,10 +8915,16 @@ begin
       + 'left out: what the type''s own methods (for a variable, code in its '
       + 'unit) can use');
   LKind := MemberKindArg(ArgStr(AArgs, 'member_kind'));
+  // `kind` narrows the name asked about, which is a type: a member kind there
+  // is the filter `member_kind` is, written in the wrong place.
+  if MatchText(ArgStr(AArgs, 'kind'), ['method', 'methods', 'routine',
+     'procedure', 'function', 'constructor', 'destructor']) then
+    raise EToolError.CreateFmt('`kind` narrows the name you give (a type, a '
+      + 'variable) - to list only its %ss, pass `member_kind: %s`',
+      [LowerCase(ArgStr(AArgs, 'kind')).TrimRight(['s']),
+      LowerCase(ArgStr(AArgs, 'kind')).TrimRight(['s'])]);
   LMatch := ArgStr(AArgs, 'match');
-  if (LMatch <> '') and (Pos('*', LMatch) = 0) and (Pos('?', LMatch) = 0) then
-    LMatch := '*' + LMatch + '*';
-  LMatchLower := LowerCase(LMatch);
+  LMatches := MatchAlternatives(LMatch);
   LLimit := EnsureRange(ArgInt(AArgs, 'limit', 150), 0, 5000);
   LT := ResolveOne(AWs, AArgs);
   case LT.Kind of
@@ -8945,8 +9047,7 @@ begin
         LGroupOf.Add(SymKey(LDecl.UnitId, LDecl.Sym), LGroupIdx);
       end;
       LPass := ((LKind = '') or MemberKindMatches(LDM, LSite.Sym, LKind)) and
-        ((LMatchLower = '') or WildMatch(LMatchLower,
-        LDM.Symbols[LSite.Sym].NameLower));
+        WildMatchAny(LMatches, LDM.Symbols[LSite.Sym].NameLower);
       // Out of reach does not hide: the next member of its name up is the
       // one a call from the view binds to.
       if not MemberVisible(LView, LDM.Symbols[LSite.Sym].Visibility,
@@ -9022,7 +9123,7 @@ begin
         LT.DeclLine]);
     LHead := LHead + ': ' + MemberNoun(LRows.Count, LKind);
     if LMatch <> '' then
-      LHead := LHead + ' named like ' + LMatch;
+      LHead := LHead + ' named like ' + String.Join(' or ', LMatches);
     case LView of
       mvPublic:
         LHead := LHead + ', public and published only';
@@ -17765,7 +17866,8 @@ const
     + 'method, property, field, const, type - or procedure, function, '
     + 'constructor, destructor"},'
     + '"match":{"type":"string","description":"Only members whose name '
-    + 'matches: wildcards (*Save*) or a part of the name"},'
+    + 'matches: wildcards (*Save*) or a part of the name; several joined by '
+    + '| (Save|Load)"},'
     + '"library":{"type":"boolean","description":"List the members of '
     + 'ancestors outside the group too (default false: counted)"},'
     + '"limit":{"type":"integer","description":"Max rows (default 150; '
@@ -18232,6 +18334,129 @@ begin
   end;
 end;
 
+// Levenshtein distance of two short strings, AMax + 1 once it is past AMax.
+function EditDistance(const AA, AB: string; AMax: Integer): Integer;
+var
+  LPrev, LCur: TArray<Integer>;
+begin
+  if Abs(Length(AA) - Length(AB)) > AMax then
+    Exit(AMax + 1);
+  SetLength(LPrev, Length(AB) + 1);
+  SetLength(LCur, Length(AB) + 1);
+  for var LJ := 0 to Length(AB) do
+    LPrev[LJ] := LJ;
+  for var LI := 1 to Length(AA) do
+  begin
+    LCur[0] := LI;
+    for var LJ := 1 to Length(AB) do
+      LCur[LJ] := Min(Min(LPrev[LJ] + 1, LCur[LJ - 1] + 1),
+        LPrev[LJ - 1] + Ord(AA[LI] <> AB[LJ]));
+    LPrev := Copy(LCur);
+  end;
+  Result := LPrev[Length(AB)];
+end;
+
+var
+  // Each tool's `inputSchema.properties`, by tool name - read from the
+  // catalogue once, at startup, and only read after.
+  GToolProps: TDictionary<string, TJSONObject>;
+  GToolCatalogue: TJSONArray;
+
+procedure LoadToolProps;
+begin
+  GToolCatalogue := ToolDefinitions;
+  GToolProps := TDictionary<string, TJSONObject>.Create;
+  for var LTool in GToolCatalogue do
+    GToolProps.Add(TJSONObject(LTool).GetValue<string>('name'),
+      TJSONObject(LTool).GetValue<TJSONObject>('inputSchema.properties'));
+end;
+
+// The names an agent writes for an argument a tool spells otherwise - the
+// guesses a field report showed an agent making (`filter` for `match`),
+// each mapped to what the tool takes.
+function ArgumentSynonym(const AArg: string; AProps: TJSONObject): string;
+const
+  SYNONYMS: array[0..17, 0..1] of string = (
+    ('filter', 'match'), ('pattern', 'match'), ('mask', 'match'),
+    ('contains', 'match'), ('name_filter', 'match'), ('filter', 'query'),
+    ('pattern', 'query'), ('mask', 'query'), ('type', 'member_kind'),
+    ('member_type', 'member_kind'), ('members_kind', 'member_kind'),
+    ('unit', 'in'), ('path', 'in'), ('dir', 'in'), ('unit', 'file'),
+    ('path', 'file'), ('range', 'lines'), ('max', 'limit'));
+begin
+  Result := '';
+  for var LI := Low(SYNONYMS) to High(SYNONYMS) do
+    if SameText(SYNONYMS[LI, 0], AArg) and
+       (AProps.GetValue(SYNONYMS[LI, 1]) <> nil) then
+      Exit(SYNONYMS[LI, 1]);
+  // A misspelling: `memberkind`, `symbl` - one edit in a short name, which
+  // two would turn into another (`line` - `file`).
+  for var LPair in AProps do
+    if EditDistance(LowerCase(AArg), LPair.JsonString.Value, 2) <=
+       IfThen(Length(AArg) >= 6, 2, 1) then
+      Exit(LPair.JsonString.Value);
+end;
+
+// Arguments checked against the catalogue before a tool runs. A name the
+// tool does not take, or a value outside its enum, was dropped without a
+// word before: the call answered unfiltered, and the agent took that for
+// the filtered answer (a field report: "the filters of `members` and `find`
+// are silently ignored").
+procedure CheckArguments(const AName: string; AArgs: TJSONObject);
+var
+  LProps: TJSONObject;
+  LSchema, LEnum: TJSONValue;
+  LKnown, LGuess, LValue: string;
+  LOk: Boolean;
+begin
+  if (AArgs = nil) or not GToolProps.TryGetValue(AName, LProps) then
+    Exit;
+  LKnown := '';
+  for var LPair in LProps do
+    LKnown := LKnown + IfThen(LKnown <> '', ', ', '') + '`' +
+      LPair.JsonString.Value + '`';
+  for var LPair in AArgs do
+  begin
+    // MCP's own field, which a client may put among the arguments.
+    if LPair.JsonString.Value = '_meta' then
+      Continue;
+    LSchema := LProps.GetValue(LPair.JsonString.Value);
+    if LSchema = nil then
+    begin
+      if (AName = 'outline') and (LPair.JsonString.Value = 'line') then
+        LGuess := ' (the routine around a line: `source` with `file` + '
+          + '`line`)'
+      else
+      begin
+        LGuess := ArgumentSynonym(LPair.JsonString.Value, LProps);
+        if LGuess <> '' then
+          LGuess := Format(' (did you mean `%s`?)', [LGuess]);
+      end;
+      raise EToolError.CreateFmt('`%s` takes no argument `%s`%s - its '
+        + 'arguments: %s', [AName, LPair.JsonString.Value, LGuess,
+        IfThen(LKnown <> '', LKnown, 'none')]);
+    end;
+    LEnum := (LSchema as TJSONObject).GetValue('enum');
+    if (LEnum is TJSONArray) and not (LPair.JsonValue is TJSONNull) then
+    begin
+      LValue := Trim(LPair.JsonValue.Value);
+      LOk := LValue = '';
+      for var LItem in TJSONArray(LEnum) do
+        LOk := LOk or SameText(LItem.Value, LValue);
+      if not LOk then
+      begin
+        LKnown := '';
+        for var LI := 0 to TJSONArray(LEnum).Count - 1 do
+          LKnown := LKnown + IfThen(LI = 0, '', IfThen(LI = TJSONArray(LEnum)
+            .Count - 1, ' or ', ', ')) + TJSONArray(LEnum).Items[LI].Value;
+        raise EToolError.CreateFmt('`%s` of `%s` is %s (not `%s`) - %s',
+          [LPair.JsonString.Value, AName, LKnown, LValue,
+          (LSchema as TJSONObject).GetValue<string>('description', '')]);
+      end;
+    end;
+  end;
+end;
+
 function CallTool(AWs: TMcpWorkspace; const AName: string; AArgs: TJSONObject;
   out AIsError: Boolean; out ADeferred: TDeferredTool;
   const AProgress: TProc<string>; const ACancelled: TFunc<Boolean>): string;
@@ -18246,6 +18471,7 @@ begin
   LFreshMs := 0;
   AWs.BeginCall(ACancelled);
   try
+    CheckArguments(AName, AArgs);
     if AName <> 'status' then
     begin
       // The handshake does not wait for the analysis; the first real call
@@ -18325,5 +18551,12 @@ begin
     LJob.Free;
   end;
 end;
+
+initialization
+  LoadToolProps;
+
+finalization
+  GToolProps.Free;
+  GToolCatalogue.Free;
 
 end.
