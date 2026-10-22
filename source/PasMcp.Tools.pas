@@ -3314,14 +3314,27 @@ begin
     IfThen(LTo > LAt, Format('%d-%d', [LAt, LTo]), IntToStr(LAt))]));
   LRanged := (ARange.First > 0) or (ARange.Last > 0);
   LEnd := LTo;
-  if LRanged then
+  if LRanged and (ARange.Last > 0) and (ARange.Last < LAt) and
+     (ARange.Last <= LTo - LAt + 1) then
+  begin
+    // Wholly above it and no longer than it: counted from its first line,
+    // as `-40` reads to an agent wanting its first 40 lines (a field
+    // report: "lines -40 is outside it" for a routine at 629-735).
+    LFrom := LAt + Max(ARange.First, 1) - 1;
+    LEnd := LAt + ARange.Last - 1;
+    ASb.AppendLine(Format('(`lines` are file line numbers, and %s is above '
+      + 'it - read from its first line: lines %d-%d)', [ARange.Text, LFrom,
+      LEnd]));
+  end
+  else if LRanged then
   begin
     LFrom := Max(LFrom, ARange.First);
     if ARange.Last > 0 then
       LEnd := Min(LTo, ARange.Last);
     if LFrom > LEnd then
     begin
-      ASb.AppendLine(Format('(`lines` %s is outside it)', [ARange.Text]));
+      ASb.AppendLine(Format('(`lines` %s is outside it: give file line '
+        + 'numbers, %d-%d)', [ARange.Text, LAt, LTo]));
       Exit;
     end;
     ASb.AppendLine(Format('(%s of it, as `lines` asks)', [IfThen(LFrom = LEnd,
@@ -17878,8 +17891,9 @@ const
     + '"limit":{"type":"integer","description":"Max lines per part (default '
     + '300); over all the overloads when a name has several"},'
     + '"lines":{"type":"string","description":"Only these lines of it, '
-    + 'numbered as in the file: 40-80, 40- (to its end), -80 (from its '
-    + 'start) or 40"}}}},' +
+    + 'by FILE line number: 40-80, 40- (to its end), -80 (from its start to '
+    + 'line 80 of the file) or 40. A range wholly above it counts from its '
+    + 'first line instead (-40: its first 40 lines), and says so"}}}},' +
 
     '{"name":"members","description":"What can be used on a class, record '
     + 'or interface, inherited members included - instead of an outline per '

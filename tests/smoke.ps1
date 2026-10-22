@@ -157,9 +157,12 @@ Check 'source namesakes' (Block $b 'source {"symbol":"Add"}') @('`Add` is ambigu
 Check 'source lines' (Block $b 'source {"symbol":"RunB", "lines":"29-31"}') @('RunB (procedure) implemented at AppB\uAppB.pas:26-32', '(lines 29-31 of it, as `lines` asks)', "29  begin`n30    LSquare := TSquare.Create(4);`n31    Writeln") @('28  ', '32  end;', 'more lines')
 Check 'source lines to' (Block $b 'source {"symbol":"RunB", "lines":"-26"}') @('(lines 25-26 of it', "25  // Project B's run", '26  procedure RunB;') @('27  ')
 Check 'source lines limit' (Block $b 'source {"symbol":"RunB", "lines":"28-"') @('(lines 28-32 of it', '29  begin', '... 3 more lines, to line 32 (raise `limit`)') @('30  ')
-Check 'source lines outside' (Block $b 'source {"symbol":"RunB", "lines":"100-120"}') @('RunB (procedure) implemented at AppB\uAppB.pas:26-32', '(`lines` 100-120 is outside it)') @('26  procedure')
+# Wholly above it and no longer: counted from its first line, and said.
+Check 'source lines relative' (Block $b 'source {"symbol":"RunB", "lines":"-3"}') @('(`lines` are file line numbers, and -3 is above it - read from its first line: lines 26-28)', '26  procedure RunB;', '28    LSquare: TSquare;') @('29  ')
+Check 'source lines relative range' (Block $b 'source {"symbol":"RunB", "lines":"2-3"}') @('read from its first line: lines 27-28)', '27  var') @('26  ', '29  ')
+Check 'source lines outside' (Block $b 'source {"symbol":"RunB", "lines":"100-120"}') @('RunB (procedure) implemented at AppB\uAppB.pas:26-32', '(`lines` 100-120 is outside it: give file line numbers, 26-32)') @('26  procedure')
 Check 'source lines bad' (Block $b 'source {"symbol":"RunB", "lines":"31-29"}') @('`lines` 31-29: give file line numbers as the answers number them')
-Check 'source lines overloads' (Block $b 'source {"symbol":"TBase.Add", "lines"') @('TBase.Add - 2 overloads:', '(line 77 of it', '77    Inc(FCount, AValue);', '(`lines` 77 is outside it)') @('76  ', '82  ')
+Check 'source lines overloads' (Block $b 'source {"symbol":"TBase.Add", "lines"') @('TBase.Add - 2 overloads:', '(line 77 of it', '77    Inc(FCount, AValue);', '(`lines` 77 is outside it: give file line numbers, 80-83)') @('76  ', '82  ')
 Check 'source external overloads' (Block $b 'source {"symbol":"Winapi.Windows.SendMessage"}') @('SendMessage - 2 overloads:', "external minuser name 'SendMessageW';", 'function SendMessage(hWnd: HWND; Msg: UINT; wParam: WPARAM; lParam: LPARAM): LRESULT; external', 'function SendMessage(hWnd: HWND; Msg: UINT; wParam: INT_PTR; lParam: LPARAM): LRESULT; external')
 # members: by the type declaring each, under its visibility section. Seen from
 # TDerived's own methods: its ancestor's private field (same unit) but not the

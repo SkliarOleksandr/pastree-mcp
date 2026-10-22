@@ -34,6 +34,8 @@ source {"symbol":"RunB", "lines":"28-", "limit":2}
 source {"symbol":"RunB", "lines":"100-120"}
 source {"symbol":"RunB", "lines":"31-29"}
 source {"symbol":"TBase.Add", "lines":"77"}
+source {"symbol":"RunB", "lines":"-3"}
+source {"symbol":"RunB", "lines":"2-3"}
 members {"symbol":"TDerived"}
 members {"symbol":"TDerived", "visibility":"public"}
 members {"symbol":"TDerived", "visibility":"all", "member_kind":"fields"}
