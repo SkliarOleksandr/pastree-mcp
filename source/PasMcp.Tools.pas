@@ -2856,11 +2856,14 @@ begin
   end;
 end;
 
+// Source lines as written, a tab after the number - spaces there ran into
+// the line's own indentation, and an edit copied from the answer missed the
+// file (a field report).
 procedure AppendSource(ASb: TStringBuilder; const ALines: TArray<string>;
   AFrom, ACount: Integer);
 begin
   for var LLine := AFrom to Min(Length(ALines), AFrom + ACount - 1) do
-    ASb.AppendLine(Format('%6d  %s', [LLine, ALines[LLine - 1].TrimRight]));
+    ASb.AppendLine(Format('%6d'#9'%s', [LLine, ALines[LLine - 1].TrimRight]));
 end;
 
 function ToolDefinition(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
@@ -3348,8 +3351,9 @@ begin
   end;
   LLast := Min(LEnd, LFrom + ALimit - 1);
   LWidth := Length(IntToStr(LLast));
+  // A tab after the number, as AppendSource.
   for var LLine := LFrom to LLast do
-    ASb.AppendLine(Format('%*d  %s', [LWidth, LLine,
+    ASb.AppendLine(Format('%*d'#9'%s', [LWidth, LLine,
       LM.Tree.Source.Files[LFileId].LineText(LLine)]));
   if LEnd > LLast then
     ASb.AppendLine(Format('... %d more lines, to line %d (raise `limit`)',

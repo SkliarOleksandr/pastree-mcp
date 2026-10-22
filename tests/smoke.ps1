@@ -25,6 +25,7 @@ $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $fixture = Join-Path $here 'fixtures\group'
 $group = Join-Path $fixture 'Fixture.groupproj'
 $script:failures = 0
+$script:rawBlocks = [ordered]@{}
 $script:mode = ''
 
 function Check([string]$Name, [string]$Text, [string[]]$Expected, [string[]]$Absent = @()) {
@@ -61,8 +62,10 @@ function Run-Cli([string[]]$ExtraArgs) {
     $blocks = [ordered]@{}
     $key = $null
     foreach ($line in $out) {
-        if ($line -match '^=== (\S+ .*?)  \(') { $key = $Matches[1]; $blocks[$key] = '' }
-        elseif ($key) { $blocks[$key] += $line + "`n" }
+        if ($line -match '^=== (\S+ .*?)  \(') { $key = $Matches[1]; $blocks[$key] = ''; $script:rawBlocks[$key] = '' }
+        # Source lines carry a tab after their number (`source`, `definition`):
+        # read as the two spaces it replaced, kept as is in rawBlocks.
+        elseif ($key) { $blocks[$key] += ($line -replace "`t", '  ') + "`n"; $script:rawBlocks[$key] += $line + "`n" }
     }
     return $blocks
 }
@@ -133,7 +136,10 @@ Check 'find outside the index' (Block $b 'find {"query":"OrphanRoutine"}') @('no
 Check 'find nowhere' (Block $b 'find {"query":"NothingAnywhere"}') @('no declaration matches `NothingAnywhere` among the ', 'no Pascal file outside them writes `NothingAnywhere` either (1 searched, under the group directory')
 Check 'definition' (Block $b 'definition {"symbol":"TCircle.Area"') @('declared at Shared\uShapes.pas:26', 'implemented at Shared\uShapes.pas:53', 'Result := Pi * FRadius * FRadius;')
 Check 'source' (Block $b 'source {"symbol":"TCircle.Area"}') @('TCircle.Area (function) implemented at Shared\uShapes.pas:53-56', "53  function TCircle.Area: Double;`n54  begin", "56  end;`n") @('declared at')
-Check 'source both' (Block $b 'source {"symbol":"TCircle.Area", "part"') @('TCircle.Area (function) declared at Shared\uShapes.pas:26', "26      function Area: Double; override;`nimplemented at Shared\uShapes.pas:53-56")
+# A tab after the number: spaces there ran into the line's own indentation.
+Check 'source tab' $script:rawBlocks['source {"symbol":"TCircle"}'] @("21`t  TCircle = class(TShape)", "28`t  end;")
+Check 'definition tab' $script:rawBlocks['definition {"symbol":"TCircle.Area", "context":3}'] @("    53`tfunction TCircle.Area: Double;")
+Check 'source both'(Block $b 'source {"symbol":"TCircle.Area", "part"') @('TCircle.Area (function) declared at Shared\uShapes.pas:26', "26      function Area: Double; override;`nimplemented at Shared\uShapes.pas:53-56")
 Check 'source type' (Block $b 'source {"symbol":"TCircle"}') @('TCircle (class) declared at Shared\uShapes.pas:21-28', '21    TCircle = class(TShape)', '28    end;')
 Check 'source limit' (Block $b 'source {"symbol":"TSquare"') @('TSquare (class) declared at Shared\uShapes.pas:30-36', "31    private`n... 5 more lines, to line 36")
 # The comment directly above comes with it; the blank line above that stops it.
@@ -620,7 +626,7 @@ foreach ($light in @($true, $false)) {
     foreach ($line in $out) {
         # The same call twice: numbered, #2 the second.
         if ($line -match '^=== (\S+ .*?)  \(') { $key = $Matches[1]; if ($lb.Contains($key)) { $key = $key + ' #2' }; $lb[$key] = '' }
-        elseif ($key) { $lb[$key] += $line + "`n" }
+        elseif ($key) { $lb[$key] += ($line -replace "`t", '  ') + "`n" }
     }
     # The same rows either way but where light mode is said.
     Check 'light callers own' (Block $lb 'callers {"symbol":"TOwnWorker.DoWork"}') @("uOwn.pas`n  OwnMain`n    31  LW.DoWork;", 'also through TLibWorker.DoWork (virtual)')
