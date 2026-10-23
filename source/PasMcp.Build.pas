@@ -1958,7 +1958,30 @@ begin
   Result := MatchText(TPath.GetExtension(AFile), ['.dpr', '.dpk']);
 end;
 
+procedure CompareUnlocked(var AResult: TBuildResult;
+  const AChangedFiles: TArray<string>); forward;
+
+// Under the build directory's lock, as the build is: the comparison runs
+// after the build released it, and two servers on one group (two sessions)
+// finishing together would each read the baseline and write their own - one
+// compile's record lost, the next compile's new and old taken from the wrong
+// one.
 procedure CompareWithBaseline(var AResult: TBuildResult;
+  const AChangedFiles: TArray<string>);
+var
+  LMutex: THandle;
+  LOwned: Boolean;
+begin
+  LockBuildDir(AResult.Dir, AResult.Spec.Member.Name, nil, nil, LMutex,
+    LOwned);
+  try
+    CompareUnlocked(AResult, AChangedFiles);
+  finally
+    UnlockBuildDir(LMutex, LOwned);
+  end;
+end;
+
+procedure CompareUnlocked(var AResult: TBuildResult;
   const AChangedFiles: TArray<string>);
 var
   LPath, LKey, LF: string;

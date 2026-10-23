@@ -16,6 +16,8 @@ find {"query":"TSmallCircle"}
 find {"query":"TCircleBig"}
 find {"query":"TBigCirle"}
 source {"symbol":"TCircleBig"}
+find {"query":"TfixRankStatus"}
+source {"symbol":"TfixRankStatus"}
 source {"symbol":"TCircle.Areaa"}
 source {"symbol":"Zzzqqq"}
 find {"query":"*Circ*", "scope":"project", "limit":2}

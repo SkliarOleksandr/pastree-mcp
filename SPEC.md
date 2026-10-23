@@ -74,6 +74,13 @@ Common rules:
   0.6 or more (a type's T or I prefix not a word), or one edit away (two in
   a name of ten letters or more). An agent's guess, TaviCreditStatus, rarely
   contains the real TCreditStatus, and `*name*` missed it (a field report).
+  Among names as many words alike, one ending in the query's last word
+  comes first - a CamelCase name is its last word - and, for a query like
+  a type's (T, I or E, then a capital within four letters: TFoo, TaviFoo),
+  a type before a member (0.43.1). TaviCreditTransactionStatus put the type
+  TCreditTransactionStatus sixth, after four CreditTransactionStatus
+  properties and a class, and `source`'s refusal, which lists six, left it
+  out (a field report).
 - **Wildcards in any segment** (`*.Save`, `*Form.Save`, `TFoo*.Bar`): a
   qualifier is matched against the declaration's unit + owner chain as the
   last segment against its name. Only the last segment took them, and `*.X`
@@ -1145,7 +1152,13 @@ the whole walk, and PasTree 0.122.0's narrower demands made `callees` of a
 form's `FormActivate` at depth 2 run 10 times, 144 s, where a full rebuild
 of the group's largest analysis takes 3 to 7 s. By time, not by runs
 (0.32.1 counted four): a reference search over three analyses takes four
-short runs, one per analysis made complete, and stays light. A tool whose
+short runs, one per analysis made complete, and stays light. A search by
+name (`QFind`) and the closure (`QClosure`) complete every analysis
+before the tool runs again, one run for all (0.43.1): a `find` of a name
+nothing declares ran four times on the client group, 13.2 s, now 9.5 s,
+what remains the one-time taking in of light units (3.3 s for the exact
+name, 2.6 s the closures, 2.1 s for `*name*`), 1.6 s warm; `--no-light`
+answers it in 1.7 s after a 7.4 s load instead of 4. A tool whose
 queries keep changing the analysis runs at most 24 times; the last run
 answers partially.
 

@@ -129,6 +129,10 @@ type
   TFindExtras = class
   public
     InFilter: string;
+    // The one model file to search (full path): an ancestor's members are
+    // in the unit declaring it, and a walk over every unit per ancestor took
+    // `IFoo.*Detail*` 3 s on the client group, `IFoo.Detail` 0.4 s.
+    OnlyFile: string;
     ByUnit: TDictionary<string, Integer>;   // unit name -> matches
     OwnUnits: TDictionary<string, Boolean>; // the group's own, by name
     Own: Integer;                             // matches in own units
@@ -1219,14 +1223,19 @@ end;
 // or that AUnits names (WS.EnsureFind, PasTree 0.124.0) - so the walk over
 // the models' symbols lists what a full analysis lists. Nothing to do in a
 // full analysis.
+// Every analysis completed before the tool runs again: one change raised
+// at once - a change per analysis raised as it came made `find` on the
+// client group run four times for three analyses (12.5 s, the same call
+// 1.6 s warm; a field report).
 procedure QFind(AWs: TMcpWorkspace; const AQuery: string; AUnits: Boolean);
 begin
   for var LA in AWs.Analyses do
     if (LA.Proj <> nil) and (LA.Proj.LightCount > 0) then
     begin
       LA.WS.EnsureFind(AQuery, AUnits);
-      AWs.QueryDone(LA);
+      AWs.QueryDone(LA, True);
     end;
+  AWs.RaiseIfChanged;
 end;
 
 // Every unit the full analysis loads, loaded (the library ones light; WS.
@@ -1239,8 +1248,10 @@ begin
     if (LA.Proj <> nil) and (LA.Proj.LightCount > 0) then
     begin
       LA.WS.EnsureClosure;
-      AWs.QueryDone(LA);
+      AWs.QueryDone(LA, True);
     end;
+  // As QFind: every analysis's closure, then one run again.
+  AWs.RaiseIfChanged;
 end;
 
 // The demand of a position question (WS.At: the file when it is light, and
@@ -1519,6 +1530,7 @@ var
   LId: TSymId;
   LX, LNext: TSemaXType;
   LAnc: TPasSemaModel;
+  LOnly: TFindExtras;
 begin
   Result := nil;
   LQual := string.Join('.', Copy(AParts, 0, High(AParts)));
@@ -1526,6 +1538,7 @@ begin
   LTypes := ResolveName(AWs, LQual, 'type', AOwnOnly, 12, LTypeMore, False);
   LNames := TDictionary<string, Boolean>.Create;
   LSites := TDictionary<string, Boolean>.Create;
+  LOnly := TFindExtras.Create;
   try
     for var LT in AHave do
     begin
@@ -1555,9 +1568,10 @@ begin
           if not LA.Proj.EnsureHydrated(LX.UnitId) then
             Break;
           LAnc := LA.Proj.Model(LX.UnitId);
+          LOnly.OnlyFile := LA.Proj.ModelFile(LX.UnitId);
           LFound := ResolveName(AWs, UnitNameOfFile(LA.Proj.ModelFile(
             LX.UnitId)) + '.' + QualifiedName(LAnc, LX.Sym) + '.' + LPattern,
-            AKind, AOwnOnly, 500, LMore, False);
+            AKind, AOwnOnly, 500, LMore, False, LOnly);
           for var LC in LFound do
           begin
             LShort := LC.Name.Substring(LC.Name.LastIndexOf('.') + 1);
@@ -1583,6 +1597,7 @@ begin
         Break;
       end;
   finally
+    LOnly.Free;
     LSites.Free;
     LNames.Free;
   end;
@@ -1732,6 +1747,9 @@ begin
             Continue;
           if (AExtras <> nil) and (AExtras.InFilter <> '') and
              not InFilterMatches(AWs, LFile, AExtras.InFilter) then
+            Continue;
+          if (AExtras <> nil) and (AExtras.OnlyFile <> '') and
+             not SameText(LFile, AExtras.OnlyFile) then
             Continue;
           LM := LA.Proj.Model(LMid);
           LGen := AWs.IsOwnFile(LFile) and GeneratedUnit(LM, LFile);
@@ -1894,7 +1912,10 @@ begin
     // declare it - a light unit's implementation, a unit only library
     // implementations use - made full; when that changed the analysis,
     // the tool runs again and finds it (`find` asked first, nothing new).
-    if (LRaw.Count = 0) and (LList.Count = 0) and not AOwnOnly then
+    // Not for one file's search: its unit is loaded, and an ancestor with no
+    // member of the name is the common case of InheritedWildMembers.
+    if (LRaw.Count = 0) and (LList.Count = 0) and not AOwnOnly and
+       ((AExtras = nil) or (AExtras.OnlyFile = '')) then
       QFind(AWs, AQuery, (AKind = '') and not LWild and not LWildQuals);
     if (LRaw.Count = 0) and (LList.Count = 0) and AClimb and
        (Length(LQuals) > 0) and not LWild and not LWildQuals then
@@ -2204,6 +2225,7 @@ var
   LS: TScored;
   LCommon, LMore, LDist: Integer;
   LFound: TArray<TTarget>;
+  LTypeLike: Boolean;
 begin
   Result := nil;
   LParts := AQuery.Split(['.']);
@@ -2215,6 +2237,20 @@ begin
   LNameLower := LowerCase(LName);
   LQual := string.Join('.', Copy(LParts, 0, High(LParts)));
   LWords := NameWords(LName);
+  if Length(LWords) = 0 then
+    Exit;
+  // TFoo, IFoo, EFoo - and with a project's prefix after the letter,
+  // TaviFoo, IaviFoo: a capital within the next four letters.
+  LTypeLike := False;
+  if (Length(LName) > 1) and CharInSet(LName[1], ['T', 'I', 'E']) then
+    for var LI := 2 to Min(5, Length(LName)) do
+      if LName[LI].IsUpper then
+      begin
+        LTypeLike := True;
+        Break;
+      end
+      else if not LName[LI].IsLower then
+        Break;
   // The longest word a candidate must contain - most names share none,
   // and are passed over without a word split.
   LLong := '';
@@ -2250,7 +2286,22 @@ begin
             // Dice: 2 shared of 2 + 3 words is 0.8.
             LS.Score := 2 * LCommon / (Length(LWords) + Length(LCand));
             if LS.Score < 0.6 then
-              LS.Score := 0;
+              LS.Score := 0
+            // The last word is what a CamelCase name is - a ...Status is a
+            // status - and a name like a type's is asked for a type: for
+            // TaviCreditTransactionStatus the type TCreditTransactionStatus
+            // came sixth, after four CreditTransactionStatus properties and
+            // the class TaviCreditTransaction, all of them as many words
+            // alike, and `source`'s refusal, which lists six, left it out
+            // (a field report).
+            else
+            begin
+              if (Length(LCand) > 0) and (LCand[High(LCand)] = LWords[High(
+                LWords)]) then
+                LS.Score := LS.Score + 0.1;
+              if LTypeLike and KindMatches(LM, LSym, 'type') then
+                LS.Score := LS.Score + 0.05;
+            end;
           end;
           if (LS.Score = 0) and (Length(LNameLower) >= 5) and
              (LLower[1] = LNameLower[1]) then
@@ -3273,8 +3324,14 @@ begin
        (Pos('?', LQuery) = 0) then
     begin
       // Nothing by that exact name: the agent often half-remembers one.
+      // The closure the answer's note on files outside the index needs
+      // (OutsideIndexNote) taken in first: taken in at the end, it ran the
+      // whole search again (light mode, a field report).
       if not LOwnOnly then
+      begin
+        QClosure(AWs);
         QFind(AWs, '*' + LQuery + '*', SameText(LKind, 'unit'));
+      end;
       LExtras.ByUnit.Clear;
       LExtras.OwnUnits.Clear;
       LExtras.Own := 0;

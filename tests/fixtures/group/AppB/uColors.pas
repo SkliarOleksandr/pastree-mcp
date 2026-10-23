@@ -34,4 +34,16 @@ begin
   Result := AShade = TShade.Dark;
 end;
 
+// A name asked for with a project's prefix (TfixRankStatus): the type with
+// its words and its last word comes before the property and the field of
+// the same words (a field report: the type came sixth).
+type
+  TRankStatus = (rsOpen, rsClosed);
+  TRankHolder = class
+  private
+    FRankStatus: TRankStatus;
+  public
+    property RankStatus: TRankStatus read FRankStatus;
+  end;
+
 end.

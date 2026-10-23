@@ -130,6 +130,11 @@ Check 'find similar misspelt' (Block $b 'find {"query":"TBigCirle"}') @("names l
 Check 'source similar' (Block $b 'source {"symbol":"TCircleBig"}') @('no declaration named `TCircleBig` among ', "names like it in the group's own units:`n  AppB\uAppB.pas:11  TBigCircle (class)")
 Check 'source similar member' (Block $b 'source {"symbol":"TCircle.Areaa"}') @("names like it in the group's own units:`n  Shared\uShapes.pas:26  TCircle.Area (function)")
 Check 'source nothing like' (Block $b 'source {"symbol":"Zzzqqq"}') @("no name of the group's own units contains ``Zzzqqq`` or is like it either")
+# Ranked (0.43.1): of names as many words alike, the type, whose last word is
+# the query's and which a T-prefixed query asks for, before the property and
+# the field - alphabetically the property came first.
+Check 'find similar ranked' (Block $b 'find {"query":"TfixRankStatus"}') @("names like it:`nAppB\uColors.pas:41  TRankStatus (type)  TRankStatus = (rsOpen, rsClosed);`nAppB\uColors.pas:46  TRankHolder.RankStatus (property)")
+Check 'source similar ranked' (Block $b 'source {"symbol":"TfixRankStatus"}') @("names like it in the group's own units:`n  AppB\uColors.pas:41  TRankStatus (type)")
 # A type library import's names after the others; where a cut list has the
 # rest, by unit; only the files `in` names.
 Check 'find generated last' (Block $b 'find {"query":"*Circ*", "scope":"project"}') @("Shared\uShapes.pas:21  TCircle (class)  TCircle = class(TShape)`nAppB\Shapes_TLB.pas:16  TCircleStyle (type)", 'AppB\Shapes_TLB.pas:18  ICircleDisp (interface)', '(2 in generated units - type library, WSDL and XML binding imports - listed after the others)')
