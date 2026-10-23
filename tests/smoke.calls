@@ -74,6 +74,19 @@ source {"file":"AppA/uMembers.pas", "line":92}
 source {"file":"AppB/uAppB.pas", "line":1}
 outline {"file":"AppB/uAppB.pas", "line":30}
 outline {"file":"AppA\tuAppA.pas"}
+source {"targets":["TCircle.Area","TWideBox.Configure"],"part":"decl"}
+source {"targets":[{"file":"Shared/uShapes.pas","line":55},{"symbol":"NoSuchThing"}]}
+source {"targets":"TCircle.Area RunB","limit":2}
+source {"targets":["NoSuchA","NoSuchB"]}
+source {"targets":[]}
+source {"targets":["TCircle"],"symbol":"TShape"}
+source {"targets":[{"symbol":"TCircle","bogus":1}]}
+references {"targets":["TCircle","TShape.Area"],"mode":"count"}
+source {"file":"Shared/uShapes.pas","symbol":"TCircle.Area"}
+source {"file":"AppB/uBoxes.pas","symbol":"TCircle.Area"}
+outline {"unit":"uShapes","limit":4}
+outline {"owner":"TCircle"}
+lint {"file":"AppB/uLint.pas","rules":"[\"unused-uses\"]"}
 references {"symbol":"TShape.Area"}
 references {"symbol":"TCircle"}
 references {"file":"AppA/uMembers.pas","line":38,"name":"Count"}
@@ -151,6 +164,13 @@ compile {"member":"AppA", "rebuild":true, "show":"warnings"}
 compile {"member":"NoSuch"}
 compile {"show":"some"}
 compile {}
+compile {"code":"var X := 1 + 2;\nWriteln(X);"}
+compile {"code":"var S := 'a';\nS := 1;","member":"AppB"}
+compile {"code":"unit uTryShapes;\ninterface\nuses uShapes;\nvar Circle: TCircle;\nimplementation\nend.","member":"AppB"}
+compile {"code":"type\n  TR = record\n    A: Integer;\n  end;\nvar R: TR;\nbegin\n  R.A := Missing;\nend.","file":"Shared/uShapes.pas"}
+compile {"code":" "}
+compile {"code":"library L; begin end."}
+compile {"code":"Writeln(1);","rebuild":true}
 form {"file":"AppF/uMainForm.pas"}
 form {"symbol":"TfrmChild"}
 form {"file":"AppF/uData.dfm"}

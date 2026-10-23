@@ -201,6 +201,35 @@ procedure CompareWithBaseline(var AResult: TBuildResult;
 function GitChangedFiles(const ADir, ABase: string; out AWhat, AError: string;
   out AGitOk: Boolean): TArray<string>;
 
+type
+  // `compile` with `code`: what an agent wants tried, as the files dcc
+  // builds. A program or a unit is written as given; statements alone go
+  // between the begin and end of a program of the server's own.
+  TSnippet = record
+    Kind: string;       // 'program', 'unit' or 'statements'
+    Code: string;       // as the agent gave it
+    FileName: string;   // the file the code is in: PasMcpSnippet.dpr, uFoo.pas
+    Text: string;       // that file's text
+    Shift: Integer;     // lines the wrapper adds above the code
+    // The program dcc builds when the code is a unit: one that uses it.
+    MainName, MainText: string;
+  end;
+
+// The code of `compile`'s `code` as files - or AError: a library or a
+// package, which is not built this way. On any thread.
+function SnippetSource(const ACode: string; out AError: string): TSnippet;
+
+// Where the code of ASpec's member is built: beside its own build, apart.
+function SnippetDir(const ASpec: TBuildSpec): string;
+
+// Builds ASnippet with dcc directly, with the settings of ASpec's member as
+// the index read them: its platform's compiler (dcc32 for one that is not
+// Win64), its defines, unit search path, namespaces, aliases and `-$`
+// switches, then the registry search path - so the code may use the
+// member's own units. Compiled and linked, not run. On any thread.
+function BuildSnippet(const ASpec: TBuildSpec; const ASnippet: TSnippet;
+  const AProgress: TProc<string>; ACancel: TBuildCancel): TBuildResult;
+
 implementation
 
 uses
@@ -758,7 +787,10 @@ begin
   // category: a path cut at 128 characters runs straight into it.
   GRaw := TRegEx.Create('^(?<pre>.*?)(?<cat>Error|Warning|Hint|Fatal):\s*(?<code>'
     + '[EWHF]\d{4})\s+(?<text>.*?)\s*$');
-  GFileLine := TRegEx.Create('^(?<file>.+)\((?<line>\d+)(?:,(?<col>\d+))?\)$');
+  // `close` always takes part: Groups['col'] of a trailing group that took
+  // none raises (dcc's own `file(line)` has no column) instead of failing.
+  GFileLine := TRegEx.Create('^(?<file>.+)\((?<line>\d+)(?:,(?<col>\d+))?'
+    + '(?<close>\))$');
   GTrunc := TRegEx.Create('\(\d*$');
   GLines := TRegEx.Create('^\s*(?<lines>[\d,.]+ lines), [\d.,]+ seconds');
 end;
@@ -1074,6 +1106,96 @@ begin
     StrToIntDef(GetEnvironmentVariable(TEST_F2084_VAR), 0);
 end;
 
+// Two builds in one directory write the same .dcu files: one at a time - two
+// sessions on one group, or two calls of one session, now that a build runs
+// beside the calls. False: cancelled while waiting. UnlockBuildDir releases
+// what this took.
+function LockBuildDir(const ADir, AName: string; const AProgress: TProc<string>;
+  ACancel: TBuildCancel; out AMutex: THandle; out AOwned: Boolean): Boolean;
+var
+  LWaits: Integer;
+begin
+  Result := True;
+  AOwned := False;
+  AMutex := CreateMutex(nil, False, PChar('Local\pastree-mcp-build-' +
+    THashFNV1a32.GetHashString(LowerCase(ADir))));
+  if AMutex = 0 then
+    Exit;
+  LWaits := 0;
+  repeat
+    case WaitForSingleObject(AMutex, 1000) of
+      WAIT_OBJECT_0, WAIT_ABANDONED:
+        AOwned := True;
+      WAIT_TIMEOUT:
+        begin
+          Inc(LWaits);
+          if Assigned(AProgress) and (LWaits mod (PROGRESS_EVERY_MS div 1000)
+            = 1) then
+            AProgress('waiting for another compile of ' + AName + ' to end');
+        end;
+    else
+      Break;   // not a mutex we can wait on: build unguarded
+    end;
+  until AOwned or IsCancelled(ACancel);
+  if not AOwned and IsCancelled(ACancel) then
+  begin
+    CloseHandle(AMutex);
+    AMutex := 0;
+    Result := False;
+  end;
+end;
+
+procedure UnlockBuildDir(AMutex: THandle; AOwned: Boolean);
+begin
+  if AOwned then
+    ReleaseMutex(AMutex);
+  if AMutex <> 0 then
+    CloseHandle(AMutex);
+end;
+
+// The dcc of ASpec's member: dcc64 for Win64, dcc32 for the rest - a member
+// built by dcc directly is a Win32 or Win64 one; code tried with another's
+// settings is built for Win32.
+function DccExe(const ASpec: TBuildSpec): string;
+begin
+  Result := TPath.Combine(ASpec.Studio.Root, 'bin\' + IfThen(
+    ASpec.Member.Platform = pfWin64, 'dcc64.exe', 'dcc32.exe'));
+end;
+
+// dcc's command line for ASpec's member, every output under ADir, the
+// source to build left out: its namespaces, defines, aliases and `-$`
+// switches, its search path then the registry's.
+function DccArgs(const ASpec: TBuildSpec; const ADir: string): string;
+var
+  LM: TMcpMember;
+  LPaths, LAliases: string;
+begin
+  LM := ASpec.Member;
+  LPaths := String.Join(';', LM.SearchPaths +
+    ASpec.Studio.SearchPath(LM.Platform));
+  Result := '-Q ' + Switch('-N0', TPath.Combine(ADir, 'dcu'))
+    + ' ' + Switch('-E', TPath.Combine(ADir, 'exe'))
+    + ' ' + Switch('-LE', TPath.Combine(ADir, 'bpl'))
+    + ' ' + Switch('-LN', TPath.Combine(ADir, 'dcp'))
+    + ' ' + Switch('-NH', TPath.Combine(ADir, 'hpp'))
+    + ' ' + Switch('-NO', TPath.Combine(ADir, 'obj'));
+  if Length(LM.Namespaces) > 0 then
+    Result := Result + ' ' + Switch('-NS', String.Join(';', LM.Namespaces));
+  if Length(LM.Defines) > 0 then
+    Result := Result + ' ' + Switch('-D', String.Join(';', LM.Defines));
+  LAliases := '';
+  for var LAl in LM.Aliases do
+    LAliases := LAliases + IfThen(LAliases <> '', ';', '') + LAl.Alias + '='
+      + LAl.UnitName;
+  if LAliases <> '' then
+    Result := Result + ' ' + Switch('-A', LAliases);
+  for var LSw in LM.Switches do
+    Result := Result + ' -' + LSw;
+  if LPaths <> '' then
+    Result := Result + ' ' + Switch('-U', LPaths) + ' ' + Switch('-I', LPaths)
+      + ' ' + Switch('-R', LPaths);
+end;
+
 // ADropDcus: .dcu files of the member's dcu directory to delete first, under
 // the build's lock (the retry after an internal error).
 function BuildOnce(const ASpec: TBuildSpec; ARebuild: Boolean;
@@ -1083,7 +1205,7 @@ var
   LM: TMcpMember;
   LEnv: TStringList;
   LEnvBlock, LError, LProjectDir, LExe, LArgs, LTail, LLog, LDevDcu, LDcuDir,
-    LPaths, LName, LDir, LOutText: string;
+    LName, LDir, LOutText: string;
   LIsDproj, LOwned: Boolean;
   LProbe: TProbe;
   LBefore, LAfter: TDictionary<string, TDateTime>;
@@ -1096,7 +1218,6 @@ var
   LProgress: TProc<string>;
   LSaved: TStringList;
   LMutex: THandle;
-  LWaits: Integer;
   LInjected: TBuildMsg;
 
   function Sub(const AName: string): string;
@@ -1129,37 +1250,11 @@ begin
   end;
   LProjectDir := TPath.GetDirectoryName(LM.ProjectFile);
   LDcuDir := Sub('dcu');
-  // Two builds of one member write the same .dcu files: one at a time -
-  // two sessions on one group, or two calls of one session, now that a
-  // build runs beside the calls.
-  LOwned := False;
-  LMutex := CreateMutex(nil, False, PChar('Local\pastree-mcp-build-' +
-    THashFNV1a32.GetHashString(LowerCase(LDir))));
-  if LMutex <> 0 then
+  if not LockBuildDir(LDir, LName, AProgress, ACancel, LMutex, LOwned) then
   begin
-    LWaits := 0;
-    repeat
-      case WaitForSingleObject(LMutex, 1000) of
-        WAIT_OBJECT_0, WAIT_ABANDONED:
-          LOwned := True;
-        WAIT_TIMEOUT:
-          begin
-            Inc(LWaits);
-            if Assigned(AProgress) and (LWaits mod (PROGRESS_EVERY_MS div 1000)
-              = 1) then
-              AProgress('waiting for another compile of ' + LName + ' to end');
-          end;
-      else
-        Break;   // not a mutex we can wait on: build unguarded
-      end;
-    until LOwned or IsCancelled(ACancel);
-    if not LOwned and IsCancelled(ACancel) then
-    begin
-      CloseHandle(LMutex);
-      Result.Cancelled := True;
-      Result.Error := 'cancelled';
-      Exit;
-    end;
+    Result.Cancelled := True;
+    Result.Error := 'cancelled';
+    Exit;
   end;
   LEnv := nil;
   try
@@ -1256,21 +1351,11 @@ begin
     end
     else
     begin
-      LExe := TPath.Combine(ASpec.Studio.Root, 'bin\' + IfThen(LM.Platform =
-        pfWin64, 'dcc64.exe', 'dcc32.exe'));
-      LPaths := String.Join(';', LM.SearchPaths +
-        ASpec.Studio.SearchPath(LM.Platform));
-      LArgs := '-Q ' + Switch('-N0', LDcuDir) + ' ' + Switch('-E', Sub('exe'))
-        + ' ' + Switch('-LE', Sub('bpl')) + ' ' + Switch('-LN', Sub('dcp'))
-        + ' ' + Switch('-NH', Sub('hpp')) + ' ' + Switch('-NO', Sub('obj'));
-      if Length(LM.Namespaces) > 0 then
-        LArgs := LArgs + ' ' + Switch('-NS', String.Join(';', LM.Namespaces));
-      if Length(LM.Defines) > 0 then
-        LArgs := LArgs + ' ' + Switch('-D', String.Join(';', LM.Defines));
-      if LPaths <> '' then
-        LArgs := LArgs + ' ' + Switch('-U', LPaths) + ' ' + Switch('-I', LPaths)
-          + ' ' + Switch('-R', LPaths);
-      LArgs := LArgs + ' ' + Quoted(LM.MainSource);
+      // -M, as MSBuild's Make: without it dcc compiles the units but writes
+      // no .dcu - every build compiles all of them again, and Compiled, by
+      // which CompareWithBaseline knows the units it reports on, is empty.
+      LExe := DccExe(ASpec);
+      LArgs := '-M ' + DccArgs(ASpec, LDir) + ' ' + Quoted(LM.MainSource);
     end;
     LBefore := DcuStamps(LDcuDir);
     try
@@ -1357,10 +1442,7 @@ begin
     end;
   finally
     LEnv.Free;
-    if LOwned then
-      ReleaseMutex(LMutex);
-    if LMutex <> 0 then
-      CloseHandle(LMutex);
+    UnlockBuildDir(LMutex, LOwned);
     Log('compile %s: %s in %d ms, %d messages, %d units compiled%s%s', [LName,
       IfThen(Result.Cancelled, 'cancelled', IfThen(Result.Ok, 'built',
       IfThen(Result.Ran, 'failed', 'not started: ' + Result.Error))),
@@ -1572,6 +1654,252 @@ begin
       if not LSame then
         Result.Messages := Result.Messages + [LMsg];
     end;
+end;
+
+{ ---- code tried with a member's settings ------------------------------------------ }
+
+const
+  SNIPPET_PROGRAM = 'PasMcpSnippet';
+
+function SnippetSource(const ACode: string; out AError: string): TSnippet;
+var
+  LCode, LKind, LName, LTrimmed: string;
+  LPos, LEnd: Integer;
+  LMatch: TMatch;
+begin
+  AError := '';
+  Result := Default(TSnippet);
+  LCode := ACode.Replace(#13#10, #10).Replace(#13, #10).Replace(#10, #13#10);
+  Result.Code := LCode;
+  LTrimmed := Trim(LCode);
+  if LTrimmed = '' then
+  begin
+    AError := '`code` is empty';
+    Exit;
+  end;
+  // The first word past comments and directives says what the code is.
+  LPos := 1;
+  while LPos <= Length(LCode) do
+  begin
+    if LCode[LPos] <= ' ' then
+      Inc(LPos)
+    else if Copy(LCode, LPos, 2) = '//' then
+    begin
+      LEnd := Pos(#10, LCode, LPos);
+      LPos := IfThen(LEnd > 0, LEnd + 1, Length(LCode) + 1);
+    end
+    else if LCode[LPos] = '{' then
+    begin
+      LEnd := Pos('}', LCode, LPos);
+      LPos := IfThen(LEnd > 0, LEnd + 1, Length(LCode) + 1);
+    end
+    else if Copy(LCode, LPos, 2) = '(*' then
+    begin
+      LEnd := Pos('*)', LCode, LPos + 2);
+      LPos := IfThen(LEnd > 0, LEnd + 2, Length(LCode) + 1);
+    end
+    else
+      Break;
+  end;
+  LMatch := TRegEx.Match(Copy(LCode, LPos, 300),
+    '^(program|unit|library|package)\b\s*([A-Za-z_][\w.]*)?',
+    [roIgnoreCase]);
+  LKind := '';
+  LName := '';
+  if LMatch.Success then
+  begin
+    LKind := LowerCase(LMatch.Groups[1].Value);
+    if LMatch.Groups.Count > 2 then
+      LName := LMatch.Groups[2].Value;
+  end;
+  if (LKind = 'library') or (LKind = 'package') then
+    AError := '`code` is a program, a unit or statements - not a ' + LKind
+  else if LKind = 'unit' then
+  begin
+    if LName = '' then
+    begin
+      AError := '`code` starts a unit with no name';
+      Exit;
+    end;
+    Result.Kind := 'unit';
+    Result.FileName := LName + '.pas';
+    Result.Text := LCode;
+    Result.MainName := SNIPPET_PROGRAM + '.dpr';
+    Result.MainText := 'program ' + SNIPPET_PROGRAM + ';'#13#10'uses ' + LName
+      + ' in ''' + LName + '.pas'';'#13#10'begin'#13#10'end.'#13#10;
+  end
+  else if LKind = 'program' then
+  begin
+    Result.Kind := 'program';
+    Result.FileName := IfThen(LName <> '', LName, SNIPPET_PROGRAM) + '.dpr';
+    Result.Text := LCode;
+  end
+  else if EndsText('end.', LTrimmed) then
+  begin
+    // A program's body with no heading: declarations, then begin ... end.
+    Result.Kind := 'program';
+    Result.FileName := SNIPPET_PROGRAM + '.dpr';
+    Result.Text := 'program ' + SNIPPET_PROGRAM + ';'#13#10 + LCode;
+    Result.Shift := 1;
+  end
+  else
+  begin
+    Result.Kind := 'statements';
+    Result.FileName := SNIPPET_PROGRAM + '.dpr';
+    Result.Text := 'program ' + SNIPPET_PROGRAM + ';'#13#10
+      + 'uses System.SysUtils;'#13#10'begin'#13#10 + LCode + #13#10'end.'#13#10;
+    Result.Shift := 3;
+  end;
+end;
+
+function SnippetDir(const ASpec: TBuildSpec): string;
+begin
+  Result := TPath.Combine(ASpec.Dir, 'snippet');
+end;
+
+function BuildSnippet(const ASpec: TBuildSpec; const ASnippet: TSnippet;
+  const AProgress: TProc<string>; ACancel: TBuildCancel): TBuildResult;
+var
+  LSpec: TBuildSpec;
+  LDir, LSrc, LProjectDir, LMain, LError, LArgs, LOutText, LName: string;
+  LEnv, LSaved: TStringList;
+  LMutex: THandle;
+  LOwned: Boolean;
+  LRun: TRunOutcome;
+  LSW: TStopwatch;
+  LTick: TProc<Int64>;
+  LBefore, LAfter: TDictionary<string, TDateTime>;
+  LOld: TDateTime;
+begin
+  Result := Default(TBuildResult);
+  Result.Spec := ASpec;
+  LDir := SnippetDir(ASpec);
+  Result.Dir := LDir;
+  LName := 'the code (' + ASpec.Member.Name + ')';
+  if ASpec.Member.Error <> '' then
+  begin
+    Result.Error := ASpec.Member.Error;
+    Exit;
+  end;
+  if not ASpec.Studio.Found then
+  begin
+    Result.Error := 'no RAD Studio installation is registered';
+    Exit;
+  end;
+  // dcc runs in the code's directory: the member's search path made full
+  // from its own.
+  LSpec := ASpec;
+  LProjectDir := TPath.GetDirectoryName(ASpec.Member.ProjectFile);
+  LSpec.Member.SearchPaths := nil;
+  for var LP in ASpec.Member.SearchPaths do
+  try
+    LSpec.Member.SearchPaths := LSpec.Member.SearchPaths +
+      [TPath.GetFullPath(TPath.Combine(LProjectDir, LP))];
+  except
+    LSpec.Member.SearchPaths := LSpec.Member.SearchPaths + [LP];
+  end;
+  LSrc := TPath.Combine(LDir, 'src');
+  if not LockBuildDir(LDir, LName, AProgress, ACancel, LMutex, LOwned) then
+  begin
+    Result.Cancelled := True;
+    Result.Error := 'cancelled';
+    Exit;
+  end;
+  LEnv := nil;
+  try
+    try
+      for var LOne in OUT_DIRS do
+        TDirectory.CreateDirectory(TPath.Combine(LDir, LOne));
+      // The last call's code goes: a unit of it left here would be found.
+      if TDirectory.Exists(LSrc) then
+        TDirectory.Delete(LSrc, True);
+      TDirectory.CreateDirectory(LSrc);
+      // With a BOM: dcc reads a file without one in the ANSI code page.
+      TFile.WriteAllText(TPath.Combine(LSrc, ASnippet.FileName), ASnippet.Text,
+        TEncoding.UTF8);
+      LMain := TPath.Combine(LSrc, ASnippet.FileName);
+      if ASnippet.MainName <> '' then
+      begin
+        LMain := TPath.Combine(LSrc, ASnippet.MainName);
+        TFile.WriteAllText(LMain, ASnippet.MainText, TEncoding.UTF8);
+      end;
+    except
+      on E: Exception do
+      begin
+        Result.Error := 'cannot write the code to ' + LSrc + ': ' + E.Message;
+        Exit;
+      end;
+    end;
+    LEnv := BuildEnvironment(ASpec.Studio, LError);
+    if LError <> '' then
+    begin
+      Result.Error := LError;
+      Exit;
+    end;
+    // -M, as a member's own build (BuildOnce): the units compiled for the
+    // code are kept for the next call.
+    LArgs := '-M ' + DccArgs(LSpec, LDir) + ' ' + Quoted(LMain);
+    if Assigned(AProgress) then
+    begin
+      AProgress('building ' + LName);
+      LTick :=
+        procedure(AMs: Int64)
+        begin
+          AProgress(Format('building %s: %d s', [LName, AMs div 1000]));
+        end;
+    end
+    else
+      LTick := nil;
+    LBefore := DcuStamps(TPath.Combine(LDir, 'dcu'));
+    try
+      LSW := TStopwatch.StartNew;
+      LRun := RunProcess(DccExe(LSpec), LArgs, LSrc, EnvironmentBlock(LEnv),
+        BUILD_TIMEOUT_MS, LTick, ACancel);
+      Result.Ms := LSW.ElapsedMilliseconds;
+      if not LRun.Started then
+      begin
+        Result.Error := LRun.Error;
+        Exit;
+      end;
+      Result.Ran := True;
+      Result.TimedOut := LRun.TimedOut;
+      Result.Cancelled := LRun.Cancelled;
+      if LRun.Cancelled then
+      begin
+        Result.Error := 'cancelled';
+        Exit;
+      end;
+      Result.Ok := not LRun.TimedOut and (LRun.ExitCode = 0);
+      LOutText := DecodeOem(LRun.Output);
+      LSaved := TStringList.Create;
+      try
+        LSaved.Text := LOutText;
+        LSaved.WriteBOM := False;
+        LSaved.SaveToFile(TPath.Combine(LDir, 'build.log'), TEncoding.UTF8);
+      finally
+        LSaved.Free;
+      end;
+      ReadMessages(LOutText.Split([#13#10, #10]), LSrc, Result);
+      LAfter := DcuStamps(TPath.Combine(LDir, 'dcu'));
+      try
+        for var LPair in LAfter do
+          if not LBefore.TryGetValue(LPair.Key, LOld) or (LOld <> LPair.Value)
+          then
+            Result.Compiled := Result.Compiled + [LPair.Key];
+      finally
+        LAfter.Free;
+      end;
+    finally
+      LBefore.Free;
+    end;
+  finally
+    LEnv.Free;
+    UnlockBuildDir(LMutex, LOwned);
+    Log('compile %s: %s in %d ms, %d messages, %d units compiled', [LName,
+      IfThen(Result.Cancelled, 'cancelled', IfThen(Result.Ok, 'built',
+      IfThen(Result.Ran, 'failed', 'not started: ' + Result.Error))),
+      Result.Ms, Length(Result.Messages), Length(Result.Compiled)]);
+  end;
 end;
 
 { ---- what is new ------------------------------------------------------------------ }

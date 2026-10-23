@@ -87,6 +87,7 @@ uses
   PasTree.Sema.Dfm,
   PasTree.Platforms,
   PasMcp.Log,
+  PasMcp.Studio,
   PasMcp.Build;
 
 type
@@ -2391,9 +2392,47 @@ begin
   end;
 end;
 
+// `symbol` with `file` and no `line`: the file narrows the name, as the
+// agent meant it - before, it addressed the unit, and `source` of
+// TPurgeForm.GetMorestuffFieldCode with its file answered "frmPurge is a
+// unit". The declarations of that name in that file.
+function NamedInFile(AWs: TMcpWorkspace; AArgs: TJSONObject): TArray<TTarget>;
+var
+  LFile: string;
+  LMore: Integer;
+begin
+  LFile := ArgFile(AWs, AArgs);
+  Result := nil;
+  for var LC in ResolveName(AWs, ArgStr(AArgs, 'symbol'), ArgStr(AArgs,
+    'kind'), False, 50, LMore) do
+    if SameText(LC.DeclFile, LFile) then
+      Result := Result + [LC];
+  if Length(Result) = 0 then
+    raise EToolError.CreateFmt('no declaration named `%s` in %s - without '
+      + '`file`, the name is looked for in the whole group', [ArgStr(AArgs,
+      'symbol'), AWs.RelPath(LFile)]);
+  for var LIdx := 0 to High(Result) do
+    MapToOthers(AWs, Result[LIdx]);
+end;
+
+function NamedNotPlaced(AArgs: TJSONObject): Boolean;
+begin
+  Result := (ArgStr(AArgs, 'symbol') <> '') and (ArgStr(AArgs, 'file') <> '')
+    and (ArgInt(AArgs, 'line', 0) <= 0);
+end;
+
 // The ONE target a search is about: from file+line+name, or from `symbol`.
 function ResolveOne(AWs: TMcpWorkspace; AArgs: TJSONObject): TTarget;
+var
+  LCands: TArray<TTarget>;
 begin
+  if NamedNotPlaced(AArgs) then
+  begin
+    LCands := NamedInFile(AWs, AArgs);
+    if Length(LCands) > 1 then
+      ResolveNamed(AWs, ArgStr(AArgs, 'symbol'), ArgStr(AArgs, 'kind'));
+    Exit(LCands[0]);
+  end;
   if ArgStr(AArgs, 'file') <> '' then
     Exit(ResolvePosition(AWs, AArgs));
   if ArgStr(AArgs, 'symbol') = '' then
@@ -2424,7 +2463,13 @@ end;
 function ResolveOneOrOverloads(AWs: TMcpWorkspace;
   AArgs: TJSONObject): TArray<TTarget>;
 begin
-  if (ArgStr(AArgs, 'file') <> '') or (ArgStr(AArgs, 'symbol') = '') then
+  if NamedNotPlaced(AArgs) then
+  begin
+    Result := NamedInFile(AWs, AArgs);
+    if (Length(Result) > 1) and not IsOverloadSet(Result) then
+      ResolveNamed(AWs, ArgStr(AArgs, 'symbol'), ArgStr(AArgs, 'kind'));
+  end
+  else if (ArgStr(AArgs, 'file') <> '') or (ArgStr(AArgs, 'symbol') = '') then
     Result := [ResolveOne(AWs, AArgs)]
   else
     Result := ResolveNamedOrOverloads(AWs, ArgStr(AArgs, 'symbol'),
@@ -11439,9 +11484,14 @@ var
   end;
 
 begin
-  if ArgStr(AArgs, 'file') = '' then
-    raise EToolError.Create('`file` is required');
-  LFile := ArgFile(AWs, AArgs);
+  // A unit by name, as an agent asks for it (`outline {"unit": ...}` was
+  // refused, `file` required).
+  if (ArgStr(AArgs, 'file') = '') and (ArgStr(AArgs, 'unit') <> '') then
+    LFile := ResolveNamed(AWs, ArgStr(AArgs, 'unit'), 'unit').DeclFile
+  else if ArgStr(AArgs, 'file') = '' then
+    raise EToolError.Create('give `file`, or the `unit` by name')
+  else
+    LFile := ArgFile(AWs, AArgs);
   LOwner := ArgStr(AArgs, 'owner');
   LSection := LowerCase(ArgStr(AArgs, 'section'));
   if not ModelOfFile(AWs, LFile, LA, LMid) then
@@ -13424,7 +13474,9 @@ var
   LByRule, LByFile: TDictionary<string, Integer>;
 begin
   LRules := nil;
-  for var LR in ArgStr(AArgs, 'rules').Split([',', ' '],
+  // A list written as JSON inside the string - `"[\"unused-uses\"]"` - is
+  // the list (an agent's call on the client group, refused three times).
+  for var LR in ArgStr(AArgs, 'rules').Split([',', ' ', '[', ']', '"'],
     TStringSplitOptions.ExcludeEmpty) do
   begin
     if not MatchText(LR.Trim, LINT_RULES) then
@@ -17698,9 +17750,12 @@ var
     LAt: Integer;
     LRow: TCompileRow;
   begin
-    LKey := IntToStr(Ord(AMsg.Kind)) + '|' + LowerCase(AMsg.FileName) + '|' +
-      IntToStr(AMsg.Line) + '|' + IntToStr(AMsg.Col) + '|' + AMsg.Code + '|' +
-      AMsg.Text;
+    // The list is part of the key: one message may come in two - a warning
+    // gone and reported again when a build's compiled units are not known -
+    // and an index into one list read in the other is out of its bounds.
+    LKey := IntToHex(NativeUInt(AList)) + '|' + IntToStr(Ord(AMsg.Kind)) + '|'
+      + LowerCase(AMsg.FileName) + '|' + IntToStr(AMsg.Line) + '|' +
+      IntToStr(AMsg.Col) + '|' + AMsg.Code + '|' + AMsg.Text;
     if AKeyed and LIndex.TryGetValue(LKey, LAt) then
     begin
       LRow := AList[LAt];
@@ -18200,6 +18255,126 @@ begin
   end;
 end;
 
+// `compile` with `code`: whether the code compiles with the member's
+// compiler and settings, and what dcc said - by the line of the code as
+// given, not of the program wrapped around it.
+function SnippetAnswer(AWs: TMcpWorkspace; const AR: TBuildResult;
+  const ASnippet: TSnippet; const AWhy: string; ALimit: Integer): string;
+var
+  LSb: TStringBuilder;
+  LM: TMcpMember;
+  LCodeLines: TArray<string>;
+  LErrors, LWarnings, LHints: TArray<TBuildMsg>;
+  LSrc, LCodeFile, LMainFile, LDelphi, LOwnUnit: string;
+  LShown, LCut, LOthers: Integer;
+
+  procedure AddRows(const ATitle: string; const AMsgs: TArray<TBuildMsg>);
+  var
+    LLine: Integer;
+    LText: string;
+  begin
+    if Length(AMsgs) = 0 then
+      Exit;
+    LSb.AppendLine(Format('%s - %d:', [ATitle, Length(AMsgs)]));
+    for var LMsg in AMsgs do
+    begin
+      if LShown >= ALimit then
+      begin
+        Inc(LCut);
+        Continue;
+      end;
+      Inc(LShown);
+      LText := LMsg.Code + IfThen(LMsg.Code <> '', ' ', '') + LMsg.Text;
+      LLine := LMsg.Line - ASnippet.Shift;
+      if SameText(LMsg.FileName, LCodeFile) and (LMsg.Line > 0) and
+        (LLine >= 1) and (LLine <= Length(LCodeLines)) then
+      begin
+        LSb.AppendLine(Format('  %d%s  %s', [LLine, IfThen(LMsg.Col > 0, ':'
+          + IntToStr(LMsg.Col), ''), LText]));
+        LSb.AppendLine('        ' + Trim(LCodeLines[LLine - 1]));
+      end
+      else if SameText(LMsg.FileName, LCodeFile) then
+        LSb.AppendLine('  (the program around the code)  ' + LText)
+      else if SameText(LMsg.FileName, LMainFile) then
+        LSb.AppendLine('  (the program using the unit)  ' + LText)
+      else if LMsg.FileName <> '' then
+        LSb.AppendLine(Format('  %s%s  %s', [AWs.RelPath(LMsg.FileName),
+          IfThen(LMsg.Line > 0, ':' + IntToStr(LMsg.Line), ''), LText]))
+      else
+        LSb.AppendLine('  ' + LText);
+    end;
+  end;
+
+begin
+  LM := AR.Spec.Member;
+  LSrc := TPath.Combine(AR.Dir, 'src');
+  LCodeFile := TPath.Combine(LSrc, ASnippet.FileName);
+  LMainFile := IfThen(ASnippet.MainName <> '', TPath.Combine(LSrc,
+    ASnippet.MainName), '');
+  LCodeLines := ASnippet.Code.Split([#13#10]);
+  LDelphi := DelphiName(AR.Spec.Studio.CompilerVersion);
+  LErrors := nil;
+  LWarnings := nil;
+  LHints := nil;
+  for var LMsg in AR.Messages do
+    case LMsg.Kind of
+      bmError, bmSetupError:
+        LErrors := LErrors + [LMsg];
+      bmWarning, bmSetupWarning:
+        LWarnings := LWarnings + [LMsg];
+      bmHint:
+        LHints := LHints + [LMsg];
+    end;
+  LSb := TStringBuilder.Create;
+  try
+    LSb.AppendLine(Format('compile code (%s) - %s %.1f%s, the settings of %s '
+      + '(%s%s)%s', [ASnippet.Kind, IfThen(LM.Platform = pfWin64, 'dcc64',
+      'dcc32'), AR.Spec.Studio.CompilerVersion, IfThen(LDelphi <> '', ' ('
+      + LDelphi + ')', ''), LM.Name, PlatformName(LM.Platform),
+      IfThen(LM.Config <> '', ' ' + LM.Config, ''), IfThen(AWhy <> '', ', '
+      + AWhy, '')], TFormatSettings.Invariant));
+    if not (LM.Platform in [pfWin32, pfWin64]) then
+      LSb.AppendLine(Format('(%s targets %s: the code is built for Win32, '
+        + 'with its defines and switches)', [LM.Name,
+        PlatformName(LM.Platform)]));
+    if not AR.Ran then
+    begin
+      LSb.AppendLine('not built: ' + AR.Error);
+      Exit(LSb.ToString.TrimRight);
+    end;
+    if AR.TimedOut then
+      LSb.AppendLine(Format('TIMED OUT after %d s', [AR.Ms div 1000]))
+    else if AR.Ok and (Length(LErrors) = 0) then
+      LSb.AppendLine(Format('compiles - in %.1f s, compiled and linked, not '
+        + 'run', [AR.Ms / 1000], TFormatSettings.Invariant))
+    else
+      LSb.AppendLine(Format('does not compile - %s, in %.1f s',
+        [Plural(Length(LErrors), 'error'), AR.Ms / 1000],
+        TFormatSettings.Invariant));
+    LOwnUnit := IfThen(ASnippet.Kind = 'unit', LowerCase(
+      ChangeFileExt(ASnippet.FileName, '')), '');
+    LOthers := 0;
+    for var LUnit in AR.Compiled do
+      if LUnit <> LOwnUnit then
+        Inc(LOthers);
+    if LOthers > 0 then
+      LSb.AppendLine(Format('(%s of the member compiled for it here - kept '
+        + 'for the next `code`)', [Plural(LOthers, 'unit')]));
+    LShown := 0;
+    LCut := 0;
+    AddRows('errors', LErrors);
+    AddRows('warnings', LWarnings);
+    AddRows('hints', LHints);
+    if Length(LErrors) + Length(LWarnings) + Length(LHints) = 0 then
+      LSb.AppendLine('no errors, warnings or hints')
+    else if LCut > 0 then
+      LSb.AppendLine(Format('... %d more (raise `limit`)', [LCut]));
+    Result := LSb.ToString.TrimRight;
+  finally
+    LSb.Free;
+  end;
+end;
+
 type
   { `compile` (SPEC 9.4): the members a change reaches, built by the real
     compiler into a directory of the server's own (PasMcp.Build), answered
@@ -18219,11 +18394,17 @@ type
     FRebuild: Boolean;
     FProgress: TProc<string>;
     FCancel: TBuildCancel;
+    // `code`: the code built alone, with the settings of FSpecs' one member.
+    FHasCode: Boolean;
+    FSnippet: TSnippet;
   public
     constructor Create(AWs: TMcpWorkspace; const AMembers: TArray<Integer>;
       const AWhy, AShow: string; ALimit: Integer; ARebuild: Boolean;
       const AProgress: TProc<string>; const ASince: string;
       const AChanged: TArray<string>);
+    constructor CreateSnippet(AWs: TMcpWorkspace; AMember: Integer;
+      const ASnippet: TSnippet; const AWhy: string; ALimit: Integer;
+      const AProgress: TProc<string>);
     destructor Destroy; override;
     procedure Work; override;
     function Finish(out AIsError: Boolean): string; override;
@@ -18251,6 +18432,39 @@ begin
   FCancel := TBuildCancel.Create;
 end;
 
+constructor TCompileJob.CreateSnippet(AWs: TMcpWorkspace; AMember: Integer;
+  const ASnippet: TSnippet; const AWhy: string; ALimit: Integer;
+  const AProgress: TProc<string>);
+var
+  LA: TMcpAnalysis;
+  LDirs: TArray<string>;
+  LDir: string;
+begin
+  Create(AWs, [AMember], AWhy, 'all', ALimit, False, AProgress, '', nil);
+  FHasCode := True;
+  FSnippet := ASnippet;
+  // The code may use the member's own units, and a project names some only
+  // in its `uses ... in` (a bare .dpr names all of them so): the directories
+  // of the own units the index holds for it, after its search path.
+  LDirs := nil;
+  if (AWs.Members[AMember].Analysis >= 0) and
+    (AWs.Members[AMember].Analysis < AWs.Analyses.Count) then
+  begin
+    LA := AWs.Analyses[AWs.Members[AMember].Analysis];
+    if LA.Proj <> nil then
+      for var LMid := 0 to LA.Proj.ModelCount - 1 do
+        if AWs.IsOwnFile(LA.Proj.ModelFile(LMid)) and SameText(
+          ExtractFileExt(LA.Proj.ModelFile(LMid)), '.pas') then
+        begin
+          LDir := ExtractFileDir(LA.Proj.ModelFile(LMid));
+          if (IndexText(LDir, LDirs) < 0) and
+            (IndexText(LDir, FSpecs[0].Member.SearchPaths) < 0) then
+            LDirs := LDirs + [LDir];
+        end;
+  end;
+  FSpecs[0].Member.SearchPaths := FSpecs[0].Member.SearchPaths + LDirs;
+end;
+
 destructor TCompileJob.Destroy;
 begin
   FCancel.Free;
@@ -18260,6 +18474,11 @@ end;
 procedure TCompileJob.Work;
 begin
   FResults := nil;
+  if FHasCode then
+  begin
+    FResults := [BuildSnippet(FSpecs[0], FSnippet, FProgress, FCancel)];
+    Exit;
+  end;
   for var LK := 0 to High(FSpecs) do
   begin
     if FCancel.Cancelled then
@@ -18277,6 +18496,12 @@ begin
   AIsError := False;
   if FCancel.Cancelled then
     Exit('compile cancelled');
+  if FHasCode then
+  begin
+    Result := SnippetAnswer(FWs, FResults[0], FSnippet, FWhy, FLimit);
+    AIsError := not FResults[0].Ran;
+    Exit;
+  end;
   // Files may have changed while it built; the routine names and source
   // lines of the answer come from them as they are now.
   FWs.EnsureFresh(LFresh);
@@ -18305,10 +18530,64 @@ end;
 function NewCompileJob(AWs: TMcpWorkspace; AArgs: TJSONObject;
   const AProgress: TProc<string>): TCompileJob;
 var
-  LShow, LWhy, LSince: string;
+  LShow, LWhy, LSince, LError, LFile: string;
   LMembers: TArray<Integer>;
   LChanged: TArray<string>;
+  LSnippet: TSnippet;
+  LMember: Integer;
+  LReach: TMemberReach;
 begin
+  if (AArgs <> nil) and (AArgs.GetValue('code') <> nil) and
+    not (AArgs.GetValue('code') is TJSONNull) then
+  begin
+    if (ArgStr(AArgs, 'base') <> '') or ArgBool(AArgs, 'rebuild', False) then
+      raise EToolError.Create('`code` is built alone - `base` and `rebuild` '
+        + 'are for the members'' own builds');
+    LSnippet := SnippetSource(ArgStr(AArgs, 'code'), LError);
+    if LError <> '' then
+      raise EToolError.Create(LError);
+    // Whose settings: the member named, the one compiling `file`, else the
+    // first that loaded.
+    LMember := -1;
+    LWhy := '';
+    if ArgStr(AArgs, 'member') <> '' then
+    begin
+      LMembers := CompileMembers(AWs, AArgs, LWhy, LSince, LChanged);
+      if Length(LMembers) <> 1 then
+        raise EToolError.Create('`code` is built with the settings of one '
+          + '`member`');
+      LMember := LMembers[0];
+      LWhy := '';
+    end
+    else if ArgStr(AArgs, 'file') <> '' then
+    begin
+      LFile := ArgFile(AWs, AArgs);
+      LReach := TMemberReach.Create(AWs);
+      try
+        for var LIdx in ReachingMembers(AWs, LReach, LFile) do
+          if LMember < 0 then
+            LMember := LIdx;
+      finally
+        LReach.Free;
+      end;
+      if LMember < 0 then
+        raise EToolError.CreateFmt('no member of the group compiles %s',
+          [AWs.RelPath(LFile)]);
+      LWhy := 'which compiles ' + AWs.RelPath(LFile);
+    end
+    else
+    begin
+      for var LIdx := High(AWs.Members) downto 0 do
+        if AWs.Members[LIdx].Error = '' then
+          LMember := LIdx;
+      if LMember < 0 then
+        LMember := 0;
+      if Length(AWs.Members) > 1 then
+        LWhy := 'the first of the group (`member` names another)';
+    end;
+    Exit(TCompileJob.CreateSnippet(AWs, LMember, LSnippet, LWhy,
+      EnsureRange(ArgInt(AArgs, 'limit', 60), 1, 5000), AProgress));
+  end;
   LShow := LowerCase(ArgStr(AArgs, 'show', 'new'));
   if not MatchText(LShow, ['new', 'warnings', 'all']) then
     raise EToolError.Create('`show` is new, warnings or all');
@@ -18326,7 +18605,8 @@ const
     + 'UnitName.TFoo.Bar (TFoo.Bar also finds a member TFoo inherits). '
     + 'Alternatively give file + line + name."},'
     + '"file":{"type":"string","description":"Source file, absolute or '
-    + 'relative to the project group directory"},'
+    + 'relative to the project group directory; with `symbol` and no `line`, '
+    + 'only the declarations of that name in this file"},'
     + '"line":{"type":"integer","description":"1-based line in file"},'
     + '"name":{"type":"string","description":"The identifier as written on '
     + 'that line"},'
@@ -18335,6 +18615,13 @@ const
     + '"kind":{"type":"string","description":"Narrow a name: type, class, '
     + 'record, interface, routine, procedure, function, constructor, var, '
     + 'const, field, property, enum (a value), unit"}';
+
+  TARGETS_PROP =
+    '"targets":{"type":"array","items":{},"description":"Several targets in '
+    + 'one call, answered one after another - names (\"TFoo.Bar\") or objects '
+    + 'with what one call takes ({\"file\": ..., \"line\": ...}, `lines` '
+    + 'too). In place of `symbol`, `file`, `line`, `name`, `column`; the '
+    + 'other arguments go for every target"}';
 
   TOOLS_JSON = '[' +
     '{"name":"status","description":"What is loaded: project group members, '
@@ -18373,6 +18660,7 @@ const
     + 'optionally the source lines that follow (the implementation when '
     + 'there is one). Address the symbol by name or by file + line + name.",'
     + '"inputSchema":{"type":"object","properties":{' + TARGET_PROPS + ','
+    + TARGETS_PROP + ','
     + '"context":{"type":"integer","description":"Source lines to include '
     + '(default 0, max 200)"}}}},' +
 
@@ -18383,8 +18671,11 @@ const
     + 'The name of an overloaded routine shows each overload. '
     + '`lines` cuts it to the piece wanted - by the line numbers another '
     + 'answer gave (a caller row, an error) or its first call showed. '
-    + 'Use it instead of reading a file at a guessed offset.",'
+    + 'Use it instead of reading a file at a guessed offset - or of grep -n '
+    + 'then a line range: `file` + `line` alone gives the routine around that '
+    + 'line. Several routines at once: `targets`.",'
     + '"inputSchema":{"type":"object","properties":{' + TARGET_PROPS + ','
+    + TARGETS_PROP + ','
     + '"part":{"type":"string","enum":["impl","decl","both"],"description":'
     + '"For a routine: its implementation (the default when it has one), its '
     + 'declaration, or both"},'
@@ -18439,6 +18730,7 @@ const
     + 'symbol: `mode: files` first - a count per file - then the lines of '
     + 'the files that matter with `in`.",'
     + '"inputSchema":{"type":"object","properties":{' + TARGET_PROPS + ','
+    + TARGETS_PROP + ','
     + '"mode":{"type":"string","enum":["lines","files","count"],'
     + '"description":"lines (default): every use with its line; files: a '
     + 'row per file with its count; count: the counts and notes alone"},'
@@ -18571,8 +18863,16 @@ const
     + 'seconds for a small change, minutes for a first build or a rebuild of '
     + 'a large member - the other tools answer meanwhile, and cancelling the '
     + 'call stops the build: use `diagnostics` while editing, `compile` '
-    + 'before saying a change is done.",'
+    + 'before saying a change is done. With `code` it builds that code alone, '
+    + 'with the compiler and settings of a member: whether a construct '
+    + 'compiles here, when unsure of the language.",'
     + '"inputSchema":{"type":"object","properties":{'
+    + '"code":{"type":"string","description":"A program, a unit, or '
+    + 'statements alone (put in a program''s begin-end, System.SysUtils '
+    + 'used; inline var declares a variable). It may use the member''s own '
+    + 'units. Built with the settings of `member`, of the member compiling '
+    + '`file`, or of the group''s first; compiled and linked, not run. '
+    + 'Errors come by the line of the code as given"},'
     + '"member":{"type":"string","description":"Group members to build, by '
     + 'name: AppA, or AppA,AppB. Default: those the files changed this '
     + 'session reach"},'
@@ -18615,6 +18915,7 @@ const
     + '"inputSchema":{"type":"object","properties":{'
     + '"file":{"type":"string","description":"Source file, absolute or '
     + 'relative to the project group directory"},'
+    + '"unit":{"type":"string","description":"Or the unit by name"},'
     + '"owner":{"type":"string","description":"Only this type and its '
     + 'members, e.g. TfrmMain"},'
     + '"section":{"type":"string","enum":["interface","implementation"]},'
@@ -18622,8 +18923,7 @@ const
     + 'and method declarations inside types (default true; left out, and '
     + 'said, when the whole outline is over `limit`)"},'
     + '"limit":{"type":"integer","description":"Max rows (default 300; '
-    + '0: the counts and notes alone, no rows)"}},'
-    + '"required":["file"]}},' +
+    + '0: the counts and notes alone, no rows)"}}}},' +
 
     '{"name":"form","description":"The component tree of one form without '
     + 'reading its .dfm: each component with its class, the events it binds '
@@ -18748,6 +19048,8 @@ begin
 end;
 
 function ServerInstructions(AWs: TMcpWorkspace): string;
+var
+  LLanguage: string;
 begin
   Result := 'PasTree semantic index of the Delphi/Object Pascal project '
     + ExtractFileName(AWs.ProjectFile) + ' (' + AWs.Root + '). For Object '
@@ -18755,7 +19057,8 @@ begin
     + '`find` locates declarations, `definition` jumps to declaration and '
     + 'implementation, `source` gives the exact text of one declaration (a '
     + 'routine''s body, a whole type) instead of a file read at a guessed '
-    + 'offset, `members` what a class can do - its members and the inherited '
+    + 'offset or grep -n and a line range (several at once: `targets`), '
+    + '`members` what a class can do - its members and the inherited '
     + 'ones, by the type declaring each, `references` lists real uses '
     + '(resolved identity, not '
     + 'text), `callers` who calls a routine (through the virtual or '
@@ -18797,12 +19100,149 @@ begin
       + 'call analyzes those bodies first (the whole library, when a '
       + 'question about a hub class makes that cheaper - the answer says '
       + 'so), and answers as a full analysis would.';
+  // Asked of the registry again: the workspace finds the Studio as it
+  // loads, on another thread, and this is answered before.
+  LLanguage := LanguageNote(FindStudio(AWs.StudioWanted));
+  if LLanguage <> '' then
+    Result := Result + ' ' + LLanguage;
 end;
 
 // A tool's answer. EMcpIndexChanged out of it - a workspace query changed the
 // analysis under the ids the tool held (light mode, SPEC 9.9) - runs it again:
 // each run finds more of its demand met. The last run, should the queries
 // keep changing it, answers partially (NotSearched said).
+procedure CheckArguments(const AName: string; AArgs: TJSONObject); forward;
+
+// Several targets in one call (SPEC 9.2.6): `targets` - names, or objects
+// with what one call of the tool takes - each answered as a call of its own,
+// in order. The shell reads five routines in one command (`grep -n` then
+// `sed -n` ranges), where one call per symbol cost an agent a turn per
+// routine: 46% of the reads of code around pastree on the client group asked
+// for more than one target. A target that fails says why in its place, the
+// others answer; the call fails only when every one did.
+function EachTarget(AWs: TMcpWorkspace; const AName: string;
+  AArgs: TJSONObject; const ATool: TFunc<TMcpWorkspace, TJSONObject, string>):
+  string;
+const
+  MAX_TARGETS = 20;
+  PLACE: array[0..4] of string = ('symbol', 'file', 'line', 'name', 'column');
+var
+  LV, LParsed: TJSONValue;
+  LItems: TObjectList<TJSONObject>;
+  LOne: TJSONObject;
+  LSb: TStringBuilder;
+  LFailed: Integer;
+  LLabel, LAnswer: string;
+begin
+  for var LKey in PLACE do
+    if AArgs.GetValue(LKey) <> nil then
+      raise EToolError.CreateFmt('`targets` takes the place of `%s` - give it '
+        + 'in each target', [LKey]);
+  LItems := TObjectList<TJSONObject>.Create(True);
+  LParsed := nil;
+  LSb := TStringBuilder.Create;
+  try
+    LV := AArgs.GetValue('targets');
+    // Written as a string: a JSON list inside it, or names one after another.
+    if LV is TJSONString then
+    begin
+      LParsed := TJSONObject.ParseJSONValue(LV.Value);
+      if LParsed is TJSONArray then
+        LV := LParsed
+      else
+        for var LName in LV.Value.Split([',', ';', ' ', #13, #10],
+          TStringSplitOptions.ExcludeEmpty) do
+        begin
+          LOne := TJSONObject.Create;
+          LOne.AddPair('symbol', LName);
+          LItems.Add(LOne);
+        end;
+    end;
+    if LV is TJSONArray then
+      for var LItem in TJSONArray(LV) do
+        if LItem is TJSONObject then
+          LItems.Add(TJSONObject(LItem.Clone))
+        else if (LItem is TJSONString) and (Trim(LItem.Value) <> '') then
+        begin
+          LOne := TJSONObject.Create;
+          LOne.AddPair('symbol', Trim(LItem.Value));
+          LItems.Add(LOne);
+        end
+        else
+          raise EToolError.Create('a target is a name ("TFoo.Bar") or an '
+            + 'object with what one call takes ({"file": ..., "line": ...})');
+    if LItems.Count = 0 then
+      raise EToolError.Create('`targets` is empty');
+    if LItems.Count > MAX_TARGETS then
+      raise EToolError.CreateFmt('%d targets - at most %d in one call',
+        [LItems.Count, MAX_TARGETS]);
+    LFailed := 0;
+    for var LK := 0 to LItems.Count - 1 do
+    begin
+      if LItems[LK].GetValue('targets') <> nil then
+        raise EToolError.Create('a target holds no `targets` of its own');
+      CheckArguments(AName, LItems[LK]);
+      // The call's own arguments (`part`, `limit`, `mode`...), a target's
+      // own over them.
+      LOne := TJSONObject.Create;
+      try
+        for var LPair in AArgs do
+          if LPair.JsonString.Value <> 'targets' then
+            LOne.AddPair(LPair.JsonString.Value, TJSONValue(
+              LPair.JsonValue.Clone));
+        for var LPair in LItems[LK] do
+        begin
+          LOne.RemovePair(LPair.JsonString.Value).Free;
+          LOne.AddPair(LPair.JsonString.Value, TJSONValue(
+            LPair.JsonValue.Clone));
+        end;
+        LLabel := ArgStr(LOne, 'symbol');
+        if LLabel = '' then
+          LLabel := ArgStr(LOne, 'file') + IfThen(ArgStr(LOne, 'line') <> '',
+            ':' + ArgStr(LOne, 'line'), '') + IfThen(ArgStr(LOne, 'name') <> '',
+            ' ' + ArgStr(LOne, 'name'), '');
+        if ArgStr(LOne, 'lines') <> '' then
+          LLabel := LLabel + ' lines ' + ArgStr(LOne, 'lines');
+        try
+          LAnswer := ATool(AWs, LOne);
+        except
+          on E: EToolError do
+          begin
+            Inc(LFailed);
+            LAnswer := E.Message;
+          end;
+        end;
+      finally
+        LOne.Free;
+      end;
+      if LK > 0 then
+        LSb.AppendLine;
+      LSb.AppendLine(Format('=== %d of %d: %s', [LK + 1, LItems.Count,
+        LLabel]));
+      LSb.AppendLine(LAnswer.TrimRight);
+    end;
+    Result := LSb.ToString.TrimRight;
+    if LFailed = LItems.Count then
+      raise EToolError.Create(Result);
+  finally
+    LSb.Free;
+    LParsed.Free;
+    LItems.Free;
+  end;
+end;
+
+// The tool, or each of its `targets`.
+function WithTargets(AWs: TMcpWorkspace; const AName: string;
+  AArgs: TJSONObject; const ATool: TFunc<TMcpWorkspace, TJSONObject, string>):
+  string;
+begin
+  if (AArgs <> nil) and (AArgs.GetValue('targets') <> nil) and
+    not (AArgs.GetValue('targets') is TJSONNull) then
+    Result := EachTarget(AWs, AName, AArgs, ATool)
+  else
+    Result := ATool(AWs, AArgs);
+end;
+
 function RunTool(AWs: TMcpWorkspace; const AName: string; AArgs: TJSONObject;
   const AFresh: string; out ADeferred: TDeferredTool;
   const AProgress: TProc<string>): string;
@@ -18833,13 +19273,13 @@ begin
       else if AName = 'find' then
         Result := ToolFind(AWs, AArgs)
       else if AName = 'definition' then
-        Result := ToolDefinition(AWs, AArgs)
+        Result := WithTargets(AWs, AName, AArgs, ToolDefinition)
       else if AName = 'source' then
-        Result := ToolSource(AWs, AArgs)
+        Result := WithTargets(AWs, AName, AArgs, ToolSource)
       else if AName = 'members' then
         Result := ToolMembers(AWs, AArgs)
       else if AName = 'references' then
-        Result := ToolReferences(AWs, AArgs)
+        Result := WithTargets(AWs, AName, AArgs, ToolReferences)
       else if AName = 'callers' then
         Result := ToolCallers(AWs, AArgs)
       else if AName = 'callees' then

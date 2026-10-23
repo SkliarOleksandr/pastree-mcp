@@ -491,6 +491,25 @@ are here so a new tool is not the one that breaks them.
    take `symbols: [...]` beside `symbol`. Understanding a change usually
    means three to six symbols; each turn re-sends the whole context, so the
    saving is in turns, not in answer tokens.
+
+   Done in 0.43.0 as `targets` - names, or objects with what one call
+   takes, so a `file` + `line` or a `lines` piece is a target too - each
+   answered in turn under `=== k of n: <target>`, the call's other
+   arguments for every one, at most 20. A target that fails says why in its
+   place; the call fails only when all did. A string is taken for the list
+   it holds (JSON, or names one after another): agents send arrays as
+   strings. Measured first: in the client group's sessions of 2026-10-05 to
+   10-22, 291 calls of these tools against 1,710 greps and reads of code,
+   1,194 of those reading a routine's or a type's text - 793 of the 881
+   line-range reads within three calls of a grep, 251 in the same shell
+   command (`grep -n`, then `sed -n`) - while `source` was called 37 times.
+   46% of the 1,710 asked for more than one target at once (an alternation
+   of method names, several `sed` ranges), which one call per symbol made a
+   turn each. The same audit gave the other deferred items little: `type_of`
+   about 12 searches, `uses_for` 9, `overview` 3, `implement_plan` one or
+   two, `scope_at` none. With it, `symbol` + `file` and no `line` narrows
+   the name to that file (it addressed the unit), `outline` takes `unit`,
+   and `lint`'s `rules` a JSON list written as a string.
 7. **`overview`** - the group in one answer: members with platform, own
    units by directory with line counts, the largest units and classes. The
    first call in an unfamiliar group, instead of a directory listing and a
@@ -598,6 +617,35 @@ default.
   compile]`. dcc reports only what it compiles, so a build after a build
   answered "no errors, warnings or hints", and `show: warnings` after
   "1 old warning, not listed" listed none (a field report).
+- **A bare .dpr is built with `-M`** (0.42.1), as MSBuild's Make builds a
+  `.dproj`. Without it dcc compiles the units but writes no .dcu: every
+  build compiled every unit, no unit was known compiled, and what is new
+  per unit (below) had nothing to go by - the warning of an unchanged unit
+  came back both as reported and as kept, and the second compile of a
+  member with a warning was an internal error.
+- **`code`: whether a construct compiles here** (0.42.0). The text given -
+  a program, a unit, or statements alone, put in a program of the server's
+  own with System.SysUtils used - built by dcc directly with a member's
+  settings as the index read them: its platform's dcc (dcc32 for one that
+  is not Win64), defines, search path, namespaces, aliases and `-$`
+  switches, then the directories of the own units the index holds for it (a
+  bare .dpr names them only in `uses ... in`), then the registry search
+  path. So the code may use the member's units. It builds in a directory
+  of its own beside the member's (`snippet\`), with `-M`: without it dcc
+  compiles the units but writes no .dcu, and every call would compile the
+  member's units again. Errors come by the line of the code as given, not
+  of the program around it. Compiled and linked, never run. Why: language
+  questions in the sessions that built PasTree and this server were settled
+  by compiling a probe, rarely by the web - where the docwiki is silent on
+  the edge cases, and an answer found there was once quoted wrongly. The
+  compiler of the project's own version is the one source right for it.
+  With it, the server's instructions and `status` name that compiler, its
+  Delphi version, the constructs of later versions it rejects (from 10.3 on:
+  inline variables, managed records, binary literals and the digit
+  separator, multiline strings, if-expressions, NameOf, `is not`/`not in`,
+  `{$PUSHOPT}`, noreturn) and the language reference - one line, paid by
+  every session, against code written for a newer compiler than the
+  project's.
 
 - **Output goes to a temporary directory** (`DCC_ExeOutput`, `DCC_DcuOutput`
   overridden), never to the project's own output: an agent's check must not
@@ -992,8 +1040,12 @@ gap between the answers and the truth.
    are called through a base, an interface or a property, and a published
    property's uses are form lines.
 
-`type_of`, several targets per call, `overview`, `implement_plan`,
-`scope_at` and `uses_for` go in when a measured session asks for them.
+12. Several targets per call (done, 0.43.0, 9.2) - asked for by the
+   client group's sessions of October: half the reads of code around the
+   tools wanted more than one routine at once.
+
+`type_of`, `overview`, `implement_plan`, `scope_at` and `uses_for` go in
+when a measured session asks for them - the October audit (9.2.6) did not.
 
 ### 9.9 Light mode (0.31.0; complete answers 0.32.0)
 

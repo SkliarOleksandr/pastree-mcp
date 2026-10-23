@@ -326,6 +326,9 @@ type
     property Root: string read FRoot;
     property ProjectFile: string read FProjectFile;
     property Studio: TMcpStudio read FStudio;
+    // The --studio given, set before Load: Studio is Load's, on the thread
+    // that runs the tools, and `initialize` is answered before that.
+    property StudioWanted: string read FStudioWanted;
     property Members: TArray<TMcpMember> read FMembers;
     property Analyses: TObjectList<TMcpAnalysis> read FAnalyses;
   end;
@@ -1940,8 +1943,11 @@ begin
     LSb.AppendLine('project: ' + FProjectFile);
     LSb.AppendLine('paths in results are relative to: ' + FRoot);
     if FStudio.Found then
+    begin
       LSb.AppendLine(Format('RAD Studio %s (dcc %.1f) at %s', [FStudio.Version,
-        FStudio.CompilerVersion, FStudio.Root]))
+        FStudio.CompilerVersion, FStudio.Root]));
+      LSb.AppendLine('language: ' + LanguageNote(FStudio));
+    end
     else
       LSb.AppendLine('RAD Studio: not found (RTL/VCL do not resolve)');
     if FPolicy = gpShared then

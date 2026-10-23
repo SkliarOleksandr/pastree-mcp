@@ -54,6 +54,15 @@ function FindStudio(const AWanted: string): TMcpStudio;
 // Every installed version, highest first ('37.0', '23.0', ...).
 function InstalledStudioVersions: TArray<string>;
 
+// What an agent writing code for AStudio's compiler must know of the
+// language: the Delphi version, the constructs newer versions added that
+// this one rejects, how to try one, and where the language reference is.
+// For the server's instructions and `status`; '' when no Studio was found.
+function LanguageNote(const AStudio: TMcpStudio): string;
+
+// 'Delphi 11 Alexandria' for dcc 35.0; '' for one before 10 Seattle.
+function DelphiName(ACompiler: Double): string;
+
 implementation
 
 uses
@@ -61,6 +70,7 @@ uses
   System.Classes,
   System.IOUtils,
   System.Math,
+  System.StrUtils,
   System.Generics.Defaults,
   System.Win.Registry,
   Winapi.Windows;
@@ -293,6 +303,70 @@ begin
     LReg.Free;
     LNames.Free;
   end;
+end;
+
+type
+  TLanguageStep = record
+    Compiler: Double;
+    Delphi: string;
+    Added: string;
+  end;
+
+const
+  // The language constructs each compiler version added, from the language
+  // reference's version history (object-pascal-spec, Appendix A): the ones an
+  // agent writes by habit and an older compiler rejects. Before 10.3 the
+  // steps are too far back to matter.
+  LANGUAGE_STEPS: array[0..4] of TLanguageStep = (
+    (Compiler: 33.0; Delphi: '10.3 Rio';
+     Added: 'inline variables and constants (var X := ... inside a block)'),
+    (Compiler: 34.0; Delphi: '10.4 Sydney';
+     Added: 'custom managed records (class operator Initialize, Finalize, '
+       + 'Assign)'),
+    (Compiler: 35.0; Delphi: '11 Alexandria';
+     Added: 'binary literals (%1010), the digit separator (1_000)'),
+    (Compiler: 36.0; Delphi: '12 Athens';
+     Added: 'multiline string literals (''''''...'''''')'),
+    (Compiler: 37.0; Delphi: '13 Florence';
+     Added: 'if-expressions (X := if C then A else B), NameOf, `is not` and '
+       + '`not in`, {$PUSHOPT}/{$POPOPT}, noreturn'));
+
+  LANGUAGE_REFERENCE = 'https://github.com/SkliarOleksandr/object-pascal-spec';
+
+function DelphiName(ACompiler: Double): string;
+const
+  OLDER: array[30..32] of string = ('10 Seattle', '10.1 Berlin', '10.2 Tokyo');
+begin
+  Result := '';
+  for var LStep in LANGUAGE_STEPS do
+    if SameValue(LStep.Compiler, ACompiler) then
+      Exit('Delphi ' + LStep.Delphi);
+  for var LV := Low(OLDER) to High(OLDER) do
+    if SameValue(LV, ACompiler) then
+      Exit('Delphi ' + OLDER[LV]);
+end;
+
+function LanguageNote(const AStudio: TMcpStudio): string;
+var
+  LName, LMissing: string;
+begin
+  Result := '';
+  if not AStudio.Found then
+    Exit;
+  LName := DelphiName(AStudio.CompilerVersion);
+  Result := Format('Compiler: dcc %.1f%s.', [AStudio.CompilerVersion,
+    IfThen(LName <> '', ' (' + LName + ')', '')], TFormatSettings.Invariant);
+  LMissing := '';
+  for var LStep in LANGUAGE_STEPS do
+    if LStep.Compiler > AStudio.CompilerVersion + 0.05 then
+      LMissing := LMissing + IfThen(LMissing <> '', '; ', '') + LStep.Added
+        + ' - Delphi ' + LStep.Delphi;
+  if LMissing <> '' then
+    Result := Result + ' Not in this version, so not to be written here: '
+      + LMissing + '.';
+  Result := Result + ' Whether a construct compiles here: `compile` with '
+    + '`code`. The language rules, each checked against dcc: '
+    + LANGUAGE_REFERENCE + '.';
 end;
 
 end.

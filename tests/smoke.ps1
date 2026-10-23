@@ -167,6 +167,25 @@ Check 'source limit' (Block $b 'source {"symbol":"TSquare"') @('TSquare (class) 
 Check 'source comment' (Block $b 'source {"symbol":"RunB"}') @('RunB (procedure) implemented at AppB\uAppB.pas:26-32', "25  // Project B's run", '32  end;') @('24  ')
 # No body to show: the declaration, and why.
 Check 'source abstract' (Block $b 'source {"symbol":"TShape.Area"}') @('TShape.Area (function) declared at Shared\uShapes.pas:17', 'abstract, no body')
+# Several targets in one call (0.43.0): each answered in turn under its own
+# header, the call's other arguments for every one; a target that fails
+# says why in its place, and the call fails only when all did. Written as a
+# string - names, or a JSON list - as agents send them.
+Check 'source targets' (Block $b 'source {"targets":["TCircle.Area"') @("=== 1 of 2: TCircle.Area`nTCircle.Area (function) declared at Shared\uShapes.pas:26", "=== 2 of 2: TWideBox.Configure`nTWideBox.Configure (function) declared at AppB\uBoxes.pas:71-73") @('implemented at')
+Check 'source targets place' (Block $b 'source {"targets":[{"file"') @("=== 1 of 2: Shared/uShapes.pas:55`nTCircle.Area (function) implemented at Shared\uShapes.pas:53-56", "=== 2 of 2: NoSuchThing`nno declaration named ``NoSuchThing`` among ")
+Check 'source targets string' (Block $b 'source {"targets":"TCircle.Area RunB"') @("=== 1 of 2: TCircle.Area`n", '... 2 more lines, to line 56 (raise `limit`)', "=== 2 of 2: RunB`nRunB (procedure) implemented at AppB\uAppB.pas:26-32")
+Check 'source targets none found' (Block $b 'source {"targets":["NoSuchA"') @("=== 1 of 2: NoSuchA`nno declaration named ``NoSuchA``", "=== 2 of 2: NoSuchB`n")
+Check 'source targets empty' (Block $b 'source {"targets":[]}') @('`targets` is empty')
+Check 'source targets and symbol' (Block $b 'source {"targets":["TCircle"],"symbol"') @('`targets` takes the place of `symbol` - give it in each target')
+Check 'source targets bad argument' (Block $b 'source {"targets":[{"symbol":"TCircle","bogus"') @('`source` takes no argument `bogus` - its arguments: ')
+Check 'references targets' (Block $b 'references {"targets"') @("=== 1 of 2: TCircle`nTCircle (class) declared at Shared\uShapes.pas:21 - 3 references in 2 files", "=== 2 of 2: TShape.Area`nTShape.Area (function) declared at Shared\uShapes.pas:17 - 1 references in 1 files")
+# `symbol` with `file` and no `line`: the file narrows the name - it
+# addressed the unit before ("uShapes is a unit").
+Check 'source symbol in file' (Block $b 'source {"file":"Shared/uShapes.pas","symbol"') @('TCircle.Area (function) implemented at Shared\uShapes.pas:53-56') @('is a unit')
+Check 'source symbol not in file' (Block $b 'source {"file":"AppB/uBoxes.pas","symbol"') @('no declaration named `TCircle.Area` in AppB\uBoxes.pas - without `file`, the name is looked for in the whole group')
+Check 'outline unit' (Block $b 'outline {"unit":"uShapes"') @('Shared\uShapes.pas (79 lines)', '1 unit uShapes')
+Check 'outline nothing' (Block $b 'outline {"owner"') @('give `file`, or the `unit` by name')
+Check 'lint rules json' (Block $b 'lint {"file":"AppB/uLint.pas","rules":"[') @('4 findings in 1 file of 1 own unit: unused-uses 4') @('unknown rule')
 Check 'source interface' (Block $b 'source {"symbol":"IShape.Area"}') @('declared at Shared\uShapes.pas:12', 'an interface method, no body')
 Check 'source unit' (Block $b 'source {"symbol":"uShapes"}') @('is a unit - `outline` shows its structure')
 # A local has no name to find it by; by position it has a source like any other.
@@ -385,6 +404,20 @@ Check 'compile rebuild' (Block $b 'compile {"member":"AppA", "rebuild"') @('351 
 Check 'compile no member' (Block $b 'compile {"member":"NoSuch"}') @('no member named NoSuch - the group has: AppA, AppB, AppF')
 Check 'compile bad show' (Block $b 'compile {"show"') @("``show`` of ``compile`` is new, warnings or all (not ``some``)")
 Check 'compile nothing changed' (Block $b 'compile {}') @('no file has changed since the server started, and git has nothing to say: not installed, or ', ' in no work tree',' - name the `member` to build (the group has: AppA, AppB, AppF)')
+# compile with `code`: the code alone, with a member's compiler and settings.
+# Statements go into a program of the server's own; the answer counts lines
+# of the code as given. A bare .dpr's dcc reports `file(line)` with no
+# column (AppB). A unit may use the member's own units - uShapes, which
+# AppB names only in its `uses ... in`. Then the refusals: no code, a
+# library, `rebuild` beside it.
+Check 'status language' (Block $b 'status') @('language: Compiler: dcc ', 'Whether a construct compiles here: `compile` with `code`.', 'https://github.com/SkliarOleksandr/object-pascal-spec')
+Check 'compile code' (Block $b 'compile {"code":"var X') @('compile code (statements) - dcc32 ', 'the settings of AppA (Win32 Debug), the first of the group (`member` names another)', 'compiles - in ', 'compiled and linked, not run', 'no errors, warnings or hints')
+Check 'compile code error' (Block $b 'compile {"code":"var S') @('compile code (statements) - dcc32 ', 'the settings of AppB (Win32)', 'does not compile - 1 error', "errors - 1:`n  2  E2010 Incompatible types: 'Char' and 'Integer'`n        S := 1;") @('internal error')
+Check 'compile code unit' (Block $b 'compile {"code":"unit uTryShapes') @('compile code (unit) - dcc32 ', 'the settings of AppB (Win32)', 'compiles - in ', '(1 unit of the member compiled for it here - kept for the next `code`)', 'no errors, warnings or hints')
+Check 'compile code program' (Block $b 'compile {"code":"type') @('compile code (program) - ', 'the settings of AppA (Win32 Debug), which compiles Shared\uShapes.pas', 'does not compile - 1 error', "errors - 1:`n  7  E2003 Undeclared identifier: 'Missing'`n        R.A := Missing;")
+Check 'compile code empty' (Block $b 'compile {"code":" "}') @('`code` is empty')
+Check 'compile code library' (Block $b 'compile {"code":"library') @('`code` is a program, a unit or statements - not a library')
+Check 'compile code rebuild' (Block $b 'compile {"code":"Writeln(1);","rebuild"') @('`code` is built alone - `base` and `rebuild` are for the members'' own builds')
 # form: a form's components, their events and the components they name,
 # with the lines of the form file. An inline frame's child under the frame,
 # its handler the host's; a data module; a binary form file, said so. An
@@ -871,6 +904,49 @@ finally {
 Check 'compile form malformed' $out @('compile AppF (Win32): FAILED in', 'errors - 2:', "AppF\uData.dfm`n  8  E2161 Error: RLINK32: Error opening file - the form file does not read from this line: Invalid string constant`n        Caption = 'Save") @('(no file)', 'uData.dfm"')
 Check 'compile form missing' $out @("AppF\uChildForm.pas`n  27  E1026 File not found: 'uChildForm.dfm'`n        {`$R *.dfm}`n")
 
+# ---- a bare .dpr built again: what is new, per unit ------------------------------------
+# dcc directly, with -M: without it dcc wrote no .dcu, so every build compiled
+# every unit and no unit was known compiled - the old warning came back as
+# kept and as reported, and the second compile was an internal error. A
+# project of its own, edited between the builds of one build directory: the
+# second build compiles nothing new, an edit of uQ adds a warning, an edit of
+# uW removes one.
+Write-Host '--- CLI, a bare .dpr built again'
+$bare = Join-Path ([IO.Path]::GetTempPath()) ('pastree-mcp-smoke-bare-' + [Guid]::NewGuid().ToString('N'))
+$bareCalls = $bare + '.calls'
+New-Item -ItemType Directory $bare | Out-Null
+function Write-Bare([string]$Name, [string[]]$Lines) { [IO.File]::WriteAllText((Join-Path $bare $Name), ($Lines -join "`r`n") + "`r`n") }
+function Compile-Bare {
+    $ErrorActionPreference = 'Continue'
+    try { return (& $Exe --project (Join-Path $bare 'P.dpr') --log none --build-dir ($bare + '-build') --script $bareCalls 2>$null | ForEach-Object { "$_" }) -join "`n" }
+    finally { $ErrorActionPreference = 'Stop' }
+}
+try {
+    Write-Bare 'P.dpr' @('program P;', '{$APPTYPE CONSOLE}', 'uses', "  uW in 'uW.pas',", "  uQ in 'uQ.pas';", 'begin', '  Writeln(One, Two);', 'end.')
+    Write-Bare 'uW.pas' @('unit uW;', 'interface', 'function One: Integer;', 'implementation', 'function One: Integer;', 'begin', 'end;', 'end.')
+    Write-Bare 'uQ.pas' @('unit uQ;', 'interface', 'function Two: Integer;', 'implementation', 'function Two: Integer;', 'begin', '  Result := 2;', 'end;', 'end.')
+    [IO.File]::WriteAllText($bareCalls, "compile {`"member`":`"P`",`"show`":`"warnings`"}`n")
+    $bareFirst = Compile-Bare
+    $bareAgain = Compile-Bare
+    [IO.File]::WriteAllText($bareCalls, "compile {`"member`":`"P`"}`n")
+    # dcc keeps a source's time in its .dcu as DOS time, to 2 s: an edit
+    # within 2 s of the file's last write is not a change to Make.
+    Start-Sleep -Seconds 2
+    Write-Bare 'uQ.pas' @('unit uQ;', 'interface', 'function Two: Integer;', 'implementation', 'function Two: Integer;', 'begin', 'end;', 'end.')
+    $bareNew = Compile-Bare
+    Start-Sleep -Seconds 2
+    Write-Bare 'uW.pas' @('unit uW;', 'interface', 'function One: Integer;', 'implementation', 'function One: Integer;', 'begin', '  Result := 1;', 'end;', 'end.')
+    $bareGone = Compile-Bare
+}
+finally {
+    Remove-Item -Recurse -Force $bare, ($bare + '-build') -ErrorAction SilentlyContinue
+    Remove-Item -Force $bareCalls -ErrorAction SilentlyContinue
+}
+Check 'compile bare first' $bareFirst @('compile P (Win32): built in', '31 lines compiled', "warnings - 1 in the group's files:", "  7  W1035 Return value of function 'One' might be undefined (in One)") @('[earlier compile]', 'internal error')
+Check 'compile bare again' $bareAgain @('10 lines compiled', "  7  W1035 Return value of function 'One' might be undefined (in One) [earlier compile]") @('31 lines compiled', 'internal error')
+Check 'compile bare new' $bareNew @('20 lines compiled', 'warnings - 1 new (1 old, not listed):', "uQ.pas`n  7  W1035 Return value of function 'Two' might be undefined (in Two)") @('internal error')
+Check 'compile bare gone' $bareGone @('warnings - none new (1 old, not listed)', "gone since the previous compile - 1:`n  uW.pas:7  W1035 Return value of function 'One' might be undefined") @('internal error')
+
 # ---- compile without arguments: what git says changed --------------------------------
 # Nothing edited this session (the user edits in the IDE before it starts):
 # the files not committed and the branch's own commits since it left the
@@ -988,7 +1064,7 @@ try {
     function ToolText($Reply) { return ([string]$Reply.result.content[0].text).Replace("`r`n", "`n") }
 
     $r = Rpc 1 'initialize' '{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}'
-    Check 'initialize' ($r | ConvertTo-Json -Depth 6) @('"name":  "pastree"', 'instructions', '"tools"')
+    Check 'initialize' ($r | ConvertTo-Json -Depth 6) @('"name":  "pastree"', 'instructions', '"tools"', 'Compiler: dcc ', 'object-pascal-spec')
     $stdin.WriteLine('{"jsonrpc":"2.0","method":"notifications/initialized"}')
     $r = Rpc 2 'tools/list' '{}'
     $names = ($r.result.tools | ForEach-Object { $_.name }) -join ','
