@@ -43,7 +43,7 @@ body analyzed too: 6.9 s / 2.8 GB and 12.5 s / 4.6 GB). Typical calls take
 
 | Tool | Answers |
 | --- | --- |
-| `status` | What is loaded: the server's version, PasTree's, build time, pid and log file; the compiler and the language constructs of later Delphi versions it rejects (the server's instructions say the same); members, analyses, unit counts, unit names that do not resolve, load progress |
+| `status` | What is loaded: the server's version, PasTree's, build time, pid and log file; the compiler, the newest language constructs it compiles and those of later Delphi versions it rejects (the server's instructions say the same); members, analyses, unit counts, unit names that do not resolve, load progress |
 | `find` | Declarations by name, qualified name or wildcard (in any part: `*.Save`, `*Form.Save`), project units first; `TDerived.Member` finds a member TDerived inherits; for a name the index does not hold, the Pascal files outside it that write it |
 | `definition` | Where a symbol is declared and implemented, optionally with the source that follows |
 | `source` | The exact text of one declaration - a routine's body, a whole type, a constant - numbered, with the comment above it; each overload of an overloaded name; `lines` cuts it to a piece of it by file line numbers; `file` + `line` alone gives the routine around a line. `targets` (here, in `definition` and in `references`): several in one call, names or `file` + `line` pieces, answered one after another |
@@ -128,7 +128,11 @@ stops the walk with an error - that repository needs its own `.mcp.json` with
 `--project`, which overrides the user-scope registration of the same name.
 The tools then appear to the agent as
 `mcp__pastree__find` and so on, together with instructions on when to prefer
-them over grep. A new session is needed after registering or rebuilding.
+them over grep. A new session is needed after registering or rebuilding -
+new, not resumed: a resumed session starts the new server but keeps the tool
+schemas and instructions it read from the old one, so arguments added since
+(`targets`, `code`) stay invisible to the agent, although the server accepts
+them.
 
 ### Options
 

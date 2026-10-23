@@ -349,6 +349,7 @@ end;
 function LanguageNote(const AStudio: TMcpStudio): string;
 var
   LName, LMissing: string;
+  LNewest: Integer;
 begin
   Result := '';
   if not AStudio.Found then
@@ -357,10 +358,20 @@ begin
   Result := Format('Compiler: dcc %.1f%s.', [AStudio.CompilerVersion,
     IfThen(LName <> '', ' (' + LName + ')', '')], TFormatSettings.Invariant);
   LMissing := '';
-  for var LStep in LANGUAGE_STEPS do
-    if LStep.Compiler > AStudio.CompilerVersion + 0.05 then
-      LMissing := LMissing + IfThen(LMissing <> '', '; ', '') + LStep.Added
-        + ' - Delphi ' + LStep.Delphi;
+  LNewest := -1;
+  for var LI := Low(LANGUAGE_STEPS) to High(LANGUAGE_STEPS) do
+    if LANGUAGE_STEPS[LI].Compiler > AStudio.CompilerVersion + 0.05 then
+      LMissing := LMissing + IfThen(LMissing <> '', '; ', '')
+        + LANGUAGE_STEPS[LI].Added + ' - Delphi ' + LANGUAGE_STEPS[LI].Delphi
+    else
+      LNewest := LI;
+  // Named even when nothing is missing: an agent unsure of the newest
+  // constructs otherwise compiles a probe to learn they are there.
+  if LNewest >= 0 then
+    Result := Result + ' Its newest constructs, which compile here: '
+      + LANGUAGE_STEPS[LNewest].Added + IfThen(SameValue(
+      LANGUAGE_STEPS[LNewest].Compiler, AStudio.CompilerVersion), '',
+      ' - Delphi ' + LANGUAGE_STEPS[LNewest].Delphi) + '.';
   if LMissing <> '' then
     Result := Result + ' Not in this version, so not to be written here: '
       + LMissing + '.';

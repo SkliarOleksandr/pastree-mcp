@@ -19495,11 +19495,12 @@ function CallTool(AWs: TMcpWorkspace; const AName: string; AArgs: TJSONObject;
 var
   LFresh, LNote: string;
   LSW: TStopwatch;
-  LFreshMs: Int64;
+  LWaitMs, LFreshMs: Int64;
 begin
   AIsError := False;
   ADeferred := nil;
   LSW := TStopwatch.StartNew;
+  LWaitMs := 0;
   LFreshMs := 0;
   AWs.BeginCall(ACancelled);
   try
@@ -19519,6 +19520,9 @@ begin
         AIsError := True;
         Exit('the project failed to load: ' + AWs.LoadError);
       end;
+      // Logged apart: on a slow machine the first call's wait for the load
+      // reads as a slow query otherwise.
+      LWaitMs := LSW.ElapsedMilliseconds;
       LFreshMs := LSW.ElapsedMilliseconds;
       AWs.EnsureFresh(LFresh);
       LFreshMs := LSW.ElapsedMilliseconds - LFreshMs;
@@ -19553,8 +19557,9 @@ begin
   if LFresh <> '' then
     Result := '(index: ' + LFresh.TrimRight([' ', ';']) + ')' + sLineBreak +
       Result;
-  Log('tool %s: %d ms (freshness check %d ms), %s%s', [AName,
-    LSW.ElapsedMilliseconds, LFreshMs, IfThen(ADeferred <> nil,
+  Log('tool %s: %d ms (%sfreshness check %d ms), %s%s', [AName,
+    LSW.ElapsedMilliseconds, IfThen(LWaitMs >= 100,
+    Format('waited %d ms for the load, ', [LWaitMs]), ''), LFreshMs, IfThen(ADeferred <> nil,
     'answered when its work is done', IntToStr(Length(Result)) + ' chars'),
     IfThen(AIsError, ', error', '')]);
 end;

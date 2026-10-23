@@ -652,7 +652,10 @@ default.
   separator, multiline strings, if-expressions, NameOf, `is not`/`not in`,
   `{$PUSHOPT}`, noreturn) and the language reference - one line, paid by
   every session, against code written for a newer compiler than the
-  project's.
+  project's. The constructs its own version added are named too (0.43.2):
+  on the newest compiler nothing is rejected, and an agent on the client
+  group, unsure of if-expressions and `is not`, compiled a probe to learn
+  they were there.
 
 - **Output goes to a temporary directory** (`DCC_ExeOutput`, `DCC_DcuOutput`
   overridden), never to the project's own output: an agent's check must not
