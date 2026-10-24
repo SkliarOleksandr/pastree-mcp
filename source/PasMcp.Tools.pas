@@ -1217,6 +1217,17 @@ begin
   AWs.QueryDone(AA, ADefer);
 end;
 
+// A step of a tool that took 100 ms or more, logged, and the stopwatch
+// restarted for the next: where a slow call's time went, which the call's
+// own line and the workspace's take-in lines do not say (9 s of a cold
+// `find` on the client group, 2.5 s of it logged).
+procedure LogStep(const AStep: string; var ASW: TStopwatch);
+begin
+  if ASW.ElapsedMilliseconds >= 100 then
+    Log('  %s: %d ms', [AStep, ASW.ElapsedMilliseconds]);
+  ASW := TStopwatch.StartNew;
+end;
+
 // A search by name (ResolveName, `find`) over every analysis: the units
 // whose declarations it can match made full - the light units whose
 // implementation declares the name, the units nobody loaded that declare it
@@ -1228,12 +1239,17 @@ end;
 // client group run four times for three analyses (12.5 s, the same call
 // 1.6 s warm; a field report).
 procedure QFind(AWs: TMcpWorkspace; const AQuery: string; AUnits: Boolean);
+var
+  LSW: TStopwatch;
 begin
+  LSW := TStopwatch.StartNew;
   for var LA in AWs.Analyses do
     if (LA.Proj <> nil) and (LA.Proj.LightCount > 0) then
     begin
       LA.WS.EnsureFind(AQuery, AUnits);
       AWs.QueryDone(LA, True);
+      LogStep(Format('find''s take-in of `%s`, analysis %d', [AQuery,
+        LA.Index]), LSW);
     end;
   AWs.RaiseIfChanged;
 end;
@@ -1243,12 +1259,16 @@ end;
 // index, is the full analysis's. Asked only where an answer says so - a name
 // nothing declares.
 procedure QClosure(AWs: TMcpWorkspace);
+var
+  LSW: TStopwatch;
 begin
+  LSW := TStopwatch.StartNew;
   for var LA in AWs.Analyses do
     if (LA.Proj <> nil) and (LA.Proj.LightCount > 0) then
     begin
       LA.WS.EnsureClosure;
       AWs.QueryDone(LA, True);
+      LogStep(Format('closure, analysis %d', [LA.Index]), LSW);
     end;
   // As QFind: every analysis's closure, then one run again.
   AWs.RaiseIfChanged;
@@ -3297,7 +3317,9 @@ var
   LAll, LOwn: Integer;
   LExtras: TFindExtras;
   LIn: string;
+  LSW: TStopwatch;
 begin
+  LSW := TStopwatch.StartNew;
   LLike := nil;
   LQuery := ArgStr(AArgs, 'query');
   if LQuery = '' then
@@ -3319,6 +3341,7 @@ begin
       [LExtras.InFilter]));
     LCands := ResolveName(AWs, LQuery, LKind, LOwnOnly, LLimit, LMore, True,
       LExtras);
+    LogStep('find: the search', LSW);
     LFallback := False;
     if (Length(LCands) = 0) and (LMore = 0) and (Pos('*', LQuery) = 0) and
        (Pos('?', LQuery) = 0) then
@@ -3338,11 +3361,13 @@ begin
       LExtras.Generated := 0;
       LCands := ResolveName(AWs, '*' + LQuery + '*', LKind, LOwnOnly, LLimit,
         LMore, True, LExtras);
+      LogStep('find: the search for names containing it', LSW);
       LFallback := True;
       // A half-remembered name rarely contains the real one: TaviCreditStatus
       // for TCreditStatus (a field report). The same words, or a misspelling.
       if LLimit > 0 then
         LLike := SimilarNames(AWs, LQuery, LKind, LOwnOnly, Min(LLimit, 8));
+      LogStep('find: names like it', LSW);
     end;
     LSb := TStringBuilder.Create;
     // Nothing of that name in the index: say what the index is, and where
@@ -3365,6 +3390,7 @@ begin
           IndexScope(AWs)]));
       AppendLike(LSb, AWs, LLike);
       LSb.AppendLine(OutsideIndexNote(AWs, LQuery, True));
+      LogStep('find: where it is written outside the index', LSW);
       Exit(LSb.ToString.TrimRight);
     end;
     if LFallback then

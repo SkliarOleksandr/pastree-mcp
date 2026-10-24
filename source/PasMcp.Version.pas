@@ -16,7 +16,7 @@ unit PasMcp.Version;
 interface
 
 const
-  PasTreeMcpVersion = '0.43.2';
+  PasTreeMcpVersion = '0.43.3';
   // 0.124.0: a search by name completes itself in light mode (EnsureFind -
   // DemandFind; the units nobody loaded, NotLoadedFiles): `find` lists what
   // a full analysis lists, where an older PasTree misses the declarations of
