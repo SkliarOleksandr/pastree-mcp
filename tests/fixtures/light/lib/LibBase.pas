@@ -34,4 +34,15 @@ begin
   AWorker.DoWork;
 end;
 
+// Uses in a branch not compiled: this directory is a source on the search
+// path, not the installed library, so `references` says them - read light
+// or full alike.
+{$IFDEF LIB_NEVER}
+procedure LibRunTwice(AWorker: TLibWorker);
+begin
+  LibRun(AWorker);
+  LibRun(AWorker);
+end;
+{$ENDIF}
+
 end.

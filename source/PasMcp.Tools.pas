@@ -4370,9 +4370,10 @@ type
   end;
 
 // Where AWord (lower case) is written as a whole word in the branches of LM
-// the configuration does not compile, in the files of the group's tree - an
-// include file of a library's is not the group's to edit. AFirst: the first
-// place only.
+// the configuration does not compile, in the group's files and the sources
+// its search paths reach outside the installed library (IsProjectSource) - an
+// include file of the library's is not the group's to edit. AFirst: the
+// first place only.
 function SkippedWords(AWs: TMcpWorkspace; LM: TPasSemaModel;
   const AWord: string; AFirst: Boolean): TArray<TSkippedWord>;
 var
@@ -4384,7 +4385,7 @@ begin
   for var LFi := 0 to Min(High(LM.Tree.Source.Skipped),
     High(LM.Tree.Source.Files)) do
   begin
-    if (Length(LM.Tree.Source.Skipped[LFi]) = 0) or not AWs.IsOwnFile(
+    if (Length(LM.Tree.Source.Skipped[LFi]) = 0) or not AWs.IsProjectSource(
       LM.Tree.Source.FileNames[LFi]) then
       Continue;
     for var LR in LM.Tree.Source.Skipped[LFi] do
@@ -4410,7 +4411,9 @@ begin
   end;
 end;
 
-// The lines of the group's own files where ANameLower is written as a word
+// The lines of the group's own files - and of the sources its search paths
+// reach outside the installed library: a sibling repository's units were
+// left unsaid (0.44.2) - where ANameLower is written as a word
 // inside a conditional branch the analyzed configuration does not compile
 // ({$IFDEF DEMO}, the {$ELSE} of a {$IFDEF DEBUG}) - not resolved, so maybe a
 // namesake, but an edit made from the answer never reaches them, and the
@@ -4550,7 +4553,7 @@ begin
       LUsers := nil;
       for var LMid := 0 to LA.Proj.ModelCount - 1 do
       begin
-        if not AWs.IsOwnFile(LA.Proj.ModelFile(LMid)) then
+        if not AWs.IsProjectSource(LA.Proj.ModelFile(LMid)) then
           Continue;
         // Light mode: an own file under a light tree (--light) is read only
         // to its implementation `uses` - its branches past that stop are

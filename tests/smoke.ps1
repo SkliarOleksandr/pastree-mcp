@@ -766,6 +766,10 @@ foreach ($light in @($true, $false)) {
             if ($script:lightFixture[$k] -ne $lb[$k]) { Write-Host "FAIL [light fixture: $k differs between light and full]"; $script:failures++ }
         }
         Check 'full status' (Block $lb 'status') @('light mode off (--no-light)')
+        # A unit on the search path outside the installed library: its uses
+        # in a branch not compiled are said, as an own unit's (0.44.2) - and
+        # the light run's answer is this one (the loop above).
+        Check 'full references uncompiled library source' (Block $lb 'references {"symbol":"LibRun"}') @('(in branches this configuration does not compile the name is written on 2 lines more', 'lib\LibBase.pas:43, ', 'lib\LibBase.pas:44)')
         Check 'full callers' (Block $lb 'callers {"symbol":"TOwnWorker.DoWork"}') @('2 calls in 2 routines', "  LibRun`n    34  [via TLibWorker.DoWork]  AWorker.DoWork;") @('light mode')
         Check 'full unit_deps' (Block $lb 'unit_deps {"unit":"LibBase"}') @('lib\LibHidden.pas  (implementation)') @('not analyzed')
         Check 'full outline' (Block $lb 'outline {"file":"../lib/LibHidden.pas"}') @('lib\LibHidden.pas (16 lines)', '11  procedure HiddenStep')

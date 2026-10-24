@@ -201,6 +201,7 @@ type
     FMissing: TArray<string>;
     FAnalyses: TObjectList<TMcpAnalysis>;
     FLibDirs: TArray<string>;
+    FLibTrees: TArray<string>;   // FLibDirs normalized, for IsProjectSource
     FConfigStamps: TDictionary<string, TMcpFileStamp>;
     FListed: TDictionary<string, Boolean>;   // every member's files, lower
     FOwner: TDictionary<string, Integer>;    // own file, lower -> analysis
@@ -301,6 +302,13 @@ type
     // A file of the group itself - under the group directory, or listed by a
     // member - as opposed to a library unit the closure pulled in.
     function IsOwnFile(const APath: string): Boolean;
+    // An own file, or a source the members' search paths reach outside the
+    // installed library (the Studio tree, its library and browsing paths) -
+    // code maintained beside the group, like a sibling repository's units.
+    // `references` scans these for uses in branches not compiled: own files
+    // alone left such a unit's uncompiled uses unsaid, and the installed
+    // library is too large to scan per call.
+    function IsProjectSource(const APath: string): Boolean;
     // The analysis whose diagnostics speak for an own file: the one that
     // lists it (the primary member's first), else the first that holds it -
     // a unit analyzed under two configurations reports two sets of errors,
@@ -594,6 +602,13 @@ begin
     for var LDir in FExtraRoots do
       if StartsText(IncludeTrailingPathDelimiter(LDir), APath) then
         Exit(True);
+end;
+
+function TMcpWorkspace.IsProjectSource(const APath: string): Boolean;
+begin
+  // Not the trees --light names: light mode changes how a unit is read, never
+  // an answer (the light fixture's every answer equals the full run's).
+  Result := IsOwnFile(APath) or not PasUnderDirTrees(APath, FLibTrees);
 end;
 
 procedure TMcpWorkspace.SetLight(AOn: Boolean; const ADirs: TArray<string>);
@@ -1588,6 +1603,7 @@ begin
         FLibDirs := [FStudio.Root];
       for var LA in FAnalyses do
         AddUnique(FLibDirs, FStudio.LibraryPaths(LA.Platform));
+      FLibTrees := PasNormalizeDirTrees(FLibDirs);
       for var LM in FMembers do
         if LM.Error <> '' then
           Log('member %s skipped: %s', [LM.Name, LM.Error])
