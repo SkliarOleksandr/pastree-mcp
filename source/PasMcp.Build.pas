@@ -1663,7 +1663,7 @@ const
 
 function SnippetSource(const ACode: string; out AError: string): TSnippet;
 var
-  LCode, LKind, LName, LTrimmed: string;
+  LCode, LKind, LName, LTrimmed, LUses: string;
   LPos, LEnd: Integer;
   LMatch: TMatch;
 begin
@@ -1744,10 +1744,27 @@ begin
   end
   else
   begin
+    // Statements may start with a `uses` clause - the member's own units, as
+    // the tool's description offers: it goes into the program's, and its
+    // lines stay as blank ones so errors keep the numbers of the code given
+    // (it was compiled as a statement: E2029).
+    LUses := 'System.SysUtils';
+    LMatch := TRegEx.Match(Copy(LCode, LPos, MaxInt), '^uses\b([^;]*);',
+      [roIgnoreCase]);
+    if LMatch.Success then
+    begin
+      for var LUnit in LMatch.Groups[1].Value.Split([',']) do
+        if not SameText(Trim(LUnit), 'System.SysUtils') and
+           (Trim(LUnit) <> '') then
+          LUses := LUses + ', ' + Trim(LUnit);
+      LCode := Copy(LCode, 1, LPos - 1) +
+        TRegEx.Replace(LMatch.Value, '[^\r\n]', '') +
+        Copy(LCode, LPos + LMatch.Length, MaxInt);
+    end;
     Result.Kind := 'statements';
     Result.FileName := SNIPPET_PROGRAM + '.dpr';
     Result.Text := 'program ' + SNIPPET_PROGRAM + ';'#13#10
-      + 'uses System.SysUtils;'#13#10'begin'#13#10 + LCode + #13#10'end.'#13#10;
+      + 'uses ' + LUses + ';'#13#10'begin'#13#10 + LCode + #13#10'end.'#13#10;
     Result.Shift := 3;
   end;
 end;

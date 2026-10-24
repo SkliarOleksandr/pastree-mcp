@@ -164,6 +164,9 @@ const
     skEnumValue];
   ROUTINE_HEADS: array[TPasRoutineHead] of string = ('routine', 'procedure',
     'function', 'constructor', 'destructor', 'operator');
+  // `find`'s `limit` is capped here; a cut list then says so instead of
+  // "raise `limit`" (a limit of 5000 listed 500 and asked for more).
+  MAX_FIND_ROWS = 500;
 
 { ---- arguments ------------------------------------------------------------ }
 
@@ -561,9 +564,12 @@ begin
   Result := OwnerOf(LM, LScope);
 end;
 
-// A value of a {$SCOPEDENUMS ON} enum: CollectEnum joins an unscoped enum's
-// scope into the scope around it (past enclosing types), a scoped one's not -
-// code reaches that value only as TEnum.Value.
+// A value of a {$SCOPEDENUMS ON} enum: code reaches it only as TEnum.Value.
+// An unscoped enum's values are bound into one aggregate enum scope that the
+// scope around it (past enclosing types and generic parameters) joins - since
+// PasTree 0.110.2 (EnumAggregate); before that the enum's own scope was
+// joined. Asking only the old way judged every value scoped, and a value then
+// lost to any namesake (`find tkArray` answered System.TypInfo's constant).
 function IsScopedEnumValue(LM: TPasSemaModel; ASym: Integer): Boolean;
 var
   LEnum, LOuter, LJoined: Integer;
@@ -577,13 +583,19 @@ begin
     Exit;
   LOuter := LM.Scopes[LEnum].Parent;
   while (LOuter <> NIL_SCOPE) and (LOuter < LM.Scopes.Count) and
-        (LM.Scopes[LOuter].Kind = sckStruct) do
+        (LM.Scopes[LOuter].Kind in [sckStruct, sckGenericParams]) do
     LOuter := LM.Scopes[LOuter].Parent;
   if (LOuter = NIL_SCOPE) or (LOuter >= LM.Scopes.Count) then
     Exit;
   for LJoined in LM.Scopes[LOuter].Additional do
+  begin
     if LJoined = LEnum then
       Exit;
+    if (LJoined >= 0) and (LJoined < LM.Scopes.Count) and
+       (LM.Scopes[LJoined].Kind = sckEnum) and
+       (LM.FindLocal(LJoined, LM.Symbols[ASym].NameLower) = ASym) then
+      Exit;
+  end;
   Result := True;
 end;
 
@@ -1092,6 +1104,32 @@ begin
     Exit(AA.Nav.FindCreations(AMid, ASym));
   Result := AA.WS.FindCreations(LKey);
   AWs.QueryDone(AA);
+end;
+
+// A creation hit on the class written as a generic's type argument -
+// `TList<TFoo>.Create`, `TPair<TFoo, string>.Create`: that creates the
+// container, not a TFoo (15 of 55 classes of the self-index had such rows).
+// The highlighted name stands between `<` or `,` and `>` or `,`.
+function IsTypeArgumentHit(const AHit: TPasRefHit): Boolean;
+var
+  LS: string;
+  LFrom, LTo: Integer;
+begin
+  LS := AHit.Snippet;
+  LFrom := AHit.HiFrom + 1;
+  if (LFrom < 1) or (LFrom > Length(LS)) then
+    Exit(False);
+  LTo := LFrom;
+  while (LTo <= Length(LS)) and (CharInSet(LS[LTo], ['A'..'Z', 'a'..'z',
+     '0'..'9', '_'])) do
+    Inc(LTo);
+  while (LTo <= Length(LS)) and (LS[LTo] = ' ') do
+    Inc(LTo);
+  Dec(LFrom);
+  while (LFrom >= 1) and (LS[LFrom] = ' ') do
+    Dec(LFrom);
+  Result := (LFrom >= 1) and CharInSet(LS[LFrom], ['<', ',']) and
+    (LTo <= Length(LS)) and CharInSet(LS[LTo], ['>', ',']);
 end;
 
 function QDestructions(AWs: TMcpWorkspace; AA: TMcpAnalysis;
@@ -3145,6 +3183,18 @@ begin
     Result := LSpans[LBest].Name;
 end;
 
+// The line under a cut list: "... N more (hint)" - or, when no row was shown
+// (`limit: 0`, `mode: count`), that none were asked for, with how many:
+// "raise `limit`" there read as if rows had been lost.
+function MoreRows(AMore, AShown: Integer; const AHint: string;
+  const AWhat: string = 'more'): string;
+begin
+  if AShown = 0 then
+    Result := Format('(limit 0: %d not listed)', [AMore])
+  else
+    Result := Format('... %d %s (%s)', [AMore, AWhat, AHint]);
+end;
+
 // Grouped by file, one trimmed line per row:
 //   uMain.pas
 //     120  LFoo.Bar(1);
@@ -3241,8 +3291,8 @@ begin
     Inc(LShown);
   end;
   if Length(AHits) - LSame > LShown then
-    ASb.AppendLine(Format('... %d more (raise `limit`)',
-      [Length(AHits) - LSame - LShown]));
+    ASb.AppendLine(MoreRows(Length(AHits) - LSame - LShown, LShown,
+      'raise `limit`'));
 end;
 
 function FileCount(const AHits: TArray<THit>): Integer;
@@ -3413,7 +3463,7 @@ begin
   if LQuery = '' then
     raise EToolError.Create('`query` is required');
   LKind := ArgStr(AArgs, 'kind');
-  LLimit := EnsureRange(ArgInt(AArgs, 'limit', 30), 0, 500);
+  LLimit := EnsureRange(ArgInt(AArgs, 'limit', 30), 0, MAX_FIND_ROWS);
   LOwnOnly := SameText(ArgStr(AArgs, 'scope'), 'project');
   // Light mode: every unit that can declare a match made full first (the
   // own units always are) - the units by name too where ResolveName lists
@@ -3512,7 +3562,9 @@ begin
         'declaration')]))
     else if LMore > 0 then
       LSb.AppendLine(Format('... %d more (narrow the query, add `kind` or '
-        + '`in`, or raise `limit`)', [LMore]));
+        + '`in`%s)', [LMore, IfThen(LLimit < MAX_FIND_ROWS,
+        ', or raise `limit`', '; `limit` is at most ' +
+        IntToStr(MAX_FIND_ROWS))]));
     if (LMore > 0) and (LExtras.ByUnit.Count > 1) then
       LSb.AppendLine(UnitCounts(LExtras));
     // Said where it reorders: some own matches are generated, some not.
@@ -3569,11 +3621,11 @@ end;
 function ToolDefinition(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
 var
   LTargets: TArray<TTarget>;
-  LMore, LContext, LMid, LImplLine: Integer;
+  LMore, LContext, LMid, LImplLine, LHeadCol: Integer;
   LSb: TStringBuilder;
   LNavT: TPasNavTarget;
   LLines: TArray<string>;
-  LImplFile, LShort: string;
+  LImplFile, LShort, LHeadName: string;
 begin
   LContext := EnsureRange(ArgInt(AArgs, 'context', 0), 0, 200);
   LMore := 0;
@@ -3636,7 +3688,12 @@ begin
             if LShort.Contains('.') then
               LShort := Copy(LShort, LastDelimiter('.', LShort) + 1, MaxInt);
             LLines := ReadLines(LImplFile);
-            LImplLine := ImplHeaderLine(LLines, LNavT.Line, LShort);
+            // The routine around the body line, from the model: past nested
+            // routines its header can be any number of lines above (the
+            // text walk below stops after 200 and gave the body line).
+            if not RoutineHeaderAt(AWs, LImplFile, LNavT.Line, LHeadName,
+               LImplLine, LHeadCol) or not SameText(LHeadName, LShort) then
+              LImplLine := ImplHeaderLine(LLines, LNavT.Line, LShort);
             LSb.AppendLine(Format('implemented at %s:%d', [
               AWs.RelPath(LImplFile), LImplLine]));
             Break;
@@ -3770,7 +3827,7 @@ var
   LMid, LFileId, LNode, LCol, LEndFile, LEndLine: Integer;
   LM: TPasSemaModel;
   LLines: TArray<string>;
-  LHead: TMatch;
+  LHead, LLast: TMatch;
 begin
   Result := False;
   AName := '';
@@ -3795,6 +3852,11 @@ begin
     if LFileId < 0 then
       Continue;
     LNode := RoutineNodeAt(LM, LFileId, ALine, LCol);
+    // A `class procedure` header: its routine starts at `procedure`, right
+    // of the line's first character - the line's last one is inside it.
+    if LNode = NIL_NODE then
+      LNode := RoutineNodeAt(LM, LFileId, ALine,
+        Length(TrimRight(LLines[ALine - 1])));
     if (LNode = NIL_NODE) or not VisPos(LM, LM.Tree.NodeLeftmostVis(LNode),
        LFileId, AHeadLine, LCol) or not VisPos(LM, LM.Tree.Nodes[LNode]
        .LastToken, LEndFile, LEndLine, LCol) then
@@ -3803,16 +3865,19 @@ begin
     // writes the routine keyword.
     for var LLine := AHeadLine to Min(LEndLine, Length(LLines)) do
     begin
+      // A generic type's method, `function TMap<V>.Home`: the name is the
+      // last dotted part, past the type parameters (read as far as `<`, the
+      // type was taken for the routine and `source` showed the whole type).
       LHead := TRegEx.Match(LLines[LLine - 1], '\b(procedure|function|'
-        + 'constructor|destructor|operator)\s+([A-Za-z_][\w.]*)',
-        [roIgnoreCase]);
+        + 'constructor|destructor|operator)\s+([A-Za-z_]\w*(?:\s*<[^>]*>)?'
+        + '(?:\s*\.\s*[A-Za-z_]\w*(?:\s*<[^>]*>)?)*)', [roIgnoreCase]);
       if LHead.Success then
       begin
-        AName := LHead.Groups[2].Value;
-        AName := Copy(AName, LastDelimiter('.', AName) + 1, MaxInt);
+        LLast := TRegEx.Match(LHead.Groups[2].Value,
+          '([A-Za-z_]\w*)(?:\s*<[^>]*>)?\s*$');
+        AName := LLast.Groups[1].Value;
         AHeadLine := LLine;
-        AHeadCol := LHead.Groups[2].Index + Length(LHead.Groups[2].Value) -
-          Length(AName);
+        AHeadCol := LHead.Groups[2].Index + LLast.Groups[1].Index - 1;
         Exit(True);
       end;
     end;
@@ -5992,7 +6057,7 @@ begin
         [AWs.RelPath(AA.Proj.ModelFile(LMid))]));
     LSb.Append(LRows.ToString);
     if LShown < LCount then
-      LSb.AppendLine(Format('... %d more (raise `limit`)', [LCount - LShown]));
+      LSb.AppendLine(MoreRows(LCount - LShown, LShown, 'raise `limit`'));
     Result := LSb.ToString;
   finally
     LRows.Free;
@@ -6201,8 +6266,8 @@ begin
       LSb.AppendLine(Format('  %d  %s - %s', [LR.Line, LR.Text, LState]));
     end;
     if LShown < LRows.Count then
-      LSb.AppendLine(Format('... %d more (raise `limit`, or pass `file`)',
-        [LRows.Count - LShown]));
+      LSb.AppendLine(MoreRows(LRows.Count - LShown, LShown,
+        'raise `limit`, or pass `file`'));
     Result := LSb.ToString.TrimRight;
   finally
     LSb.Free;
@@ -6849,8 +6914,11 @@ begin
         begin
           LAccepted := True;
           if LRel = 'creations' then
+          begin
             for var LH in QCreations(AWs, LA, LTMid, LTSym) do
-              LSet.Add(LH)
+              if not IsTypeArgumentHit(LH) then
+                LSet.Add(LH);
+          end
           else
             for var LH in QDestructions(AWs, LA, LTMid, LTSym) do
               LSet.Add(LH);
@@ -9916,8 +9984,8 @@ begin
         if LRemain[LIdx] > 0 then
           LList := LList + IfThen(LList <> '', ', ', '') + Format('%s %d',
             [LGroups[LIdx].Name, LRemain[LIdx]]);
-      LSb.AppendLine(Format('... %d more (raise `limit`, or narrow with '
-        + '`match` or `member_kind`): %s', [Length(LSorted) - LShown, LList]));
+      LSb.AppendLine(MoreRows(Length(LSorted) - LShown, LShown, 'raise '
+        + '`limit`, or narrow with `match` or `member_kind`') + ': ' + LList);
     end;
     LList := '';
     for var LG in LGroups do
@@ -11578,8 +11646,8 @@ begin
     Emit(0, 0);
     LSb.Append(LRows.ToString);
     if LTotal > LShown then
-      LSb.AppendLine(Format('... %d more rows (raise `limit`)',
-        [LTotal - LShown]));
+      LSb.AppendLine(MoreRows(LTotal - LShown, LShown, 'raise `limit`',
+        'more rows'));
     Result := LSb.ToString.TrimRight;
   finally
     LErrors.Free;
@@ -11605,6 +11673,39 @@ var
   LSb: TStringBuilder;
   LMembers: Boolean;
 
+  // A dotted type path without type parameters: TMap<V>.TEnum -> TMap.TEnum.
+  function PlainPath(const APath: string): string;
+  begin
+    Result := APath;
+    while Result.Contains('<') do
+      Result := TRegEx.Replace(Result, '\s*<[^<>]*>', '');
+  end;
+
+  // Whether `owner` names the type of entry AE or one around it - by its full
+  // path (TOuter.TInner) or by its last parts (TInner): a nested type's bare
+  // name gave an empty outline. A prefix of a name is not a type
+  // (`TPasForm` took in TPasFormBinder's rows).
+  function OwnerHolds(const AE: TPasOutlineEntry): Boolean;
+  var
+    LPath: string;
+    LParts: TArray<string>;
+    LPrefix: string;
+  begin
+    if AE.Kind = okType then
+      LPath := PlainPath(IfThen(AE.Owner <> '', AE.Owner + '.', '') + AE.Name)
+    else
+      LPath := PlainPath(AE.Owner);
+    LParts := LPath.Split(['.']);
+    LPrefix := '';
+    for var LP in LParts do
+    begin
+      LPrefix := IfThen(LPrefix <> '', LPrefix + '.', '') + LP;
+      if SameText(LPrefix, LOwner) or EndsText('.' + LOwner, LPrefix) then
+        Exit(True);
+    end;
+    Result := False;
+  end;
+
   // The rows of the outline, members of types among them or not.
   procedure Collect(AMembers: Boolean);
   var
@@ -11618,12 +11719,8 @@ var
       if (LSection <> '') and (LE.Section <> osNone) and
          (SECTIONS[LE.Section] <> LSection) then
         Continue;
-      if LOwner <> '' then
-      begin
-        if not (StartsText(LOwner, LE.Owner) or
-           ((LE.Owner = '') and SameText(StripGenerics(LE.Name), LOwner))) then
-          Continue;
-      end;
+      if (LOwner <> '') and not OwnerHolds(LE) then
+        Continue;
       case LE.Kind of
         okModule:
           LRows.Add(Format('%d %s %s', [LE.Line, LE.Head, LE.Name]));
@@ -11683,7 +11780,7 @@ begin
     raise EToolError.Create('give `file`, or the `unit` by name')
   else
     LFile := ArgFile(AWs, AArgs);
-  LOwner := ArgStr(AArgs, 'owner');
+  LOwner := PlainPath(Trim(ArgStr(AArgs, 'owner')));
   LSection := LowerCase(ArgStr(AArgs, 'section'));
   if not ModelOfFile(AWs, LFile, LA, LMid) then
   begin
@@ -11716,6 +11813,28 @@ begin
       LSb.AppendLine(Format('%s (%d lines)', [AWs.RelPath(LFile),
         Length(LM.Tree.Source.Files[0].LineStarts)]));
     Collect(LMembers);
+    // An `owner` the unit does not declare: said, with the types it does -
+    // an empty outline read as a type without members.
+    var LKnown := LOwner = '';
+    for var LE in LEntries do
+      LKnown := LKnown or ((LE.Kind = okType) and OwnerHolds(LE));
+    if not LKnown then
+    begin
+      var LTypes := '';
+      var LCount := 0;
+      for var LE in LEntries do
+        if LE.Kind = okType then
+        begin
+          Inc(LCount);
+          if LCount <= 20 then
+            LTypes := LTypes + IfThen(LTypes <> '', ', ', '') +
+              PlainPath(IfThen(LE.Owner <> '', LE.Owner + '.', '') + LE.Name);
+        end;
+      raise EToolError.CreateFmt('%s declares no type `%s`%s', [
+        AWs.RelPath(LFile), LOwner, IfThen(LTypes <> '', ' - its types: ' +
+        LTypes + IfThen(LCount > 20, Format(' and %d more', [LCount - 20])),
+        '')]);
+    end;
     // Too long whole: the types' members go first - the unit's types and
     // routines are what an outline is read for, and `owner` gives one
     // type's members back. Not when members were asked for by name.
@@ -11732,8 +11851,8 @@ begin
     for var LI := 0 to Min(LRows.Count, LLimit) - 1 do
       LSb.AppendLine(LRows[LI]);
     if LRows.Count > LLimit then
-      LSb.AppendLine(Format('... %d more rows (raise `limit`, or narrow with '
-        + '`section` or `owner`)', [LRows.Count - LLimit]));
+      LSb.AppendLine(MoreRows(LRows.Count - LLimit, LLimit, 'raise `limit`, '
+        + 'or narrow with `section` or `owner`', 'more rows'));
     Result := LSb.ToString.TrimRight;
   finally
     LSb.Free;
@@ -11887,8 +12006,8 @@ begin
       Inc(LShown);
     end;
     if Length(LArr) > LShown then
-      LSb.AppendLine(Format('... %d more (raise `limit`, or pass `file`)',
-        [Length(LArr) - LShown]));
+      LSb.AppendLine(MoreRows(Length(LArr) - LShown, LShown,
+        'raise `limit`, or pass `file`'));
     Result := LSb.ToString.TrimRight;
   finally
     LEnclosing.Free;
@@ -11997,7 +12116,14 @@ begin
           for var LH in QUnitRefs(AWs, LB, LFile) do
             LSet.Add(LH);
       end;
-      LHits := LSet.Sorted;
+      // A unit per row, at its `uses` entry (its first mention): the unit's
+      // qualified uses in code (`PasTree.Types.tkClass`) are references too,
+      // and counted as units they made "used by 35 units" of 21.
+      LHits := nil;
+      for var LH in LSet.Sorted do
+        if (Length(LHits) = 0) or
+           not SameText(LHits[High(LHits)].FilePath, LH.FilePath) then
+          LHits := LHits + [LH];
       LSb.AppendLine(Format('%s is used by %d units:', [
         UnitNameOfFile(LFile), Length(LHits)]));
       for var LH in LHits do
@@ -19064,7 +19190,7 @@ const
     + '"code":{"type":"string","description":"A program, a unit, or '
     + 'statements alone (put in a program''s begin-end, System.SysUtils '
     + 'used; inline var declares a variable). It may use the member''s own '
-    + 'units. Built with the settings of `member`, of the member compiling '
+    + 'units - statements by a `uses` clause first. Built with the settings of `member`, of the member compiling '
     + '`file`, or of the group''s first; compiled and linked, not run. '
     + 'Errors come by the line of the code as given"},'
     + '"member":{"type":"string","description":"Group members to build, by '

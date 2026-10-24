@@ -336,3 +336,18 @@ metrics {"metric":"cycles","file":"AppB/uCycC.pas"}
 metrics {"metric":"cycles","file":"AppB/uRcA.pas"}
 metrics {"metric":"cycles","limit":0}
 references {"symbol":"System.SysUtils.IntToStr","limit":0}
+# The 2026-10-24 audit: last, so their prefixes do not take an earlier check's block, and the
+# library they make full and the snippet units they compile are after the rest.
+find {"query":"akBeta"}
+source {"symbol":"akBeta"}
+source {"file":"AppB/uFallback.pas","line":74}
+source {"file":"AppB/uFallback.pas","line":71}
+definition {"symbol":"TAuditBox.Twice"}
+related {"symbol":"TAuditBox","relation":"creations"}
+outline {"file":"AppB/uFallback.pas","owner":"NoSuchType"}
+outline {"file":"AppB/uFallback.pas","owner":"TAuditBox"}
+outline {"file":"AppB/uFallback.pas","owner":"TAudit"}
+unit_deps {"unit":"uFallback","direction":"used_by"}
+find {"query":"T*","limit":5000}
+references {"symbol":"TAuditBox","mode":"count"}
+compile {"code":"uses uShapes;\nWriteln(TCircle.ClassName);\nWriteln(NoSuchName);","member":"AppB"}

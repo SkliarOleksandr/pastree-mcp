@@ -43,4 +43,250 @@ begin
   Result := 'fallback';
 end;
 
+// Audit 2026-10-24 (0.44.1). An unscoped enum value and a record field of the
+// same name: `find akBeta` lists both (the value lost to any namesake).
+type
+  TAuditKind = (akAlpha, akBeta);
+  TAuditHolder = record
+    akBeta: Integer;
+  end;
+
+  // A generic list of a class: creating it creates no TAuditBox.
+  TAuditList<T> = class
+  end;
+
+  // A generic type's method and a class method, addressed by file + line.
+  TAuditMap<V> = record
+    function Get: Integer;
+  end;
+
+  TAuditBox = class
+  public
+    class procedure Twice;
+    class function Make: TAuditBox;
+  end;
+
+function TAuditMap<V>.Get: Integer;
+begin
+  Result := Ord(akBeta);
+end;
+
+class procedure TAuditBox.Twice;
+{ The body starts over 200 lines below the header: `definition` names the
+  header as where it is implemented, not a line of the body.
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+  .
+}
+begin
+  TAuditList<TAuditBox>.Create.Free;
+end;
+
+class function TAuditBox.Make: TAuditBox;
+begin
+  Result := TAuditBox.Create;
+end;
+
 end.

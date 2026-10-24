@@ -637,7 +637,9 @@ default.
   is not Win64), defines, search path, namespaces, aliases and `-$`
   switches, then the directories of the own units the index holds for it (a
   bare .dpr names them only in `uses ... in`), then the registry search
-  path. So the code may use the member's units. It builds in a directory
+  path. So the code may use the member's units - statements by a `uses`
+  clause first, which joins the program's (0.44.1; compiled as a statement
+  before, E2029). It builds in a directory
   of its own beside the member's (`snippet\`), with `-M`: without it dcc
   compiles the units but writes no .dcu, and every call would compile the
   member's units again. Errors come by the line of the code as given, not
@@ -1322,6 +1324,7 @@ code and stay in `local/`; this section is what they concluded.
 | 4 forms | a text pass over every text form file giving, by TReader's rule and the ancestor-form rule, the lines that bind each published method | 5,702 handlers, 12,712 calls; the 5 binary forms by hand |
 | 5 freshness | a cold server started on the same files after each edit step of a long-lived one; the answers must be equal with the freshness note stripped | 45 steps (a body, a signature, a method added and removed, a unit renamed, a new unit and form file, a `.dfm` edited, a file deleted, a `.dproj` changed), 290 answer pairs |
 | 6 tasks (pilot) | answers settled beforehand by phases 3-4 and by `definition` at every grep hit; each task run by a fresh agent with the tools and one with grep and reads only, read-only, on 0.16.8 | 4 tasks x 2 arms, one run each, 8 agents |
+| tools vs grep (0.44.0) | a tokenizer and structure walk of the source text, no name resolution: every declaration, routine body, member, `uses` entry and identifier; `compile` for lint (each `uses` entry removed, each interface one moved) and for diagnostics (one injected error per build) | this repository's self-index, 35 units, 118k lines; every tool in its modes, about 25,000 calls |
 
 Each oracle found a class of defect the others could not: grep the form
 lines that set a property, the compiler two overload rules, the text oracle
@@ -1403,6 +1406,22 @@ its root's `end` - seven property lines dcc drops from the exe.
    (0.17.0). `tests\audit.ps1` still samples from `outline`; the next
    sample should come from the source text too, not only from the index
    under test.
+9. **A rule the host reads off the library's representation breaks when
+   the library changes it, without an error.** The tools-vs-grep audit
+   (0.44.0, oracle from the source text as item 8 asked) found every
+   unscoped enum value hidden behind any namesake since PasTree 0.110.2:
+   it joins one aggregate scope for a unit's enum values, and
+   `IsScopedEnumValue` still looked for the enum's own - `find tkArray`
+   answered System.TypInfo's constant, `source` and `references` resolved
+   to it, for nine days. The same drift made `find` miss nested routines
+   (0.44.0, `IsDeclSymbol`). The rest it found were edges of text the
+   tools read themselves: a `class procedure` header, a generic type's
+   method header, a header over 200 lines above its body, a generic's type
+   argument taken for a creation (fixed in 0.44.1, each with a smoke row).
+   Everything else agreed with the oracle: 4,157 of 4,163 reference sets,
+   841 rename plans to the column, callees 6,369 of 6,371 and 18,830 of
+   18,831 call lines, lint equal to 132 builds, diagnostics 80 of 80
+   injected errors and none false.
 
 ### 10.4 Not measured, and the blind spots left
 

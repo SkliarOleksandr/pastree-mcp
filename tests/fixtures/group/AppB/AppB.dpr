@@ -12,4 +12,6 @@ uses
 begin
   RunB;
   Notes('done');
+  if uFallback.FallbackName = '' then
+    Halt;
 end.

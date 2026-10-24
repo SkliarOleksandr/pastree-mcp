@@ -159,6 +159,29 @@ Check 'find in include' (Block $b 'find {"query":"FLAG_INC_MARK", "in":"*.inc"}'
 Check 'source nested' (Block $b 'source {"symbol":"NestHost.NestInner"}') @('NestHost.NestInner (function) declared at AppB\uFallback.pas:23-32', '31      Result := ANestArg + NestDeepest;')
 Check 'source local refused' (Block $b 'source {"symbol":"LNestVar"}') @('no declaration named `LNestVar` among ', "addressed by ``file`` + ``line`` + ``name``:`n  AppB\uFallback.pas:21  NestHost.LNestVar (var)") @('names like it', '- a local or a parameter is addressed')
 Check 'callers nested' (Block $b 'callers {"symbol":"NestDeepest"}') @('callers of NestHost.NestInner.NestDeepest (AppB\uFallback.pas:25) - 1 call in 1 routine', "  NestHost.NestInner`n    31  Result := ANestArg + NestDeepest;")
+# The 2026-10-24 audit (AppB\uFallback.pas from line 46, AppB.dpr:15).
+# An unscoped enum value next to a namesake: PasTree joins one aggregate scope
+# for a unit's enum values, and asking for the enum's own scope called every
+# value scoped - hidden behind any other declaration of the name.
+Check 'find enum value and namesake' (Block $b 'find {"query":"akBeta"}') @('AppB\uFallback.pas:49  TAuditKind.akBeta (enum value)', 'AppB\uFallback.pas:51  TAuditHolder.akBeta (field)')
+Check 'source enum value ambiguous' (Block $b 'source {"symbol":"akBeta"}') @('`akBeta` is ambiguous - 2 declarations') @('(field) declared at')
+# file + line on a `class procedure` header (its routine starts right of the
+# line's first character) and in a generic type's method (the name is past
+# the type parameters - read as far as `<`, the type was taken).
+Check 'source class method header line' (Block $b 'source {"file":"AppB/uFallback.pas","line":74}') @('TAuditBox.Twice (procedure) implemented at AppB\uFallback.pas:74-285') @('in no routine')
+Check 'source generic method line' (Block $b 'source {"file":"AppB/uFallback.pas","line":71}') @('TAuditMap.Get (function) implemented at AppB\uFallback.pas:69-72') @('(record)')
+# The header over 200 lines above the body: the header, not a body line.
+Check 'definition far header' (Block $b 'definition {"symbol":"TAuditBox.Twice"}') @('implemented at AppB\uFallback.pas:74') @('uFallback.pas:284')
+# TAuditList<TAuditBox>.Create creates the list.
+Check 'creations not a type argument' (Block $b 'related {"symbol":"TAuditBox","relation":"creations"}') @("creations of TAuditBox (AppB\uFallback.pas:63): 1", '289  Result := TAuditBox.Create;') @('284')
+# `owner` a type the unit does not declare, or a prefix of one: said.
+Check 'outline owner unknown' (Block $b 'outline {"file":"AppB/uFallback.pas","owner":"NoSuchType"}') @('AppB\uFallback.pas declares no type `NoSuchType` - its types: NestHost.TNestRec, TAuditKind')
+Check 'outline owner' (Block $b 'outline {"file":"AppB/uFallback.pas","owner":"TAuditBox"}') @('63  type TAuditBox = class', '287  class function TAuditBox.Make: TAuditBox') @('akBeta')
+Check 'outline owner prefix' (Block $b 'outline {"file":"AppB/uFallback.pas","owner":"TAudit"}') @('declares no type `TAudit`') @('field akBeta')
+# A unit per used_by row: AppB.dpr's `uFallback.FallbackName` is no second unit.
+Check 'unit_deps used_by per unit' (Block $b 'unit_deps {"unit":"uFallback","direction":"used_by"}') @("uFallback is used by 1 units:`n  AppB\AppB.dpr:10") @('AppB.dpr:15')
+Check 'find limit cap' (Block $b 'find {"query":"T*","limit":5000}') @('`limit` is at most 500)') @('raise `limit`')
+Check 'references count mode' (Block $b 'references {"symbol":"TAuditBox","mode":"count"}') @('4 references in 1 files', '(limit 0: 4 not listed)') @('raise `limit`')
 Check 'references enum value' (Block $b 'references {"symbol":"TTint.tnRed"}') @('TTint.tnRed (enum value) declared at AppB\uColors.pas:11 - 1 references in 1 files', "  TintName`n    25  tnRed: Result := 'red';")
 Check 'references enum value unused' (Block $b 'references {"symbol":"tnBlue"}') @('TTint.tnBlue (enum value) declared at AppB\uColors.pas:11 - 0 references in 0 files')
 Check 'references scoped value bare' (Block $b 'references {"symbol":"Dark"}') @('TShade.Dark (enum value) declared at AppB\uColors.pas:14 - 1 references', '    34  Result := AShade = TShade.Dark;')
@@ -434,6 +457,9 @@ Check 'compile nothing changed' (Block $b 'compile {}') @('no file has changed s
 Check 'status language' (Block $b 'status') @('language: Compiler: dcc ', 'Its newest constructs, which compile here: ', 'Whether a construct compiles here: `compile` with `code`.', 'https://github.com/SkliarOleksandr/object-pascal-spec')
 Check 'compile code' (Block $b 'compile {"code":"var X') @('compile code (statements) - dcc32 ', 'the settings of AppA (Win32 Debug), the first of the group (`member` names another)', 'compiles - in ', 'compiled and linked, not run', 'no errors, warnings or hints')
 Check 'compile code error' (Block $b 'compile {"code":"var S') @('compile code (statements) - dcc32 ', 'the settings of AppB (Win32)', 'does not compile - 1 error', "errors - 1:`n  2  E2010 Incompatible types: 'Char' and 'Integer'`n        S := 1;") @('internal error')
+# Statements after a `uses` clause: the units join the program's, the lines
+# keep their numbers (the clause was compiled as a statement, E2029).
+Check 'compile code statements uses' (Block $b 'compile {"code":"uses uShapes;') @('does not compile - 1 error', "  3  E2003 Undeclared identifier: 'NoSuchName'") @('E2029', 'TCircle')
 Check 'compile code unit' (Block $b 'compile {"code":"unit uTryShapes') @('compile code (unit) - dcc32 ', 'the settings of AppB (Win32)', 'compiles - in ', '(1 unit of the member compiled for it here - kept for the next `code`)', 'no errors, warnings or hints')
 Check 'compile code program' (Block $b 'compile {"code":"type') @('compile code (program) - ', 'the settings of AppA (Win32 Debug), which compiles Shared\uShapes.pas', 'does not compile - 1 error', "errors - 1:`n  7  E2003 Undeclared identifier: 'Missing'`n        R.A := Missing;")
 Check 'compile code empty' (Block $b 'compile {"code":" "}') @('`code` is empty')
@@ -463,16 +489,16 @@ Check 'callers multi-line call' (Block $b 'callers {"symbol":"TfrmPlain.Greet"}'
 # rows; the empty case says nothing was found, not "nothing matched".
 Check 'find count only' (Block $b 'find {"query":"T*","limit":0}') @(' declarations match (limit 0: none listed)') @('no declaration matches', 'Shared\uShapes.pas:')
 Check 'find count only none' (Block $b 'find {"query":"NoSuchThing","limit":0}') @('no declaration matches `NoSuchThing`')
-Check 'references count only' (Block $b 'references {"symbol":"TCircle","limit":0}') @('3 references in 2 files', '... 3 more (raise `limit`)', '(+2 implementation headers of its own methods name it') @('LShape')
+Check 'references count only' (Block $b 'references {"symbol":"TCircle","limit":0}') @('3 references in 2 files', '(limit 0: 3 not listed)', '(+2 implementation headers of its own methods name it') @('LShape')
 Check 'references count only none' (Block $b 'references {"symbol":"TfrmMain.NeverBound","limit":0}') @('0 references in 0 files; no form file names it', 'names it only after the root''s `end`') @('more (raise')
-Check 'callers count only' (Block $b 'callers {"symbol":"TCircle.Area","depth":3,"limit":0}') @('- 3 calls in 3 routines', '... 3 more (raise `limit`)', '(limit 0: depth 1 counted, depth 2 and below not searched') @('  RunA', 'the rows reached `limit`')
+Check 'callers count only' (Block $b 'callers {"symbol":"TCircle.Area","depth":3,"limit":0}') @('- 3 calls in 3 routines', '(limit 0: 3 not listed)', '(limit 0: depth 1 counted, depth 2 and below not searched') @('  RunA', 'the rows reached `limit`')
 Check 'callers count only none' (Block $b 'callers {"symbol":"NeverCalled","limit":0}') @('callers of NeverCalled (AppB\uBoxes.pas:31) - none found') @('more (raise')
-Check 'callees count only' (Block $b 'callees {"symbol":"RunA","limit":0}') @('- 4 calls reaching 7 routines', '... 7 more (raise `limit`)', '(built-ins called: Writeln)')
-Check 'members count only' (Block $b 'members {"symbol":"TCircle","limit":0}') @(': 5 members', '... 5 more (raise `limit`') @('Radius')
-Check 'related count only' (Block $b 'related {"relation":"descendants","symbol":"uShapes.TShape","limit":0}') @('more (raise `limit`)') @('TCircle = class')
-Check 'form count only' (Block $b 'form {"symbol":"TfrmChild","limit":0}') @('8 components, 6 events bound, 3 references to components, 1 cleared', '... 19 more rows (raise `limit`)') @('lblHint')
-Check 'outline count only' (Block $b 'outline {"file":"Shared/uShapes.pas","limit":0}') @('... 24 more rows (raise `limit`') @('member declarations of its types are left out', 'TCircle')
-Check 'impact count only' (Block $b 'impact {"symbol":"TCircle.Area","limit":0}') @('members to build and test: AppA, AppB', 'callers - 3 calls in 3 routines', '... 3 more (raise `limit`)') @('  RunA')
+Check 'callees count only' (Block $b 'callees {"symbol":"RunA","limit":0}') @('- 4 calls reaching 7 routines', '(limit 0: 7 not listed)', '(built-ins called: Writeln)')
+Check 'members count only' (Block $b 'members {"symbol":"TCircle","limit":0}') @(': 5 members', '(limit 0: 5 not listed)') @('Radius')
+Check 'related count only' (Block $b 'related {"relation":"descendants","symbol":"uShapes.TShape","limit":0}') @('(limit 0: ') @('TCircle = class')
+Check 'form count only' (Block $b 'form {"symbol":"TfrmChild","limit":0}') @('8 components, 6 events bound, 3 references to components, 1 cleared', '(limit 0: 19 not listed)') @('lblHint')
+Check 'outline count only' (Block $b 'outline {"file":"Shared/uShapes.pas","limit":0}') @('(limit 0: 24 not listed)') @('member declarations of its types are left out', 'TCircle')
+Check 'impact count only' (Block $b 'impact {"symbol":"TCircle.Area","limit":0}') @('members to build and test: AppA, AppB', 'callers - 3 calls in 3 routines', '(limit 0: 3 not listed)') @('  RunA')
 # A member reached through a generic ancestor's type parameter, the call
 # written bare (FR.2): no false E2003, the member bound, every spelling.
 Check 'diagnostics generic ancestor call' (Block $b 'diagnostics {"file":"AppB/uGenLists.pas"}') @('no diagnostics in AppB\uGenLists.pas')
@@ -562,7 +588,7 @@ Check 'find kind unit' (Block $b 'find {"query":"*Notes","kind":"unit"}') @('App
 Check 'find kind unit none' (Block $b 'find {"query":"NoSuchUnit","kind":"unit"}') @('no declaration of kind unit matches `NoSuchUnit`')
 Check 'rename_plan unit by file' (Block $b 'rename_plan {"file":"AppB/Lib.Notes.pas"') @('rename Lib.Notes (unit) declared at AppB\Lib.Notes.pas:1 to Lib.Memo - 3 edits in 2 files', "AppB\AppB.dpr`n  10:81, 95 (Lib.Notes.pas -> Lib.Memo.pas)  ",'  1:6  [declaration]  unit Lib.Memo;')
 # A unit's `uses` rows are code rows: the cut note counted them as form lines.
-Check 'references unit count only' (Block $b 'references {"symbol":"uShapes","limit":0}') @('3 references in 3 files', '... 3 more (raise `limit`)') @('form lines')
+Check 'references unit count only' (Block $b 'references {"symbol":"uShapes","limit":0}') @('3 references in 3 files', '(limit 0: 3 not listed)') @('form lines')
 # A method's family (PasTree 0.86.0): an interface method takes the class that
 # implements it and that method's overrides; an override takes the virtual it
 # overrides; a method tied to nothing takes nothing.
@@ -585,7 +611,7 @@ Check 'change_plan resolution clause' (Block $b 'change_plan {"symbol":"TCountBo
 Check 'change_plan library slot' (Block $b 'change_plan {"symbol":"TCopyBox.AssignTo"') @('  131  [TCopyBox, this one]  procedure AssignTo(Dest: TPersistent); override;', '  134  procedure TCopyBox.AssignTo(Dest: TPersistent);', '(its virtual method is TPersistent.AssignTo (', 'a library''s: the signature is fixed there - changed here, this one no longer overrides it')
 Check 'change_plan not a routine' (Block $b 'change_plan {"symbol":"TCircle"') @('TCircle is a class - `change_plan` takes a routine')
 Check 'change_plan library routine' (Block $b 'change_plan {"symbol":"TStringList.Add"') @('is declared in a library (', 'its signature is not this project''s to change')
-Check 'change_plan count only' (Block $b 'change_plan {"symbol":"TShape.Area","limit":0') @('the signature on 8 lines in 2 files, 4 other routines tied to it; 3 calls in 3 routines', '... 8 more (raise `limit`)', '... 3 more (raise `limit`)') @('  17  ')
+Check 'change_plan count only' (Block $b 'change_plan {"symbol":"TShape.Area","limit":0') @('the signature on 8 lines in 2 files, 4 other routines tied to it; 3 calls in 3 routines', '(limit 0: 8 not listed)', '(limit 0: 3 not listed)') @('  17  ')
 # The interface method's side of a resolution clause maps nothing: callers took
 # the interface itself for a source, and its heritage line for a call.
 Check 'callers resolution clause' (Block $b 'callers {"symbol":"TCountBox.BoxCount"') @('callers of TCountBox.BoxCount (AppB\uBoxes.pas:112) - 1 call in 1 routine', 'also through IBoxCount.Count (interface)') @('IBoxCount (interface)', '110  ')
@@ -598,7 +624,7 @@ Check 'references in' (Block $b 'references {"symbol":"TfrmMain.btnSave","in":".
 Check 'references in header' (Block $b 'references {"symbol":"TfrmMain.btnSave","in":".pas"}') @('5 references in 4 files, 2 of them in form files', '(in `.pas`: 3 references in 2 files listed, the rest left out)')
 Check 'references in none' (Block $b 'references {"symbol":"TShape.Area","in":"*.dpr"}') @('1 references in 1 files', '(in `*.dpr`: none of them)') @('uAppA')
 Check 'references files cut' (Block $b 'references {"symbol":"TfrmMain.btnSave","mode":"files","limit":1}') @("AppF\`n  uMainForm.pas  2", '... 3 more files (raise `limit`)') @('.dfm  1')
-Check 'references count' (Block $b 'references {"symbol":"TShape.Area","mode":"count"}') @('1 references in 1 files', '... 1 more (raise `limit`)') @('RunA')
+Check 'references count' (Block $b 'references {"symbol":"TShape.Area","mode":"count"}') @('1 references in 1 files', '(limit 0: 1 not listed)') @('RunA')
 Check 'references bad mode' (Block $b 'references {"symbol":"TShape.Area","mode":"bogus"}') @("``mode`` of ``references`` is lines, files or count (not ``bogus``)")
 Check 'references files none' (Block $b 'references {"symbol":"NeverCalled","mode":"files"}') @('0 references in 0 files')
 
@@ -620,7 +646,7 @@ Check 'defines no block' (Block $b 'defines {"file":"Shared/uShapes.pas","line":
 Check 'defines name' (Block $b 'defines {"name":"FIXTURE_A"}') @('FIXTURE_A (conditional symbol) - 5 directives in 2 files of the group', 'analysis 0: AppA, AppB, AppF; Win32: defined by the project - AppB does not define FIXTURE_A', "Shared\uFlags.pas`n  18  {`$IFDEF FIXTURE_A} - its branch compiled`n  33  {`$IFDEF FIXTURE_A} - not reached")
 Check 'defines name undef' (Block $b 'defines {"name":"FIXTURE_GONE"}') @('3 directives in 2 files', 'in the code: $DEFINE at Shared\Flags.inc:3; $UNDEF at Shared\Flags.inc:4', "Shared\Flags.inc`n  3  {`$DEFINE FIXTURE_GONE} - live`n  4  {`$UNDEF FIXTURE_GONE} - live", '  28  {$IF Defined(MSWINDOWS) and not Defined(FIXTURE_GONE)} - its branch compiled')
 Check 'defines name in file' (Block $b 'defines {"name":"FIXTURE_A","file":"Shared/Flags.inc"}') @('FIXTURE_A (conditional symbol) - 0 directives in Shared\Flags.inc', 'defined by the project')
-Check 'defines name count' (Block $b 'defines {"name":"MSWINDOWS","limit":0}') @('MSWINDOWS (conditional symbol) - 1 directive in 1 file of the group (+', ' in library files, not listed', 'predefined for Win32', '... 1 more (raise `limit`') @('uFlags.pas')
+Check 'defines name count' (Block $b 'defines {"name":"MSWINDOWS","limit":0}') @('MSWINDOWS (conditional symbol) - 1 directive in 1 file of the group (+', ' in library files, not listed', 'predefined for Win32', '(limit 0: 1 not listed)') @('uFlags.pas')
 Check 'defines name none' (Block $b 'defines {"name":"NOPE_X"}') @('no directive names `NOPE_X` and no project or platform defines it')
 Check 'defines no args' (Block $b 'defines {}') @('pass `name` (a conditional symbol')
 Check 'references define by name' (Block $b 'references {"symbol":"FIXTURE_A"}') @('`FIXTURE_A` is a conditional symbol: `defines` with `name`')
