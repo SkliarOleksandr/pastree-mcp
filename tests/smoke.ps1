@@ -143,6 +143,22 @@ Check 'find by unit count' (Block $b 'find {"query":"*Circ*", "scope":"project",
 Check 'find in' (Block $b 'find {"query":"*Circ*", "in":"Shared"}') @('Shared\uShapes.pas:21  TCircle (class)') @('TBigCircle', 'Shapes_TLB', 'Embarcadero')
 Check 'find in wildcard' (Block $b 'find {"query":"*Circ*", "in":"*TLB*"}') @('AppB\Shapes_TLB.pas:16  TCircleStyle (type)', 'AppB\Shapes_TLB.pas:18  ICircleDisp (interface)') @('uShapes', 'generated units')
 Check 'find in nothing' (Block $b 'find {"query":"*Circ*", "in":"NoSuchDir"}') @('no declaration matches `*Circ*` in files matching `NoSuchDir` among ')
+# What a routine body declares (AppB\uFallback.pas NestHost): the nested
+# routines and the local type are named under it - a copy of PasTree's old
+# filter stopped at the first routine scope and found none; a local or a
+# parameter is listed only when nothing named has the name. `in` matches
+# the include file a declaration is written in.
+Check 'find nested routine' (Block $b 'find {"query":"NestInner"}') @('AppB\uFallback.pas:23  NestHost.NestInner (function)  function NestInner(ANestArg: Integer): Integer;') @('no declaration')
+Check 'find nested qualified' (Block $b 'find {"query":"NestHost.NestInner.NestDeepest"}') @('AppB\uFallback.pas:25  NestHost.NestInner.NestDeepest (function)') @('no declaration')
+Check 'find local type field' (Block $b 'find {"query":"NestField"}') @('AppB\uFallback.pas:18  NestHost.TNestRec.NestField (field)') @('no declaration')
+Check 'find nested wildcard' (Block $b 'find {"query":"*Nest*", "scope":"project"}') @("AppB\uFallback.pas:15  NestHost (function)  function NestHost: Integer;`nAppB\uFallback.pas:17  NestHost.TNestRec (record)", 'AppB\uFallback.pas:25  NestHost.NestInner.NestDeepest (function)') @('LNestVar', '(parameter)')
+Check 'find local' (Block $b 'find {"query":"LNestVar"}') @('no declaration a name list holds is named `LNestVar`', "is declared only inside routine bodies - a local, a constant or a parameter, addressed by ``file`` + ``line`` + ``name``:`nAppB\uFallback.pas:21  NestHost.LNestVar (var)  LNestVar: TNestRec;") @('names containing it', 'outside them')
+Check 'find local count only' (Block $b 'find {"query":"NestHost.LNestVar", "limit":0}') @('`NestHost.LNestVar` is declared only inside routine bodies: 1 declaration (limit 0: none listed)') @('uFallback.pas:')
+Check 'find parameter' (Block $b 'find {"query":"ANestArg", "kind":"parameter"}') @('AppB\uFallback.pas:23  NestHost.NestInner.ANestArg (parameter)')
+Check 'find in include' (Block $b 'find {"query":"FLAG_INC_MARK", "in":"*.inc"}') @('Shared\Flags.inc:9  FLAG_INC_MARK (const)  FLAG_INC_MARK = 1;') @('no declaration')
+Check 'source nested' (Block $b 'source {"symbol":"NestHost.NestInner"}') @('NestHost.NestInner (function) declared at AppB\uFallback.pas:23-32', '31      Result := ANestArg + NestDeepest;')
+Check 'source local refused' (Block $b 'source {"symbol":"LNestVar"}') @('no declaration named `LNestVar` among ', "addressed by ``file`` + ``line`` + ``name``:`n  AppB\uFallback.pas:21  NestHost.LNestVar (var)") @('names like it', '- a local or a parameter is addressed')
+Check 'callers nested' (Block $b 'callers {"symbol":"NestDeepest"}') @('callers of NestHost.NestInner.NestDeepest (AppB\uFallback.pas:25) - 1 call in 1 routine', "  NestHost.NestInner`n    31  Result := ANestArg + NestDeepest;")
 Check 'references enum value' (Block $b 'references {"symbol":"TTint.tnRed"}') @('TTint.tnRed (enum value) declared at AppB\uColors.pas:11 - 1 references in 1 files', "  TintName`n    25  tnRed: Result := 'red';")
 Check 'references enum value unused' (Block $b 'references {"symbol":"tnBlue"}') @('TTint.tnBlue (enum value) declared at AppB\uColors.pas:11 - 0 references in 0 files')
 Check 'references scoped value bare' (Block $b 'references {"symbol":"Dark"}') @('TShade.Dark (enum value) declared at AppB\uColors.pas:14 - 1 references', '    34  Result := AShade = TShade.Dark;')
@@ -394,7 +410,7 @@ Check 'impact nothing' (Block $b 'impact {}') @('give `diff`')
 # session did not change is counted, not listed. The second compiles only the
 # program - uMembers is not recompiled, so its warning is not reported again,
 # and not gone either.
-Check 'compile' (Block $b 'compile {"member":"AppA"}') @('compile AppA (Win32 Debug): built in', '351 lines compiled', 'AppA-Win32-Debug\exe\AppA.exe', 'first build here: every unit compiled', 'warnings - none in files changed this session (1 elsewhere, not listed)')
+Check 'compile' (Block $b 'compile {"member":"AppA"}') @('compile AppA (Win32 Debug): built in', '353 lines compiled', 'AppA-Win32-Debug\exe\AppA.exe', 'first build here: every unit compiled', 'warnings - none in files changed this session (1 elsewhere, not listed)')
 # An incremental build compiles none of the units with warnings: theirs as
 # the last compile here reported them - counted old, listed by `show`.
 Check 'compile again' (Block $b 'compile {"member":"AppA", "limit"') @('compile AppA (Win32 Debug): built in', '13 lines compiled', 'warnings - none new (1 old, not listed)') @('first build here', 'no errors, warnings or hints')
@@ -405,7 +421,7 @@ Check 'compile bare dpr' (Block $b 'compile {"member":"AppB"}') @('compile AppB 
 Check 'compile forms' (Block $b 'compile {"member":"AppF"}') @('compile AppF (Win32): built in', 'AppF-Win32\exe\AppF.exe', 'no errors, warnings or hints')
 Check 'compile file' (Block $b 'compile {"file"') @('compile - 2 members, those compiling Shared\uShapes.pas', '  AppA (Win32 Debug): built in', '  AppB (Win32): built in', 'warnings - none new (1 old, not listed)') @('no errors, warnings or hints')
 # A rebuild recompiles uMembers: its warning again, known, so not new.
-Check 'compile rebuild' (Block $b 'compile {"member":"AppA", "rebuild"') @('351 lines compiled', "warnings - 1 in the group's files:`nAppA\uMembers.pas", '  37  W1055 PUBLISHED caused RTTI', "to be added to type 'TDerived' (in TDerived)`n        published") @('[new]')
+Check 'compile rebuild' (Block $b 'compile {"member":"AppA", "rebuild"') @('353 lines compiled', "warnings - 1 in the group's files:`nAppA\uMembers.pas", '  37  W1055 PUBLISHED caused RTTI', "to be added to type 'TDerived' (in TDerived)`n        published") @('[new]')
 Check 'compile no member' (Block $b 'compile {"member":"NoSuch"}') @('no member named NoSuch - the group has: AppA, AppB, AppF')
 Check 'compile bad show' (Block $b 'compile {"show"') @("``show`` of ``compile`` is new, warnings or all (not ``some``)")
 Check 'compile nothing changed' (Block $b 'compile {}') @('no file has changed since the server started, and git has nothing to say: not installed, or ', ' in no work tree',' - name the `member` to build (the group has: AppA, AppB, AppF)')

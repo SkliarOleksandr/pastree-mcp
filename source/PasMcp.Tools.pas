@@ -133,6 +133,8 @@ type
     // in the unit declaring it, and a walk over every unit per ancestor took
     // `IFoo.*Detail*` 3 s on the client group, `IFoo.Detail` 0.4 s.
     OnlyFile: string;
+    // A body's own declarations (IsLocalSymbol) in place of the named ones.
+    Locals: Boolean;
     ByUnit: TDictionary<string, Integer>;   // unit name -> matches
     OwnUnits: TDictionary<string, Boolean>; // the group's own, by name
     Own: Integer;                             // matches in own units
@@ -518,25 +520,19 @@ end;
 
 { ---- symbol facts ----------------------------------------------------------- }
 
-// The enclosing struct chain of a member scope, outer first ('TOuter.TInner')
-// - the same walk as TPasNavigator.ProjectOutline's OwnerOf.
+// The owner chain of a declaration made in AScope, outer first: 'TOuter.TInner'
+// for a member, 'TFoo.Bar' for one in the body of TFoo.Bar - PasTree's
+// ScopeOwner, the walk ProjectOutline and FindDeclarations name by. A block's
+// or an anonymous method's own declaration (an inline var) is named under the
+// routine around it: ScopeOwner stops at those scopes.
 function OwnerOf(LM: TPasSemaModel; AScope: Integer): string;
-var
-  LSt: Integer;
 begin
-  Result := '';
   while (AScope <> NIL_SCOPE) and (AScope < LM.Scopes.Count) and
-        (LM.Scopes[AScope].Kind = sckStruct) do
-  begin
-    LSt := LM.Scopes[AScope].StructSym;
-    if LSt = NIL_SYM then
-      Break;
-    if Result = '' then
-      Result := LM.Symbols[LSt].Name
-    else
-      Result := LM.Symbols[LSt].Name + '.' + Result;
-    AScope := LM.Symbols[LSt].Scope;
-  end;
+        ((LM.Scopes[AScope].Kind in [sckBlock, sckWith]) or
+         ((LM.Scopes[AScope].Kind = sckRoutine) and
+          (LM.RoutineScopeName(AScope) = ''))) do
+    AScope := LM.Scopes[AScope].Parent;
+  Result := LM.ScopeOwner(AScope);
 end;
 
 // The owner chain a symbol is named under. An enum value sits in its enum's
@@ -591,28 +587,41 @@ begin
   Result := True;
 end;
 
-// A declaration a reader would look up by name - ProjectOutline's filter:
-// module-level or a struct member, with a source declaration - and an enum
-// value: ProjectOutline leaves those out, and `find` answered "no declaration
-// matches" and "no Pascal file outside them writes it either" for a value
-// written on 29 lines of the client group (a colleague's session renaming
-// two went to grep). The audit's samples came from `outline`, the same
-// filter, so they never drew one.
+// A declaration a reader would look up by name - PasTree's NamedDeclRoot, the
+// one rule of ProjectOutline and FindDeclarations: module-level, a member, a
+// routine nested in a body or a type declared there - and an enum value:
+// `find` answered "no declaration matches" and "no Pascal file outside them
+// writes it either" for a value written on 29 lines of the client group (a
+// colleague's session renaming two went to grep). A copy of the old filter
+// stopped at the first routine scope, so no nested routine was found, and
+// the same answer said no file wrote it (PasTree 0.129.0's hand-off).
 function IsDeclSymbol(LM: TPasSemaModel; ASym: Integer): Boolean;
+begin
+  Result := LM.NamedDeclRoot(ASym, True) <> NIL_SCOPE;
+end;
+
+// A body's own declaration - a local variable or constant, a parameter, an
+// inline var, what an anonymous method declares: no name list holds it
+// (IsDeclSymbol), but `find` lists it when nothing named matches, so the
+// agent gets the file + line + name that address it.
+function IsLocalSymbol(LM: TPasSemaModel; ASym: Integer): Boolean;
 var
   LScope: Integer;
 begin
   Result := False;
-  if not (LM.Symbols[ASym].Kind in DECL_KINDS) or
+  if not (LM.Symbols[ASym].Kind in DECL_KINDS + [skParam]) or
      (LM.Symbols[ASym].DeclNode = NIL_NODE) or
-     (sfBuiltin in LM.Symbols[ASym].Flags) then
+     (sfBuiltin in LM.Symbols[ASym].Flags) or IsDeclSymbol(LM, ASym) then
     Exit;
   LScope := LM.Symbols[ASym].Scope;
   while (LScope <> NIL_SCOPE) and (LScope < LM.Scopes.Count) and
-        (LM.Scopes[LScope].Kind in [sckStruct, sckGenericParams, sckEnum]) do
+        not (LM.Scopes[LScope].Kind in [sckUnit, sckImplementation,
+          sckSystem]) do
+  begin
+    if LM.Scopes[LScope].Kind = sckRoutine then
+      Exit(True);
     LScope := LM.Scopes[LScope].Parent;
-  Result := (LScope <> NIL_SCOPE) and (LScope < LM.Scopes.Count) and
-    (LM.Scopes[LScope].Kind in [sckUnit, sckImplementation]);
+  end;
 end;
 
 // '1 call', '3 calls'.
@@ -660,6 +669,7 @@ begin
     skProperty: Result := SameText(AKind, 'property');
     skEnumValue: Result := SameText(AKind, 'enum') or
       SameText(AKind, 'enum value');
+    skParam: Result := SameText(AKind, 'parameter');
   else
     Result := False;
   end;
@@ -1709,7 +1719,7 @@ var
   LHit: TPasRefHit;
   LKey, LFile: string;
   LIdx, LSeenIdx: Integer;
-  LOk, LGen: Boolean;
+  LOk, LGen, LInIncluded, LLocals: Boolean;
 begin
   AMore := 0;
   if SameText(AKind, 'unit') then
@@ -1723,6 +1733,7 @@ begin
   LParts := AQuery.Split(['.']);
   if Length(LParts) = 0 then
     raise EToolError.Create('empty symbol name');
+  LLocals := (AExtras <> nil) and AExtras.Locals;
   LName := LowerCase(StripGenerics(LParts[High(LParts)]));
   LWild := IsWildPattern(LName);
   LQuals := Copy(LParts, 0, High(LParts));
@@ -1749,7 +1760,8 @@ begin
       // read relaxed is the routine Log of unit PasMcp.Log, and the unit,
       // which the name spells exactly, was then out of reach (looked up
       // below only when nothing matched).
-      if LRelaxed and not LWild and not LWildQuals and (AKind = '') then
+      if LRelaxed and not LWild and not LWildQuals and (AKind = '') and
+         not LLocals then
       begin
         var LUnitMore: Integer;
         Result := ResolveUnits(AWs, AQuery, AOwnOnly, ALimit, LUnitMore);
@@ -1765,13 +1777,26 @@ begin
           LFile := LA.Proj.ModelFile(LMid);
           if AOwnOnly and not AWs.IsOwnFile(LFile) then
             Continue;
-          if (AExtras <> nil) and (AExtras.InFilter <> '') and
-             not InFilterMatches(AWs, LFile, AExtras.InFilter) then
-            Continue;
           if (AExtras <> nil) and (AExtras.OnlyFile <> '') and
              not SameText(LFile, AExtras.OnlyFile) then
             Continue;
           LM := LA.Proj.Model(LMid);
+          // `in` matching only a file the unit includes: each match's own
+          // declaration file decides (`in: *.inc` matched nothing).
+          LInIncluded := False;
+          if (AExtras <> nil) and (AExtras.InFilter <> '') and
+             not InFilterMatches(AWs, LFile, AExtras.InFilter) then
+          begin
+            for LIdx := 1 to High(LM.Tree.Source.FileNames) do
+              if InFilterMatches(AWs, LM.Tree.Source.FileNames[LIdx],
+                 AExtras.InFilter) then
+              begin
+                LInIncluded := True;
+                Break;
+              end;
+            if not LInIncluded then
+              Continue;
+          end;
           LGen := AWs.IsOwnFile(LFile) and GeneratedUnit(LM, LFile);
           for var LSym := 0 to LM.SymCount - 1 do
           begin
@@ -1782,7 +1807,17 @@ begin
             end
             else if LM.Symbols[LSym].NameLower <> LName then
               Continue;
-            if not IsDeclSymbol(LM, LSym) or not KindMatches(LM, LSym, AKind) then
+            if LLocals then
+            begin
+              if not IsLocalSymbol(LM, LSym) then
+                Continue;
+            end
+            else if not IsDeclSymbol(LM, LSym) then
+              Continue;
+            if not KindMatches(LM, LSym, AKind) then
+              Continue;
+            if LInIncluded and (not LA.Nav.DeclHit(LMid, LSym, LHit) or
+               not InFilterMatches(AWs, LHit.FilePath, AExtras.InFilter)) then
               Continue;
             if Length(LQuals) > 0 then
             begin
@@ -1911,7 +1946,8 @@ begin
     end;
 
     // No declaration of that name: maybe it names a unit.
-    if (LList.Count = 0) and not LWild and not LWildQuals and (AKind = '') then
+    if (LList.Count = 0) and not LWild and not LWildQuals and (AKind = '') and
+       not LLocals then
       for LA in AWs.Analyses do
       begin
         for var LMid := 0 to LA.Proj.ModelCount - 1 do
@@ -2360,6 +2396,44 @@ begin
   end;
 end;
 
+// The locals, constants and parameters of the group's own routine bodies
+// named AQuery (qualifiers: the routine's owner chain, `TFoo.Bar.LCount`),
+// at most ALimit; AMore counts the rest. Asked only when nothing named
+// matches: the refusal said a local is addressed by `file` + `line` + `name`
+// and gave neither, so the agent's next step was grep.
+function LocalDecls(AWs: TMcpWorkspace; const AQuery, AKind,
+  AInFilter: string; ALimit: Integer; out AMore: Integer): TArray<TTarget>;
+var
+  LExtras: TFindExtras;
+begin
+  AMore := 0;
+  if (AQuery = '') or IsWildPattern(AQuery) then
+    Exit(nil);
+  LExtras := TFindExtras.Create;
+  try
+    LExtras.Locals := True;
+    LExtras.InFilter := AInFilter;
+    Result := ResolveName(AWs, AQuery, AKind, True, ALimit, AMore, False,
+      LExtras);
+  finally
+    LExtras.Free;
+  end;
+end;
+
+// The rows of LocalDecls, under the line that says what they are.
+procedure AppendLocals(ASb: TStringBuilder; AWs: TMcpWorkspace;
+  const AQuery: string; const ALocals: TArray<TTarget>; AMore: Integer;
+  const AIndent: string);
+begin
+  ASb.AppendLine(Format('`%s` is declared only inside routine bodies - a '
+    + 'local, a constant or a parameter, addressed by `file` + `line` + '
+    + '`name`:', [AQuery]));
+  for var LT in ALocals do
+    ASb.AppendLine(AIndent + DescribeTarget(AWs, LT));
+  if AMore > 0 then
+    ASb.AppendLine(Format('%s... %d more', [AIndent, AMore]));
+end;
+
 // The refusal of a name no declaration matches, for every tool that takes
 // `symbol`: what was searched, and where the name is written outside it.
 function NoSuchDeclaration(AWs: TMcpWorkspace; const ASymbol: string): string;
@@ -2367,10 +2441,24 @@ const
   LIKE_ROWS = 6;
 var
   LNote, LLast, LQual: string;
-  LLike: TArray<TTarget>;
+  LLike, LLocals: TArray<TTarget>;
   LMore: Integer;
+  LSb: TStringBuilder;
 begin
   LLast := StripGenerics(ASymbol.Split(['.'])[High(ASymbol.Split(['.']))]);
+  LLocals := LocalDecls(AWs, ASymbol, '', '', LIKE_ROWS, LMore);
+  if Length(LLocals) > 0 then
+  begin
+    LSb := TStringBuilder.Create;
+    try
+      LSb.AppendLine(Format('no declaration named `%s` among %s', [ASymbol,
+        IndexScope(AWs)]));
+      AppendLocals(LSb, AWs, ASymbol, LLocals, LMore, '  ');
+      Exit(LSb.ToString.TrimRight);
+    finally
+      LSb.Free;
+    end;
+  end;
   Result := Format('no declaration named `%s` among %s - a local or a '
     + 'parameter is addressed by `file` + `line` + `name`', [ASymbol,
     IndexScope(AWs)]);
@@ -3311,7 +3399,7 @@ function ToolFind(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
 var
   LQuery, LKind: string;
   LLimit, LMore: Integer;
-  LCands, LLike: TArray<TTarget>;
+  LCands, LLike, LLocals: TArray<TTarget>;
   LSb: TStringBuilder;
   LFallback, LOwnOnly: Boolean;
   LAll, LOwn: Integer;
@@ -3343,6 +3431,26 @@ begin
       LExtras);
     LogStep('find: the search', LSW);
     LFallback := False;
+    // Nothing named: a body's own declaration of that name is the answer
+    // (`find LCount` - the routine declaring it), before any name like it.
+    if (Length(LCands) = 0) and (LMore = 0) and not IsWildPattern(LQuery) then
+    begin
+      LLocals := LocalDecls(AWs, LQuery, LKind, LExtras.InFilter, LLimit,
+        LMore);
+      if (Length(LLocals) > 0) or (LMore > 0) then
+      begin
+        LSb := TStringBuilder.Create;
+        LSb.AppendLine(Format('no declaration%s a name list holds is named '
+          + '`%s`%s', [IfThen(LKind <> '', ' of kind ' + LKind), LQuery, LIn]));
+        if LLimit = 0 then
+          LSb.AppendLine(Format('`%s` is declared only inside routine bodies: '
+            + '%s (limit 0: none listed)', [LQuery, Plural(LMore,
+            'declaration')]))
+        else
+          AppendLocals(LSb, AWs, LQuery, LLocals, LMore, '');
+        Exit(LSb.ToString.TrimRight);
+      end;
+    end;
     if (Length(LCands) = 0) and (LMore = 0) and (Pos('*', LQuery) = 0) and
        (Pos('?', LQuery) = 0) then
     begin
@@ -18719,6 +18827,9 @@ const
     + 'or wildcards in any part (*Customer*, *.Save, *Form.Save). Returns file:line, the qualified '
     + 'name, its kind and the declaration (one written over several lines '
     + 'joined). Faster and more precise than grep for Object Pascal '
+    + 'declarations. Routines nested in a routine body and types declared '
+    + 'there are named under it (TFoo.Bar.Helper). A name only a routine body '
+    + 'declares - a local, a constant, a parameter - is answered with those '
     + 'declarations. A name nothing declares is answered with the names '
     + 'containing it and the names like it (the same words, a misspelling), '
     + 'and the Pascal files outside the index - units no project uses - that '
@@ -18728,7 +18839,7 @@ const
     + 'wildcard pattern"},'
     + '"kind":{"type":"string","description":"type, class, record, '
     + 'interface, routine, procedure, function, constructor, var, const, '
-    + 'field, property, enum (a value), unit"},'
+    + 'field, property, enum (a value), parameter, unit"},'
     + '"scope":{"type":"string","enum":["all","project"],"description":'
     + '"project = only the group''s own units (default all)"},'
     + '"in":{"type":"string","description":"Only the declarations in files '

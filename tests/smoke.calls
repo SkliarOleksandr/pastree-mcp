@@ -25,6 +25,17 @@ find {"query":"*Circ*", "scope":"project", "limit":0}
 find {"query":"*Circ*", "in":"Shared"}
 find {"query":"*Circ*", "in":"*TLB*"}
 find {"query":"*Circ*", "in":"NoSuchDir"}
+find {"query":"NestInner"}
+find {"query":"NestHost.NestInner.NestDeepest"}
+find {"query":"NestField"}
+find {"query":"*Nest*", "scope":"project"}
+find {"query":"LNestVar"}
+find {"query":"NestHost.LNestVar", "limit":0}
+find {"query":"ANestArg", "kind":"parameter"}
+find {"query":"FLAG_INC_MARK", "in":"*.inc"}
+source {"symbol":"NestHost.NestInner"}
+source {"symbol":"LNestVar"}
+callers {"symbol":"NestDeepest"}
 references {"symbol":"TTint.tnRed"}
 references {"symbol":"tnBlue"}
 references {"symbol":"Dark"}
