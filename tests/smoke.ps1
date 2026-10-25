@@ -712,7 +712,8 @@ $script:mode = ''
 # library caller is in a body (LibBase.LibRun), lists a unit only for an
 # inline routine's expansion (LibMath, through LibInl) and one only for its
 # initialization (LibReg); LibHidden is used by LibBase's implementation
-# alone. Read light, every call that needs a library body has its unit made
+# alone. uPlug calls TLibWorker.Name, which LibPlug's implementation
+# overrides (TPlugWorker). Read light, every call that needs a library body has its unit made
 # full first, inside the query (PasTree's TPasWorkspace): each answer is the
 # full run's, call for call - only `status` and the whole library's
 # `diagnostics` say light mode.
@@ -737,6 +738,12 @@ foreach ($light in @($true, $false)) {
     Check 'light source' (Block $lb 'source {"symbol":"LibRun"}') @("lib\LibBase.pas:32-35`n32  procedure LibRun(AWorker: TLibWorker);", '34    AWorker.DoWork;')
     Check 'light definition' (Block $lb 'definition {"symbol":"RegisterLib"}') @('lib\LibReg.pas:7', 'implemented at ', 'lib\LibReg.pas:14')
     Check 'light callees' (Block $lb 'callees {"symbol":"TLibWorker.DoWork"}') @('1 call reaching 1 routine', "lib\LibHidden.pas`n  7  [at 24]  procedure HiddenStep;")
+    # The override in a light body: the walk's dispatch demands met in one
+    # query once it is over (EnsureDispatch), the tool run again - the row
+    # at the first call, the same at the last.
+    foreach ($k in @('callees {"symbol":"PlugName"}', 'callees {"symbol":"PlugName"} #2')) {
+        Check 'light callees dispatch' (Block $lb $k) @('3 calls reaching 4 routines', "  TLibWorker`n    12  [at 18]  function Name: string; virtual;", "lib\LibPlug.pas`n  11  [at 16]  function PlugWorker: TLibWorker;`n  TPlugWorker`n    18  [at 18 via TLibWorker.Name]  function Name: string; override;")
+    }
     Check 'light callers after' (Block $lb 'callers {"symbol":"TOwnWorker.DoWork"} #2') @('2 calls in 2 routines', "  LibRun`n    34  [via TLibWorker.DoWork]  AWorker.DoWork;")
     # A class LibMath's implementation declares (LibMath is used by LibInl's
     # implementation alone): listed by name, member and wildcard either way.
@@ -750,13 +757,13 @@ foreach ($light in @($true, $false)) {
         Check 'light lint' (Block $lb $k) @('2 findings in 1 file of 1 own unit', 'uOwn.pas:6:12: uses-to-implementation LibInl - used only in the implementation (first at line 30, in OwnMain)', 'uOwn.pas:6:29: unused-uses LibReg - no name of it is used here; but removing it leaves LibReg (initialization) out of LightApp') @('LibMath', 'not known')
     }
     if ($light) {
-        Check 'light status' (Block $lb 'status') @('light mode: 6 of 8 units are library units read interface-only', '; 0 made full so far', 'queries completed in light mode: 0 of 0', 'every `uses` name resolved')
+        Check 'light status' (Block $lb 'status') @('light mode: 7 of 10 units are library units read interface-only', '; 0 made full so far', 'queries completed in light mode: 0 of 0', 'every `uses` name resolved')
         # LibBase.LibRun's call is in a body: LibBase made full by the query,
         # the row found at the first call already.
         Check 'light callers' (Block $lb 'callers {"symbol":"TOwnWorker.DoWork"}') @('2 calls in 2 routines', "  LibRun`n    34  [via TLibWorker.DoWork]  AWorker.DoWork;") @('light mode')
         # The whole library's diagnostics: its light units report their interface.
         Check 'light diagnostics' (Block $lb 'diagnostics {"library":true,"limit":1}') @(' library units read interface-only report their interface only - `--no-light` checks their implementations too)')
-        Check 'light status after' (Block $lb 'status {} #2') @('light mode: 3 of 9 units are library units read interface-only', '; 4 made full so far', 'queries completed in light mode: 4 of ', ' 0 escalation(s)')
+        Check 'light status after' (Block $lb 'status {} #2') @('light mode: 3 of 11 units are library units read interface-only', '; 5 made full so far', 'queries completed in light mode: 5 of ', ' 0 escalation(s)')
         $script:lightFixture = $lb
     } else {
         # Every answer of the light run is the full run's but status and the
@@ -897,6 +904,34 @@ finally {
     Remove-Item -Force $logFile -ErrorAction SilentlyContinue
     Get-ChildItem ([IO.Path]::ChangeExtension($logFile, $null).TrimEnd('.') + '-*.log') -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 }
+
+# ---- callees: a dispatch search stopped at its bound ----------------------------------
+# callees looks at 5000 classes below a virtual method's class at most: below
+# TObject a real group has more, and the count it found was given as all that
+# may run (TObject.Destroy on the client group: 1440 light, 1438 full, of
+# 5216). PASTREE_MCP_TEST_DISPATCH_CLASSES lowers the bound so
+# the fixture reaches it: a count says "at least", rows say they are what was
+# found.
+Write-Host '--- CLI, a dispatch search stopped at its bound'
+function Run-DispatchBound([string]$Bound) {
+    $calls = Join-Path ([IO.Path]::GetTempPath()) ('pastree-mcp-smoke-bound-' + [Guid]::NewGuid().ToString('N') + '.calls')
+    [IO.File]::WriteAllText($calls, "callees {`"symbol`":`"RunA`"}`ncallees {`"symbol`":`"TObject.Free`"}`n")
+    if ($Bound) { $env:PASTREE_MCP_TEST_DISPATCH_CLASSES = $Bound }
+    $ErrorActionPreference = 'Continue'
+    try { $out = (& $Exe --project $group --log none --script $calls 2>$null | ForEach-Object { "$_" }) -join "`n" }
+    finally {
+        $ErrorActionPreference = 'Stop'
+        if ($Bound) { Remove-Item Env:PASTREE_MCP_TEST_DISPATCH_CLASSES }
+        Remove-Item -Force $calls -ErrorAction SilentlyContinue
+    }
+    return $out
+}
+$out = Run-DispatchBound ''
+Check 'callees dispatch within bound' $out @('callees of RunA (AppA\uAppA.pas:15-26) - 4 calls reaching 7 routines', 'TObject.Destroy: ', ' other methods may run for it - not listed; `related overrides` lists them)') @('at least', 'the search stopped', 'stopped at')
+$out = Run-DispatchBound '50'
+Check 'callees dispatch bound counted' $out @('(TObject.Destroy: at least ', ' other methods may run for it - not listed; the search stopped at 50 classes below its class, `related overrides` counts them all)')
+$out = Run-DispatchBound '2'
+Check 'callees dispatch bound listed' $out @('callees of RunA (AppA\uAppA.pas:15-26) - 4 calls reaching 5 routines', '(TShape.Area: the search for what else may run for it stopped at 2 classes below its class - the rows are what it found, `related overrides` lists them all)')
 
 # ---- dcc's internal error: built again, and said --------------------------------------
 # F2084 is dcc failing, not the code, and a second build usually passes (FR.4).

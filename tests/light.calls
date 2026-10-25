@@ -5,6 +5,7 @@
 # for the rest of the session - so the first call of each kind is the one
 # that shows it.
 status
+callees {"symbol":"PlugName"}
 callers {"symbol":"TOwnWorker.DoWork"}
 references {"symbol":"LibRun"}
 related {"symbol":"TLibWorker","relation":"descendants"}
@@ -24,3 +25,4 @@ find {"query":"TMathCache.Reset"}
 find {"query":"*MathCach*"}
 find {"query":"LibMath","kind":"unit"}
 find {"query":"NothingAnywhere"}
+callees {"symbol":"PlugName"}

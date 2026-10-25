@@ -10036,8 +10036,14 @@ const
   // dozen or two overrides in a real group; a polymorphic call in its own
   // code, a handful.
   MAX_DISPATCH_ROWS = 10;
-  // Classes one dispatch search looks at, whatever it finds.
+  // Classes one dispatch search looks at, whatever it finds: below TObject a
+  // real group has more, and the search stops - the answer says so, and
+  // counts what it found as "at least" (TObject.Destroy on the client group:
+  // 1440 found of 5216).
   MAX_DISPATCH_CLASSES = 5000;
+  // For tests\smoke.ps1 only: a smaller bound, so the fixture's few classes
+  // reach it.
+  TEST_DISPATCH_CLASSES_VAR = 'PASTREE_MCP_TEST_DISPATCH_CLASSES';
 
 type
   // One call a routine of the walk makes to the routine of a row.
@@ -10277,6 +10283,11 @@ type
     FRows: TList<TCalleeRow>;                   // the level being searched
     FRowOf: TDictionary<string, Integer>;       // declaration site -> row
     FTargets: TDictionary<string, TTarget>;     // analysis:model:symbol
+    // Light mode: per analysis, the methods dispatched through - their
+    // overrides' (FDispOverrides) or implementations' (FDispImpls) demand,
+    // met in one query once the walk is over (MeetDispatchDemand).
+    FDispOverrides, FDispImpls: TArray<TArray<TPasSymbolKey>>;
+    FDispSeen: TDictionary<string, Boolean>;    // analysis:model:symbol
     // Per analysis, built the first time a dispatch asks: the classes below
     // each class, and the classes taking each interface on.
     FChildren: TObjectDictionary<string, TList<TSemaXType>>;
@@ -10298,8 +10309,10 @@ type
     function ImplOf(AA: TMcpAnalysis; AClass: TSemaXType;
       const AStop: TSemaXType; const AName, AParams: string; AArity: Integer;
       out AId: TSymId): Boolean;
-    procedure AddDispatchTargets(AA: TMcpAnalysis; AMid, ASym: Integer;
-      AIface: Boolean; const ABase: TSemaXType; AList: TList<TSymId>);
+    // True when the search stopped at the bound (MAX_DISPATCH_CLASSES) with
+    // classes left: AList holds what it found, not all that may run.
+    function AddDispatchTargets(AA: TMcpAnalysis; AMid, ASym: Integer;
+      AIface: Boolean; const ABase: TSemaXType; AList: TList<TSymId>): Boolean;
     procedure AddUse(AA: TMcpAnalysis; AMid, ASym: Integer;
       const AUse: TCalleeUse);
     procedure AddDispatched(AA: TMcpAnalysis; AMid, ASym: Integer;
@@ -10309,6 +10322,12 @@ type
     constructor Create(AWs: TMcpWorkspace);
     destructor Destroy; override;
     function Answer(const ATarget: TTarget; ADepth, ALimit: Integer): string;
+    // Light mode: the units that may declare an override or implementation
+    // of a method the walk dispatched through made full, in one query per
+    // analysis; EMcpIndexChanged when that changed one - the answer is then
+    // incomplete and the tool runs again. Called after Answer, never during
+    // the walk: a promotion replaces the ids it holds.
+    procedure MeetDispatchDemand;
   end;
 
 constructor TCalleeWalk.Create(AWs: TMcpWorkspace);
@@ -10331,10 +10350,14 @@ begin
   FValueCalls := TStringList.Create;
   FCompiled := TStringList.Create;
   FNotes := TStringList.Create;
+  SetLength(FDispOverrides, AWs.Analyses.Count);
+  SetLength(FDispImpls, AWs.Analyses.Count);
+  FDispSeen := TDictionary<string, Boolean>.Create;
 end;
 
 destructor TCalleeWalk.Destroy;
 begin
+  FDispSeen.Free;
   FNotes.Free;
   FCompiled.Free;
   FValueCalls.Free;
@@ -10531,9 +10554,15 @@ type
   tree once: a class not declaring the slot runs its parent's. Matched by
   name and parameter types, as dcc pairs them; a method resolution clause
   (`procedure IFoo.Bar = Baz`) is not read. }
-procedure TCalleeWalk.AddDispatchTargets(AA: TMcpAnalysis; AMid,
+function DispatchClassBound: Integer;
+begin
+  Result := StrToIntDef(GetEnvironmentVariable(TEST_DISPATCH_CLASSES_VAR),
+    MAX_DISPATCH_CLASSES);
+end;
+
+function TCalleeWalk.AddDispatchTargets(AA: TMcpAnalysis; AMid,
   ASym: Integer; AIface: Boolean; const ABase: TSemaXType;
-  AList: TList<TSymId>);
+  AList: TList<TSymId>): Boolean;
 var
   LM: TPasSemaModel;
   LName, LParams, LKey: string;
@@ -10544,8 +10573,11 @@ var
   LQueue: TList<TDispatchItem>;
   LSeen, LFound: TDictionary<string, Boolean>;
   LItem, LNew: TDispatchItem;
+  LBound: Integer;
 begin
   BuildIndex(AA);
+  Result := False;
+  LBound := DispatchClassBound;
   LM := AA.Proj.Model(AMid);
   LName := LM.Symbols[ASym].NameLower;
   LParams := ParamTypesKey(AA, AMid, ASym);
@@ -10578,7 +10610,7 @@ begin
       LQueue.Add(LNew);
     end;
     LHead := 0;
-    while (LHead < LQueue.Count) and (LHead < MAX_DISPATCH_CLASSES) do
+    while (LHead < LQueue.Count) and (LHead < LBound) do
     begin
       LItem := LQueue[LHead];
       Inc(LHead);
@@ -10605,6 +10637,7 @@ begin
           LQueue.Add(LNew);
         end;
     end;
+    Result := LHead < LQueue.Count;
   finally
     LFound.Free;
     LSeen.Free;
@@ -10664,10 +10697,11 @@ var
   LList, LIds: TList<TSymId>;
   LOf: TList<TMcpAnalysis>;
   LKeys: TDictionary<string, Boolean>;
-  LIface: Boolean;
+  LIface, LCut: Boolean;
   LBase: TSemaXType;
   LMid, LSym: Integer;
-  LNote, LKey: string;
+  LNote, LKey, LRelation: string;
+  LDispKey: TPasSymbolKey;
 begin
   LIface := IsInterfaceMethodSym(AA, AMid, ASym);
   if not LIface and not IsDispatchable(AA, AMid, ASym) then
@@ -10686,13 +10720,23 @@ begin
   LUse.Via := LT.Name;
   // What may run is the overrides and implementations the class index
   // below holds: in light mode the units that may declare one (below the
-  // method's class, by the heritage edges) made full first, as the hierarchy
-  // query of the method does - the tool then runs again over them.
-  if AA.Proj.LightCount > 0 then
-    if LIface then
-      QImplementations(FWs, AA, AMid, ASym)
-    else
-      QOverrides(FWs, AA, AMid, ASym);
+  // method's class, by the heritage edges) are made full once the walk is
+  // over (MeetDispatchDemand) - the tool then runs again over them. Asked
+  // here one by one, each query also ran the search callees throws away and
+  // restarted the walk: callees of a form's FormActivate on the client
+  // group took 35 s in five runs, against 10 s in one.
+  if (AA.Proj.LightCount > 0) and QKey(AA, AMid, ASym, LDispKey) then
+  begin
+    LKey := Format('%d:%d:%d', [AA.Index, AMid, ASym]);
+    if not FDispSeen.ContainsKey(LKey) then
+    begin
+      FDispSeen.Add(LKey, True);
+      if LIface then
+        FDispImpls[AA.Index] := FDispImpls[AA.Index] + [LDispKey]
+      else
+        FDispOverrides[AA.Index] := FDispOverrides[AA.Index] + [LDispKey];
+    end;
+  end;
   LList := TList<TSymId>.Create;
   LIds := TList<TSymId>.Create;
   LOf := TList<TMcpAnalysis>.Create;
@@ -10702,6 +10746,7 @@ begin
     // classes one analysis holds and another does not. By model file and
     // declaration node, which needs no text - positions come for the rows
     // listed only.
+    LCut := False;
     for var LA in FWs.Analyses do
     begin
       LMid := LT.Ids[LA.Index].Mid;
@@ -10710,7 +10755,7 @@ begin
         Continue;
       LList.Clear;
       if LIface then
-        AddDispatchTargets(LA, LMid, LSym, True, XNil, LList)
+        LCut := AddDispatchTargets(LA, LMid, LSym, True, XNil, LList) or LCut
       else
       begin
         LBase := XNil;
@@ -10719,7 +10764,8 @@ begin
         if not XValid(LBase) then
           LBase := OwnerClassX(LA, LMid, LSym);
         if XValid(LBase) then
-          AddDispatchTargets(LA, LMid, LSym, False, LBase, LList);
+          LCut := AddDispatchTargets(LA, LMid, LSym, False, LBase, LList) or
+            LCut;
       end;
       for var LId in LList do
       begin
@@ -10734,14 +10780,28 @@ begin
         LOf.Add(LA);
       end;
     end;
+    LRelation := IfThen(LIface, 'implementations', 'overrides');
     if LIds.Count > MAX_DISPATCH_ROWS then
     begin
-      LNote := Format('%s: %d other methods may run for it - not listed; '
-        + '`related %s` lists them', [LT.Name, LIds.Count, IfThen(LIface,
-        'implementations', 'overrides')]);
+      if LCut then
+        LNote := Format('%s: at least %d other methods may run for it - not '
+          + 'listed; the search stopped at %d classes below its class, `related '
+          + '%s` counts them all', [LT.Name, LIds.Count, DispatchClassBound,
+          LRelation])
+      else
+        LNote := Format('%s: %d other methods may run for it - not listed; '
+          + '`related %s` lists them', [LT.Name, LIds.Count, LRelation]);
       if FNotes.IndexOf(LNote) < 0 then
         FNotes.Add(LNote);
       Exit;
+    end;
+    if LCut then
+    begin
+      LNote := Format('%s: the search for what else may run for it stopped '
+        + 'at %d classes below its class - the rows are what it found, `related '
+        + '%s` lists them all', [LT.Name, DispatchClassBound, LRelation]);
+      if FNotes.IndexOf(LNote) < 0 then
+        FNotes.Add(LNote);
     end;
     for var LIdx := 0 to LIds.Count - 1 do
       AddUse(LOf[LIdx], LIds[LIdx].Mid, LIds[LIdx].Sym, LUse);
@@ -10751,6 +10811,18 @@ begin
     LIds.Free;
     LList.Free;
   end;
+end;
+
+procedure TCalleeWalk.MeetDispatchDemand;
+begin
+  for var LA in FWs.Analyses do
+    if (LA.Index < Length(FDispOverrides)) and
+       ((FDispOverrides[LA.Index] <> nil) or (FDispImpls[LA.Index] <> nil)) then
+    begin
+      LA.WS.EnsureDispatch(FDispOverrides[LA.Index], FDispImpls[LA.Index]);
+      FWs.QueryDone(LA, True);
+    end;
+  FWs.RaiseIfChanged;
 end;
 
 // The calls in one routine's body - its nested routines are routines of
@@ -11139,6 +11211,7 @@ begin
   try
     Result := LWalk.Answer(LT, EnsureRange(ArgInt(AArgs, 'depth', 1), 1, 4),
       EnsureRange(ArgInt(AArgs, 'limit', 150), 0, 5000));
+    LWalk.MeetDispatchDemand;
   finally
     LWalk.Free;
   end;

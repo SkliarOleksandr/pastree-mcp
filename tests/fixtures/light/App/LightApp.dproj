@@ -10,5 +10,6 @@
             <MainSource>MainSource</MainSource>
         </DelphiCompile>
         <DCCReference Include="uOwn.pas"/>
+        <DCCReference Include="uPlug.pas"/>
     </ItemGroup>
 </Project>

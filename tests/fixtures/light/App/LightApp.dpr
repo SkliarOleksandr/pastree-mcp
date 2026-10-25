@@ -5,8 +5,10 @@ program LightApp;
 {$APPTYPE CONSOLE}
 
 uses
-  uOwn in 'uOwn.pas';
+  uOwn in 'uOwn.pas',
+  uPlug in 'uPlug.pas';
 
 begin
   OwnMain;
+  Writeln(PlugName);
 end.
