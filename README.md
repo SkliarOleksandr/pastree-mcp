@@ -134,6 +134,43 @@ schemas and instructions it read from the old one, so arguments added since
 (`targets`, `code`) stay invisible to the agent, although the server accepts
 them.
 
+### The grep hook
+
+Agents with the server configured often search by text anyway (SPEC 10.4:
+the index was called in 5 runs of 12 when nothing mentioned it, and the one
+wrong answer was a run that grepped). `pastree-mcp.exe --hook` is a Claude
+Code PreToolUse hook that catches that moment. In the Delphi project's
+`.claude/settings.json`, or in `~/.claude/settings.json` for every
+repository (it is silent where no `.groupproj` or `.dproj` is found from the
+session's directory up to the repository root):
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^(Grep|Bash|PowerShell|mcp__pastree__.*)$",
+        "hooks": [
+          { "type": "command", "command": "C:/Repos/pastree-mcp/out/pastree-mcp.exe --hook" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+A search for a name - an identifier with both cases in it, `TFoo`,
+`SaveToFile` - over Pascal sources (Grep with no glob or a Pascal one;
+grep, rg, findstr or Select-String in a command naming a Pascal file or
+searching recursively), or `sed -n A,Bp` of a Pascal file, is denied once
+with a note naming the call that answers it (`references`, `find`,
+`callers`, `source` with `lines`). The same command run again goes through:
+a search for a comment or a string is the agent's to make. At most one note
+per 10 minutes, and none within 5 minutes of a pastree call - the agent
+knows the tools then. About 15 ms a call; it reads no project and writes
+no log, only a small state file per session under
+`%TEMP%\pastree-mcp\hook`. Any failure lets the call through.
+
 ### Options
 
 | Option | Default | |

@@ -1,7 +1,7 @@
 # Smoke test over tests\fixtures\group: two projects sharing a unit, and a VCL
 # one (AppF) whose forms bind components and handlers by name.
 #
-# Three parts, each exercising a different path:
+# Four parts, each exercising a different path:
 #   1. CLI, shared policy - every tool once, answers checked by substring.
 #   2. CLI, strict policy - the same group split into two analyses, so the
 #      group-wide merge (and its de-duplication) is what answers.
@@ -9,6 +9,7 @@
 #      call, then an edit on disk and the same kind of call again: the index
 #      must notice the edit by itself. Then compile: with progress, a call
 #      answered while a build runs, a cancelled build left unanswered.
+#   4. The grep hook (`--hook`): what it denies with a note, what it passes.
 # Part 1 runs twice: in light mode, the default (the installed library read
 # interface-only, SPEC 9.9), and with --no-light; the answers are the same
 # but where a check says otherwise - a query needing library bodies has them
@@ -1305,6 +1306,43 @@ finally {
     Remove-Item -Recurse -Force $copy -ErrorAction SilentlyContinue
     Remove-Item -Recurse -Force $mcpBuild -ErrorAction SilentlyContinue
 }
+
+# ---- 4. the grep hook (`--hook`, PasMcp.Hook) ----------------------------------
+# A Claude Code PreToolUse call on stdin: a text search for a name over Pascal
+# sources is denied once with the call that answers it, the same command then
+# goes through; anything else passes with nothing written. A session id of
+# its own per run, so the state file of another run does not decide.
+Write-Host '--- grep hook'
+$hookSession = 'smoke-' + [Guid]::NewGuid().ToString('N')
+function Hook([string]$Suffix, [string]$Tool, [string]$InputJson, [string]$Cwd = $fixture) {
+    $json = '{"session_id":"' + $hookSession + $Suffix + '","cwd":"' + $Cwd.Replace('\', '\\') + '","tool_name":"' + $Tool + '","tool_input":' + $InputJson + '}'
+    $out = $json | & $Exe --hook
+    if ($LASTEXITCODE -ne 0) { Write-Host "FAIL hook exited with $LASTEXITCODE"; $script:failures++ }
+    if (-not $out) { return '' }
+    $o = ($out -join "`n") | ConvertFrom-Json
+    return $o.hookSpecificOutput.permissionDecision + ': ' + $o.hookSpecificOutput.permissionDecisionReason
+}
+$deny = 'deny: '
+Check 'hook grep name' (Hook 'a' 'Grep' '{"pattern":"TCircle"}') @($deny, 'pastree-mcp: `TCircle` looks like a name', '`references` {"symbol":"TCircle"}')
+Check 'hook grep again' (Hook 'a' 'Grep' '{"pattern":"TCircle"}') @() @($deny)
+# Not a Delphi project's directory: a hook installed for every repository
+# says nothing there.
+Check 'hook not delphi' (Hook 'g' 'Grep' '{"pattern":"TCircle"}' ([IO.Path]::GetTempPath())) @() @($deny)
+Check 'hook grep word' (Hook 'b' 'Grep' '{"pattern":"TODO"}') @() @($deny)
+Check 'hook grep text' (Hook 'b' 'Grep' '{"pattern":"\"a string\""}') @() @($deny)
+Check 'hook grep other files' (Hook 'b' 'Grep' '{"pattern":"TCircle","glob":"*.md"}') @() @($deny)
+Check 'hook grep declaration' (Hook 'b' 'Grep' '{"pattern":"procedure\\s+TFoo\\.Save\\b","glob":"*.{pas,inc}"}') @($deny, '`TFoo.Save`')
+Check 'hook bash recursive' (Hook 'c' 'Bash' '{"command":"cd src && grep -rn \"SaveToFile\" source/"}') @($deny, '`SaveToFile`')
+Check 'hook bash piped' (Hook 'd' 'Bash' '{"command":"git log --oneline | grep SaveToFile"}') @() @($deny)
+Check 'hook bash other include' (Hook 'd' 'Bash' '{"command":"grep -rn SaveToFile --include=*.md ."}') @() @($deny)
+Check 'hook sed lines' (Hook 'd' 'Bash' '{"command":"sed -n 120,160p source/uShapes.pas"}') @($deny, '`source` with {"file":"source/uShapes.pas","lines":"120-160"}')
+Check 'hook powershell' (Hook 'e' 'PowerShell' '{"command":"Get-ChildItem -Recurse -Include *.pas | Select-String -Pattern LoadFromStream"}') @($deny, '`LoadFromStream`')
+# A pastree call just made: the agent knows the tools, its grep is its own.
+Check 'hook pastree used' (Hook 'f' 'mcp__pastree__find' '{"query":"TCircle"}') @() @($deny)
+Check 'hook after pastree' (Hook 'f' 'Grep' '{"pattern":"TCircle"}') @() @($deny)
+$out = 'not json' | & $Exe --hook
+if ($LASTEXITCODE -ne 0 -or $out) { Write-Host 'FAIL hook on bad input did not pass silently'; $script:failures++ }
+Remove-Item (Join-Path ([IO.Path]::GetTempPath()) 'pastree-mcp\hook\smoke-*') -ErrorAction SilentlyContinue
 
 if ($script:failures -gt 0) {
     Write-Host "$($script:failures) check(s) FAILED"

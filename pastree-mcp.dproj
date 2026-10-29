@@ -93,6 +93,7 @@
         <DCCReference Include="source\PasMcp.Build.pas"/>
         <DCCReference Include="source\PasMcp.Tools.pas"/>
         <DCCReference Include="source\PasMcp.Server.pas"/>
+        <DCCReference Include="source\PasMcp.Hook.pas"/>
         <BuildConfiguration Include="Base">
             <Key>Base</Key>
         </BuildConfiguration>

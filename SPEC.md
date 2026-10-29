@@ -358,7 +358,18 @@ and to `<project>-pastree-mcp.log` beside the project.
    the answers were right. Whether the answers are right is measured now
    (section 10); a first pilot of tasks (10.4) was solved as well without
    the server, so whether the tools are enough where grep is not is still
-   open.
+   open. What 10.4 did show is that an agent not told about the index often
+   does not call it - 5 runs of 12, the wrong answer in one that grepped.
+   Serena, an LSP-backed MCP server, found the same with Claude Code and
+   denies a run of greps from a hook. `--hook` (0.45.0, README "The grep
+   hook") does that here: a search for a name over Pascal sources, or a
+   `sed` line range of a Pascal file, is denied once with the call that
+   answers it, then let through when repeated - a text search is still the
+   agent's to make; at most once per 10 minutes and not within 5 of a
+   pastree call. Denied rather than added beside the result
+   (`additionalContext`): an agent holding the grep's answer has no reason
+   to ask again. Whether it brings the tools arm up to the hint arm is the
+   next run of 10.4's tasks.
 3. **Tool descriptions.** They are what the model decides by; wording them is
    empirical. Adjust after watching real sessions.
 4. **Re-demotion.** Library units hydrated by queries stay hydrated until the
@@ -1055,6 +1066,15 @@ gap between the answers and the truth.
 12. Several targets per call (done, 0.43.0, 9.2) - asked for by the
    client group's sessions of October: half the reads of code around the
    tools wanted more than one routine at once.
+13. A Claude Code plugin (not started): the server and the grep hook
+   (8.2) installed in one step - a plugin carries an `.mcp.json` and a
+   `hooks/hooks.json` together, from a marketplace that is a git
+   repository. Today each is set up by hand, the hook in a settings file
+   with the exe's path, and a colleague who registers the server but not
+   the hook gets the 5-in-12 of 10.4. Open: where the plugin takes the exe
+   from - a plugin is the files of a git repository, the exe is built
+   locally (a release binary in the plugin, or the exe on `PATH`).
+   After the hook is measured on our own repositories.
 
 `type_of`, `overview`, `implement_plan`, `scope_at` and `uses_for` go in
 when a measured session asks for them - the October audit (9.2.6) did not.

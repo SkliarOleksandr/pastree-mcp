@@ -28,6 +28,9 @@ program pastree_mcp;
   --light <dir> (repeats: a directory tree whose units are read
   interface-only, besides the installed library), --no-light (every unit in
   full), --log <file|none>, --version.
+
+  - As a Claude Code PreToolUse hook: `pastree-mcp --hook`, alone - reads the
+    hook's JSON from stdin, no project, no log (PasMcp.Hook).
 }
 
 {$APPTYPE CONSOLE}
@@ -52,7 +55,8 @@ uses
   PasMcp.Workspace in 'source\PasMcp.Workspace.pas',
   PasMcp.Build in 'source\PasMcp.Build.pas',
   PasMcp.Tools in 'source\PasMcp.Tools.pas',
-  PasMcp.Server in 'source\PasMcp.Server.pas';
+  PasMcp.Server in 'source\PasMcp.Server.pas',
+  PasMcp.Hook in 'source\PasMcp.Hook.pas';
 
 type
   TCall = record
@@ -287,6 +291,9 @@ begin
   // EVERY PasTree host must set this: the analysis fans out across cores, and
   // with the default the memory manager SLEEPS on lock contention.
   System.NeverSleepOnMMThreadContention := True;
+  // Before anything logs: a hook's stdout and stderr reach the agent.
+  if (ParamCount = 1) and SameText(ParamStr(1), '--hook') then
+    RunHook;
   try
     ParseArgs;
     if GLog = '' then
