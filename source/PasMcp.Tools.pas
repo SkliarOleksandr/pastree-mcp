@@ -17929,6 +17929,55 @@ begin
     Result := Copy(AText, LFrom + 1, LTo - LFrom - 1);
 end;
 
+// An E2003 of a Make whose name the index resolves on that line: where it
+// is declared. dcc's Make can read a stale .dcu of the declaring unit - on
+// the client group `Undeclared identifier: 'ReadGridValue'` for a method
+// declared and implemented, in the IDE's incremental build too, and a
+// rebuild passed with no change. The answer then says `rebuild: true`
+// rather than leave the agent hunting a declaration that is there.
+procedure ResolveDeclared(AWs: TMcpWorkspace; var AResult: TBuildResult);
+var
+  LName, LText: string;
+  LLines: TArray<string>;
+  LMid, LCol, LTMid, LTSym: Integer;
+  LT: TTarget;
+begin
+  if AResult.Rebuilt or AResult.ThirdRebuilt then
+    Exit;
+  for var LI := 0 to High(AResult.Messages) do
+  begin
+    if not SameText(AResult.Messages[LI].Code, 'E2003') or
+      (AResult.Messages[LI].Line <= 0) or
+      not AWs.IsOwnFile(AResult.Messages[LI].FileName) then
+      Continue;
+    LName := QuotedName(AResult.Messages[LI].Text);
+    if (LName = '') or not IsValidIdent(LName, True) then
+      Continue;
+    LLines := ReadLines(AResult.Messages[LI].FileName);
+    if AResult.Messages[LI].Line > Length(LLines) then
+      Continue;
+    LCol := FindWord(LLines[AResult.Messages[LI].Line - 1], LName);
+    if LCol = 0 then
+      Continue;
+    for var LA in AWs.Analyses do
+    begin
+      LMid := LA.Nav.ModelIdOf(AResult.Messages[LI].FileName);
+      if (LMid < 0) or LA.Proj.IsLight(LMid) or
+        not LA.Proj.EnsureHydrated(LMid) then
+        Continue;
+      LT := Default(TTarget);
+      LT.Ids := NewIds(AWs);
+      if LA.Nav.SymbolAt(LMid, AResult.Messages[LI].Line, LCol, LTMid, LTSym,
+        LText) and FillSymbolTarget(AWs, LA, LTMid, LTSym, LT) then
+      begin
+        AResult.Messages[LI].DeclaredAt := AWs.RelPath(LT.DeclFile) + ':' +
+          IntToStr(LT.DeclLine);
+        Break;
+      end;
+    end;
+  end;
+end;
+
 // dcc cut the "file(line)" of a message at 128 characters: the file is the
 // own or library unit whose path starts so, when exactly one does; the line,
 // the one line of it that writes the name the message quotes, when exactly
@@ -18238,6 +18287,9 @@ var
         LLine := LLine + ' [new]';
       if LRow.Msg.Kept then
         LLine := LLine + ' [earlier compile]';
+      if LRow.Msg.DeclaredAt <> '' then
+        LLine := LLine + ' [the index finds it declared at ' +
+          LRow.Msg.DeclaredAt + ']';
       if LMulti and (Length(LRow.Members) < LBuilt) then
         LLine := LLine + ' [' + String.Join(', ', LRow.Members) + ']';
       if LRow.Msg.Truncated and (LRow.Msg.Line > 0) then
@@ -18334,7 +18386,7 @@ var
   function MemberLine(const R: TBuildResult; const AIndent: string): string;
   var
     LM: TMcpMember;
-    LErrs: Integer;
+    LErrs, LStale: Integer;
     LInternal: string;
     LAgain: Boolean;
   begin
@@ -18363,6 +18415,17 @@ var
     else
       Result := Result + 'FAILED in ' + Seconds(R.Ms) + ', ' +
         Plural(LErrs, 'error');
+    // On the status line, as dcc's internal error is: an agent reading
+    // "Undeclared identifier" goes to declare what is already declared.
+    LStale := 0;
+    for var LMsg in R.Messages do
+      if LMsg.DeclaredAt <> '' then
+        Inc(LStale);
+    if not R.Ok and (LStale > 0) then
+      Result := Result + Format(' - %s on a name the index finds declared: '
+        + 'a Make can read a stale .dcu of the declaring unit, `rebuild: true` '
+        + 'compiles every unit afresh', [IfThen(LStale = 1, 'an E2003',
+        IntToStr(LStale) + ' E2003')]);
     // Built twice (PasMcp.Build): dcc failed, not the code - said, or the
     // agent hunts an error in a unit the change did not touch (FR.4).
     if Length(R.InternalErrors) > 0 then
@@ -18903,6 +18966,7 @@ begin
     begin
       ResolveTruncated(FWs, FResults[LI]);
       ResolveFormFiles(FWs, FResults[LI]);
+      ResolveDeclared(FWs, FResults[LI]);
       CompareWithBaseline(FResults[LI], FWs.ChangedFiles + FChanged);
     end;
   Result := CompileAnswer(FWs, FResults, FWhy, FShow, FLimit, FSince);
@@ -19489,7 +19553,9 @@ begin
     + 'relative to ' + AWs.Root + '. The index holds what the projects '
     + 'compile - their `uses` closure, not every file of the directory. It '
     + 're-reads changed files before every call, so results match the files '
-    + 'on disk, and names them: one you did not edit is someone else''s edit.';
+    + 'on disk, and names them: one you did not edit is someone else''s edit. '
+    + 'An edit still in an IDE editor buffer, not saved, is not on disk: '
+    + 'neither the index nor `compile` sees it - save the file first.';
   if AWs.LightOn then
     Result := Result + ' Library units (RTL, VCL, third-party) are read for '
       + 'their declarations, not their bodies, until a call needs them: the '

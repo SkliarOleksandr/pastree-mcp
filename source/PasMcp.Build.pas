@@ -122,6 +122,9 @@ type
     // In TBuildResult.Kept: what an earlier compile here reported for a unit
     // this one did not compile again.
     Kept: Boolean;
+    // An E2003 whose name the index resolves on that line: where it finds it
+    // declared (file:line) - set by the answer, not the build.
+    DeclaredAt: string;
   end;
 
   TBuildResult = record

@@ -678,6 +678,18 @@ default.
 - **The compiler is the truth.** PasTree's diagnostics are a fast
   approximation and can differ. `compile` exists so the agent trusts neither
   blindly: `diagnostics` while editing, `compile` before saying done.
+  The two are also read against each other: an E2003 of a Make whose name
+  the index resolves on that line gets the declaration's place beside it,
+  and the status line names `rebuild: true`. dcc's Make can read a stale
+  .dcu of the declaring unit - on the client group `Undeclared identifier`
+  for a method declared and implemented, in the IDE's incremental build
+  too, and a rebuild passed with no change; left unsaid, the agent goes to
+  declare what is already there.
+- **The files on disk, not the IDE's buffers.** The index and `compile` read
+  what is saved. An agent editing through an IDE bridge (a colleague's Kai
+  setup: the open file's buffer is the truth, edits go to it unsaved) gets
+  answers about the old text without a word; the server's instructions say
+  to save first.
 - **It is slow.** A full build of a large member takes minutes; the
   description says so, one build runs at a time, and the answer reports the
   time taken.

@@ -1205,6 +1205,31 @@ try {
     if ($order -contains 11) { Write-Host 'FAIL a cancelled compile was answered'; $script:failures++ }
     Check 'compile after a cancel' (ToolText $script:replies[12]) @('compile AppA (Win32 Debug): built in')
 
+    # A stale .dcu: uShapes gains a function uAppA calls, but keeps its old
+    # write time, so dcc's Make takes its .dcu as current and says E2003 for
+    # a name that is declared (on the client group, in the IDE's Make too).
+    # The index sees the change (the size moved): the answer says where the
+    # name is declared and names `rebuild: true`, which passes.
+    $shapes = Join-Path $copy 'Shared\uShapes.pas'
+    $shapesText = [IO.File]::ReadAllText($shapes)
+    $shapesTime = (Get-Item $shapes).LastWriteTime
+    $at = $shapesText.LastIndexOf("end.")
+    $stale = $shapesText.Substring(0, $at) + "function StaleProbe: Integer;`r`nbegin`r`n  Result := 0;`r`nend;`r`n`r`n" + $shapesText.Substring($at)
+    $stale = $stale.Replace("`r`nimplementation`r`n", "`r`nfunction StaleProbe: Integer;`r`n`r`nimplementation`r`n")
+    [IO.File]::WriteAllText($shapes, $stale, $utf8)
+    (Get-Item $shapes).LastWriteTime = $shapesTime
+    $appText = [IO.File]::ReadAllText($unit)
+    [IO.File]::WriteAllText($unit, $appText.Replace("    TCircle.Create(5).Free;`r`n", "    TCircle.Create(5).Free;`r`n    StaleProbe;`r`n"), $utf8)
+    $r = Rpc 50 'tools/call' '{"name":"compile","arguments":{"member":"AppA"}}'
+    Check 'compile stale dcu' (ToolText $r) @('compile AppA (Win32 Debug): FAILED in', ', 1 error - an E2003 on a name the index finds declared: a Make can read a stale .dcu of the declaring unit, `rebuild: true` compiles every unit afresh', "E2003 Undeclared identifier: 'StaleProbe' (in RunA) [the index finds it declared at Shared\uShapes.pas:40]")
+    $r = Rpc 51 'tools/call' '{"name":"compile","arguments":{"member":"AppA","rebuild":true}}'
+    Check 'compile stale dcu rebuilt' (ToolText $r) @('compile AppA (Win32 Debug): built in') @('stale')
+    # Put back, and the re-analysis taken by a call of its own: the notes
+    # below expect only their own change.
+    [IO.File]::WriteAllText($shapes, $shapesText, $utf8)
+    [IO.File]::WriteAllText($unit, $appText, $utf8)
+    $null = Rpc 52 'tools/call' '{"name":"find","arguments":{"query":"TCircle"}}'
+
     # A project file changed: the workspace reloads, and the note names it.
     (Get-Item (Join-Path $copy 'AppA\AppA.dproj')).LastWriteTime = (Get-Date).AddSeconds(5)
     $r = Rpc 13 'tools/call' '{"name":"find","arguments":{"query":"TCircle"}}'
