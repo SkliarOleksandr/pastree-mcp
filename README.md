@@ -162,7 +162,8 @@ session's directory up to the repository root):
 A search for a name - an identifier with both cases in it, `TFoo`,
 `SaveToFile` - over Pascal sources (Grep with no glob or a Pascal one;
 grep, rg, findstr or Select-String in a command naming a Pascal file or
-searching recursively), or `sed -n A,Bp` of a Pascal file, is denied once
+searching recursively; not a search in files named one by one, which is
+a read), or `sed -n A,Bp` of a Pascal file, is denied once
 with a note naming the call that answers it (`references`, `find`,
 `callers`, `source` with `lines`). The same command run again goes through:
 a search for a comment or a string is the agent's to make. At most one note

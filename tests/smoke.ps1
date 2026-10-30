@@ -1348,7 +1348,7 @@ function Hook([string]$Suffix, [string]$Tool, [string]$InputJson, [string]$Cwd =
     return $o.hookSpecificOutput.permissionDecision + ': ' + $o.hookSpecificOutput.permissionDecisionReason
 }
 $deny = 'deny: '
-Check 'hook grep name' (Hook 'a' 'Grep' '{"pattern":"TCircle"}') @($deny, 'pastree-mcp: `TCircle` looks like a name', '`references` {"symbol":"TCircle"}')
+Check 'hook grep name' (Hook 'a' 'Grep' '{"pattern":"TCircle"}') @($deny, 'pastree index: `TCircle` looks like a Pascal name', '`references` {"symbol":"TCircle"}', 'Repeat the command.')
 Check 'hook grep again' (Hook 'a' 'Grep' '{"pattern":"TCircle"}') @() @($deny)
 # Not a Delphi project's directory: a hook installed for every repository
 # says nothing there.
@@ -1360,7 +1360,14 @@ Check 'hook grep declaration' (Hook 'b' 'Grep' '{"pattern":"procedure\\s+TFoo\\.
 Check 'hook bash recursive' (Hook 'c' 'Bash' '{"command":"cd src && grep -rn \"SaveToFile\" source/"}') @($deny, '`SaveToFile`')
 Check 'hook bash piped' (Hook 'd' 'Bash' '{"command":"git log --oneline | grep SaveToFile"}') @() @($deny)
 Check 'hook bash other include' (Hook 'd' 'Bash' '{"command":"grep -rn SaveToFile --include=*.md ."}') @() @($deny)
-Check 'hook sed lines' (Hook 'd' 'Bash' '{"command":"sed -n 120,160p source/uShapes.pas"}') @($deny, '`source` with {"file":"source/uShapes.pas","lines":"120-160"}')
+Check 'hook sed lines' (Hook 'd' 'Bash' '{"command":"sed -n 120,160p source/uShapes.pas"}') @($deny, '`source` {"file":"source/uShapes.pas","lines":"120-160"}')
+# A search in files named one by one is a read of what the agent found
+# already - `grep -n "X =" Version.pas` was denied in a compound command,
+# its git commands with it; a wildcard or a recursive search is a search.
+Check 'hook bash named file' (Hook 'h' 'Bash' '{"command":"git status; grep -n \"TCircle =\" source/uShapes.pas; git diff --stat"}') @() @($deny)
+Check 'hook grep named file' (Hook 'h' 'Grep' '{"pattern":"TCircle","path":"Shared/uShapes.pas"}') @() @($deny)
+Check 'hook powershell named file' (Hook 'h' 'PowerShell' '{"command":"Select-String -Path Shared/uShapes.pas -Pattern TCircle"}') @() @($deny)
+Check 'hook bash wildcard' (Hook 'i' 'Bash' '{"command":"grep -n TCircle *.pas"}') @($deny, '`TCircle`')
 Check 'hook powershell' (Hook 'e' 'PowerShell' '{"command":"Get-ChildItem -Recurse -Include *.pas | Select-String -Pattern LoadFromStream"}') @($deny, '`LoadFromStream`')
 # A pastree call just made: the agent knows the tools, its grep is its own.
 Check 'hook pastree used' (Hook 'f' 'mcp__pastree__find' '{"query":"TCircle"}') @() @($deny)

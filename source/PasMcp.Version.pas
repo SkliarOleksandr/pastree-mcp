@@ -16,7 +16,7 @@ unit PasMcp.Version;
 interface
 
 const
-  PasTreeMcpVersion = '0.45.1';
+  PasTreeMcpVersion = '0.45.2';
   // 0.129.0: NamedDeclRoot and ScopeOwner - the name lists' one rule, nested
   // routines and a body's types included (a compile error without them).
   // 0.124.0 before: a search by name completes itself in light mode (EnsureFind -

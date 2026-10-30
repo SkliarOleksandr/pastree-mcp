@@ -188,6 +188,17 @@ begin
   end;
 end;
 
+// A file named as such - an extension, no wildcard. A search in files the
+// agent names is a read of something it has found already: `grep -n "X ="
+// Version.pas` for the line's text was denied in a compound command, its
+// git commands with it (0.45.2). The searches that went wrong (SPEC 10.4)
+// were over the code base.
+function IsNamedFile(const APath: string): Boolean;
+begin
+  Result := (APath <> '') and (ExtractFileExt(APath) <> '') and
+    (APath.IndexOfAny(['*', '?', '{']) < 0);
+end;
+
 function GrepFinding(AInput: TJSONObject; out AFinding: TFinding): Boolean;
 var
   LGlob, LType, LPath: string;
@@ -201,8 +212,8 @@ begin
     LPascal := NamesPascal(LGlob)
   else if LType <> '' then
     LPascal := NamesPascal(LType)
-  else if (LPath <> '') and (ExtractFileExt(LPath) <> '') then
-    LPascal := IsPascalFile(LPath)
+  else if IsNamedFile(LPath) then
+    Exit(False)   // one file the agent named: a read, not a search
   else
     LPascal := True;
   AFinding.Name := NameInPattern(Str(AInput, 'pattern'));
@@ -270,7 +281,8 @@ end;
 // `sed -n` line range of a Pascal file. Over Pascal sources: the command
 // names a Pascal file or extension anywhere (`Get-ChildItem -Recurse
 // -Include *.pas | Select-String Foo` names it in another segment), or the
-// search is recursive and includes no other kind of file.
+// search is recursive and includes no other kind of file - and it is not
+// a search in files named one by one, without recursion (IsNamedFile).
 function SegmentFinding(const AWords: TArray<string>; const AWhole: string;
   out AFinding: TFinding): Boolean;
 const
@@ -280,7 +292,8 @@ const
 var
   LStart, LI: Integer;
   LPattern, LTool: string;
-  LRecursive, LOtherInclude, LGrepLike: Boolean;
+  LRecursive, LOtherInclude, LGrepLike, LNamedOnly: Boolean;
+  LPaths: Integer;
 begin
   AFinding := Default(TFinding);
   Result := False;
@@ -309,6 +322,8 @@ begin
   LRecursive := SameText(ChangeFileExt(LTool, ''), 'rg') or (LStart = 2);
   LGrepLike := MatchText(ChangeFileExt(LTool, ''), ['grep', 'egrep']);
   LOtherInclude := False;
+  LNamedOnly := True;
+  LPaths := 0;
   LPattern := '';
   LI := LStart;
   while LI <= High(AWords) do
@@ -327,6 +342,11 @@ begin
         '-Include', '-t', '--type', '-T']) and
          not NamesPascal(AWords[LI + 1]) then
         LOtherInclude := True;
+      if (LI < High(AWords)) and SameText(LW, '-Path') then
+      begin
+        Inc(LPaths);
+        LNamedOnly := LNamedOnly and IsNamedFile(AWords[LI + 1]);
+      end;
       Inc(LI);
     end
     else if LW.StartsWith('--include=') or LW.StartsWith('--glob=') or
@@ -338,11 +358,17 @@ begin
     else if LW.StartsWith('-') or (LW.StartsWith('/') and (Length(LW) = 2)) then
       // another option
     else if LPattern = '' then
-      LPattern := LW;
+      LPattern := LW
+    else
+    begin
+      Inc(LPaths);
+      LNamedOnly := LNamedOnly and IsNamedFile(LW);
+    end;
     Inc(LI);
   end;
   AFinding.Name := NameInPattern(LPattern);
   Result := (AFinding.Name <> '') and
+    not ((LPaths > 0) and LNamedOnly and not LRecursive) and
     (NamesPascal(AWhole) or (LRecursive and not LOtherInclude));
 end;
 
@@ -434,27 +460,22 @@ begin
   end;
 end;
 
+// Short: Claude Code shows it to the user as a red "hook error", and the
+// first wording - 700 characters on what the index sees that grep does not -
+// read as a wall of text (0.45.2). The agent needs the call, and that a
+// repeat goes through.
 function NoteFor(const AFinding: TFinding): string;
 begin
   if AFinding.Name = '' then
-    Result := Format('pastree-mcp: the pastree MCP server reads Object Pascal ' +
-      'by declaration. `source` with {"file":"%s","lines":"%s"} gives these ' +
-      'lines numbered as Read does; with `file` + `line` alone, the whole ' +
-      'routine around that line, and `targets` takes several pieces in one ' +
-      'call.', [AFinding.FileName.Replace('\', '/'), AFinding.Lines])
+    Result := Format('pastree index: `source` {"file":"%s","lines":"%s"} ' +
+      'gives these lines; `file` + `line` alone, the whole routine.',
+      [AFinding.FileName.Replace('\', '/'), AFinding.Lines])
   else
-    Result := Format('pastree-mcp: `%s` looks like a name declared in this ' +
-      'project''s Object Pascal code. The pastree MCP server answers it from ' +
-      'the compiler''s view rather than the text - resolved uses only, form ' +
-      '(.dfm) lines and calls through virtual and interface methods included: ' +
-      '`references` {"symbol":"%0:s"} for where it is used (`mode: files` for ' +
-      'a map of a widely used one), `find` for where it is declared, ' +
-      '`callers` for who calls it, `source` for its text (`targets` for ' +
-      'several at once).', [AFinding.Name]);
-  Result := Result + ' If the pastree tools are not loaded yet, load them ' +
-    'with ToolSearch "pastree". If the text itself is what you want - a ' +
-    'comment, a string, a name built at run time - run the same command ' +
-    'again: this note is given once per 10 minutes.';
+    Result := Format('pastree index: `%s` looks like a Pascal name - ' +
+      '`references` {"symbol":"%0:s"} for its resolved uses (form lines and ' +
+      'virtual calls too), `find`, `callers`, `source`.', [AFinding.Name]);
+  Result := Result + ' Not loaded? ToolSearch "pastree". Want the text ' +
+    'anyway? Repeat the command.';
 end;
 
 procedure Deny(const AReason: string);
