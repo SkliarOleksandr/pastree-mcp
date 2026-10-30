@@ -16,8 +16,11 @@ unit PasMcp.Version;
 interface
 
 const
-  PasTreeMcpVersion = '0.45.2';
-  // 0.129.0: NamedDeclRoot and ScopeOwner - the name lists' one rule, nested
+  PasTreeMcpVersion = '0.45.3';
+  // 0.145.0: nkAmbiguous and AmbigReadingOf - `F(Gen<A, B>(D))` is one node
+  // whose head is a call only when the model reads it as type arguments (a
+  // compile error without them).
+  // 0.129.0 before: NamedDeclRoot and ScopeOwner - the name lists' one rule, nested
   // routines and a body's types included (a compile error without them).
   // 0.124.0 before: a search by name completes itself in light mode (EnsureFind -
   // DemandFind; the units nobody loaded, NotLoadedFiles): `find` lists what
@@ -34,7 +37,7 @@ const
   // overload (0.121.0). An older PasTree has no workspace (a compile error)
   // or a workspace whose demand misses a family (a silent light gap).
   // 0.117.1 before: light mode, promotion, LintPromotions (0.31.0).
-  cMinPasTreeVersion = '0.129.0';
+  cMinPasTreeVersion = '0.145.0';
 
 // 'pastree-mcp 0.1.0 (PasTree 0.50.1), built 2026-09-25 15:00' - the first
 // line of every log.

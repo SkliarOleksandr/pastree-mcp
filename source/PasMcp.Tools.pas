@@ -7090,7 +7090,13 @@ begin
         Exit(ruCall)
       else
         Exit(ruValue);
-    // The base of a selector is evaluated: `GetList.Count`, `GetItems[0]`.
+    // `F(Gen<A, B>(D))` over a generic routine is its call; read as
+    // comparisons (`F(Fn < B, C > (D))`) the head is an operand, called
+    // only when it returns something (PasTree 0.145.0, spec 16.3.1).
+    nkAmbiguous:
+      if (LM.Tree.Nodes[LP].FirstChild = LE) and
+         (LM.AmbigReadingOf(LP) = arGeneric) then
+        Exit(ruCall);
     nkExprStmt, nkInherited, nkMember, nkIndex, nkDeref:
       Exit(ruCall);
     nkUnaryOp:
