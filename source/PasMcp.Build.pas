@@ -166,7 +166,15 @@ type
     KnownSince: TDateTime;
     KnownDefect: Boolean;
     Rebuilt: Boolean;      // the compile asked for a rebuild
-
+    // `compile` with `run` (BuildSnippet): the program run once built. Run
+    // False with RunError: not run, and why; RunOutput is stdout and stderr
+    // together, as they came.
+    Run: Boolean;
+    RunError: string;
+    RunExit: Cardinal;
+    RunTimedOut: Boolean;
+    RunMs: Int64;
+    RunOutput: string;
   end;
 
 var
@@ -216,22 +224,47 @@ type
     Shift: Integer;     // lines the wrapper adds above the code
     // The program dcc builds when the code is a unit: one that uses it.
     MainName, MainText: string;
+    // `file` with no project: the program or unit on disk, built where it
+    // is - its `uses ... in` paths are relative to it; '' for `code`.
+    SourcePath: string;
   end;
 
 // The code of `compile`'s `code` as files - or AError: a library or a
 // package, which is not built this way. On any thread.
 function SnippetSource(const ACode: string; out AError: string): TSnippet;
 
-// Where the code of ASpec's member is built: beside its own build, apart.
+// `compile`'s `file` with no project: the program or unit APath, built as
+// `code` is - or AError: not found, a library or a package, or no program
+// or unit at all. On any thread.
+function SnippetFile(const APath: string; out AError: string): TSnippet;
+
+// Where the code of ASpec's member is built: beside its own build, apart,
+// one directory per compiler version (`studio`) - .dcu files are not
+// portable between them.
 function SnippetDir(const ASpec: TBuildSpec): string;
+
+// No project found (pastree-mcp.dpr): a program of the server's own using
+// the RTL and VCL units an agent asks about, written for the working
+// directory ACwd under the build root, and its path - indexed in place of a
+// project, so `find`, `source` and the like answer over the installed
+// library (light, 0.2 s), and the member `compile` with `code` takes its
+// settings from.
+function NoProjectProgram(const ACwd: string): string;
 
 // Builds ASnippet with dcc directly, with the settings of ASpec's member as
 // the index read them: its platform's compiler (dcc32 for one that is not
 // Win64), its defines, unit search path, namespaces, aliases and `-$`
 // switches, then the registry search path - so the code may use the
-// member's own units. Compiled and linked, not run. On any thread.
+// member's own units. Compiled and linked; with ARun, a console program is
+// then run once (RUN_TIMEOUT_MS, its process tree killed past it). On any
+// thread.
 function BuildSnippet(const ASpec: TBuildSpec; const ASnippet: TSnippet;
-  const AProgress: TProc<string>; ACancel: TBuildCancel): TBuildResult;
+  const AProgress: TProc<string>; ACancel: TBuildCancel;
+  ARun: Boolean = False): TBuildResult;
+
+const
+  // `compile` with `run`: how long the program may run.
+  RUN_TIMEOUT_MS = 10000;
 
 implementation
 
@@ -302,6 +335,11 @@ begin
   if LRoot = '' then
     LRoot := TPath.Combine(TPath.GetTempPath, 'pastree-mcp');
   LM := AWs.Members[AMember];
+  // No project: beside the library program's directory, in the one named
+  // after the working directory (NoProjectProgram), where the log is too.
+  if AWs.NoProject <> '' then
+    Exit(TPath.Combine(ExtractFileDir(ExtractFileDir(AWs.ProjectFile)),
+      'build'));
   // The group's name for the reader, a hash of its path for two checkouts of
   // one group.
   Result := TPath.Combine(TPath.Combine(LRoot,
@@ -1663,6 +1701,10 @@ end;
 
 const
   SNIPPET_PROGRAM = 'PasMcpSnippet';
+  // The program put around statements, a body or a unit: a console one, so
+  // `run` can run it (Writeln in a GUI program is I/O error 105) - on the
+  // heading's line, which keeps the code's lines where they were.
+  SNIPPET_HEADING = 'program ' + SNIPPET_PROGRAM + '; {$APPTYPE CONSOLE}'#13#10;
 
 function SnippetSource(const ACode: string; out AError: string): TSnippet;
 var
@@ -1728,7 +1770,7 @@ begin
     Result.FileName := LName + '.pas';
     Result.Text := LCode;
     Result.MainName := SNIPPET_PROGRAM + '.dpr';
-    Result.MainText := 'program ' + SNIPPET_PROGRAM + ';'#13#10'uses ' + LName
+    Result.MainText := SNIPPET_HEADING + 'uses ' + LName
       + ' in ''' + LName + '.pas'';'#13#10'begin'#13#10'end.'#13#10;
   end
   else if LKind = 'program' then
@@ -1742,7 +1784,7 @@ begin
     // A program's body with no heading: declarations, then begin ... end.
     Result.Kind := 'program';
     Result.FileName := SNIPPET_PROGRAM + '.dpr';
-    Result.Text := 'program ' + SNIPPET_PROGRAM + ';'#13#10 + LCode;
+    Result.Text := SNIPPET_HEADING + LCode;
     Result.Shift := 1;
   end
   else
@@ -1766,20 +1808,171 @@ begin
     end;
     Result.Kind := 'statements';
     Result.FileName := SNIPPET_PROGRAM + '.dpr';
-    Result.Text := 'program ' + SNIPPET_PROGRAM + ';'#13#10
+    Result.Text := SNIPPET_HEADING
       + 'uses ' + LUses + ';'#13#10'begin'#13#10 + LCode + #13#10'end.'#13#10;
     Result.Shift := 3;
   end;
 end;
 
+function SnippetFile(const APath: string; out AError: string): TSnippet;
+var
+  LText: string;
+begin
+  Result := Default(TSnippet);
+  if not TFile.Exists(APath) then
+  begin
+    AError := 'no such file: ' + APath;
+    Exit;
+  end;
+  try
+    // BOM-aware: Delphi writes UTF-8 with one.
+    LText := TFile.ReadAllText(APath);
+  except
+    on E: Exception do
+    begin
+      AError := 'cannot read ' + APath + ': ' + E.Message;
+      Exit;
+    end;
+  end;
+  Result := SnippetSource(LText, AError);
+  if AError <> '' then
+    Exit;
+  if Result.Kind = 'statements' then
+  begin
+    AError := APath + ' is no program or unit - statements go in `code`';
+    Exit;
+  end;
+  Result.SourcePath := TPath.GetFullPath(APath);
+  if Result.Kind = 'unit' then
+    // The wrapper is written in the build directory: the unit by its path.
+    Result.MainText := SNIPPET_HEADING + 'uses ' + ChangeFileExt(
+      Result.FileName, '') + ' in ''' + Result.SourcePath + ''';'#13#10
+      + 'begin'#13#10'end.'#13#10;
+end;
+
 function SnippetDir(const ASpec: TBuildSpec): string;
 begin
-  Result := TPath.Combine(ASpec.Dir, 'snippet');
+  // Per platform too: `platform` builds a member's code for another one,
+  // and a Win32 .dcu is not a Win64 one.
+  Result := TPath.Combine(ASpec.Dir, 'snippet-' + ASpec.Studio.Version + '-'
+    + PlatformName(ASpec.Member.Platform));
+end;
+
+function NoProjectProgram(const ACwd: string): string;
+const
+  // Units every Delphi since 10 Seattle has; one an older Studio lacks only
+  // shows in `status` as a name that does not resolve.
+  LIBRARY_UNITS: array[0..33] of string = ('System.SysUtils',
+    'System.Classes', 'System.Types', 'System.Variants', 'System.Math',
+    'System.StrUtils', 'System.DateUtils', 'System.Character',
+    'System.Generics.Collections', 'System.Generics.Defaults', 'System.Rtti',
+    'System.TypInfo', 'System.SyncObjs', 'System.Threading',
+    'System.Diagnostics', 'System.IOUtils', 'System.RegularExpressions',
+    'System.JSON', 'System.Hash', 'System.NetEncoding', 'System.Zip',
+    'System.AnsiStrings', 'System.WideStrings', 'System.Win.Registry',
+    'System.Win.ComObj', 'Winapi.Windows', 'Winapi.Messages',
+    'Winapi.ActiveX', 'Vcl.Forms', 'Vcl.Controls', 'Vcl.StdCtrls',
+    'Vcl.ExtCtrls', 'Vcl.Graphics', 'Data.DB');
+var
+  LRoot, LText: string;
+begin
+  LRoot := BuildRoot;
+  if LRoot = '' then
+    LRoot := TPath.Combine(TPath.GetTempPath, 'pastree-mcp');
+  // Per working directory, one directory holding the log, the builds
+  // (MemberBuildDir) and, in a directory of its own - the group directory,
+  // whose Pascal files are the index's own - the program.
+  Result := TPath.Combine(TPath.Combine(LRoot, 'no-project-' + SafeName(
+    ExtractFileName(ExcludeTrailingPathDelimiter(ACwd))) + '-' +
+    THashFNV1a32.GetHashString(LowerCase(ACwd))), 'library\PasMcpLibrary.dpr');
+  LText := '// Written by pastree-mcp, started with no Delphi project: the '
+    + 'installed library it indexes.'#13#10'program PasMcpLibrary;'#13#10#13#10
+    + 'uses'#13#10'  ' + String.Join(','#13#10'  ', LIBRARY_UNITS) + ';'#13#10
+    + #13#10'begin'#13#10'end.'#13#10;
+  // Another server started in the same directory may hold it: the same text.
+  try
+    if not TFile.Exists(Result) or (TFile.ReadAllText(Result) <> LText) then
+    begin
+      TDirectory.CreateDirectory(TPath.GetDirectoryName(Result));
+      TFile.WriteAllText(Result, LText, TEncoding.UTF8);
+    end;
+  except
+    if not TFile.Exists(Result) then
+      raise;
+  end;
+end;
+
+// The PE header's subsystem: 3 is IMAGE_SUBSYSTEM_WINDOWS_CUI, a console
+// program. At the same offset of the optional header in PE32 and PE32+.
+function IsConsoleExe(const APath: string): Boolean;
+var
+  LStream: TFileStream;
+  LOffset: Integer;
+  LSig: Cardinal;
+  LSubsystem: Word;
+begin
+  Result := False;
+  try
+    LStream := TFileStream.Create(APath, fmOpenRead or fmShareDenyNone);
+    try
+      LStream.Position := $3C;
+      LStream.ReadBuffer(LOffset, SizeOf(LOffset));
+      LStream.Position := LOffset;
+      LStream.ReadBuffer(LSig, SizeOf(LSig));
+      if LSig <> $00004550 then   // 'PE'#0#0
+        Exit;
+      LStream.Position := LOffset + 4 + 20 + 68;
+      LStream.ReadBuffer(LSubsystem, SizeOf(LSubsystem));
+      Result := LSubsystem = 3;
+    finally
+      LStream.Free;
+    end;
+  except
+    Result := False;
+  end;
+end;
+
+// `run`: the program AResult built, once, from its directory - only a
+// console program, which ends on its own and writes where it can be read.
+procedure RunSnippet(var AResult: TBuildResult; AEnv: TStringList;
+  ACancel: TBuildCancel);
+var
+  LRun: TRunOutcome;
+  LSW: TStopwatch;
+begin
+  if not AResult.Ok then
+    AResult.RunError := 'it does not compile'
+  else if (AResult.OutputFile = '') or not SameText(ExtractFileExt(
+    AResult.OutputFile), '.exe') then
+    AResult.RunError := 'no program was built'
+  else if not IsConsoleExe(AResult.OutputFile) then
+    AResult.RunError := 'not a console program - only one with {$APPTYPE '
+      + 'CONSOLE} is run (a GUI one would wait for a window nobody closes)';
+  if AResult.RunError <> '' then
+    Exit;
+  LSW := TStopwatch.StartNew;
+  LRun := RunProcess(AResult.OutputFile, '', ExtractFileDir(
+    AResult.OutputFile), EnvironmentBlock(AEnv), RUN_TIMEOUT_MS, nil, ACancel);
+  AResult.RunMs := LSW.ElapsedMilliseconds;
+  if not LRun.Started then
+  begin
+    AResult.RunError := LRun.Error;
+    Exit;
+  end;
+  AResult.Run := True;
+  AResult.RunExit := LRun.ExitCode;
+  AResult.RunTimedOut := LRun.TimedOut;
+  AResult.RunOutput := DecodeOem(LRun.Output);
+  Log('run %s: exit %d in %d ms%s, %d bytes of output', [AResult.OutputFile,
+    LRun.ExitCode, AResult.RunMs, IfThen(LRun.TimedOut, ', timed out', ''),
+    Length(LRun.Output)]);
 end;
 
 function BuildSnippet(const ASpec: TBuildSpec; const ASnippet: TSnippet;
-  const AProgress: TProc<string>; ACancel: TBuildCancel): TBuildResult;
+  const AProgress: TProc<string>; ACancel: TBuildCancel;
+  ARun: Boolean): TBuildResult;
 var
+  LStart: TDateTime;
   LSpec: TBuildSpec;
   LDir, LSrc, LProjectDir, LMain, LError, LArgs, LOutText, LName: string;
   LEnv, LSaved: TStringList;
@@ -1834,10 +2027,16 @@ begin
       if TDirectory.Exists(LSrc) then
         TDirectory.Delete(LSrc, True);
       TDirectory.CreateDirectory(LSrc);
-      // With a BOM: dcc reads a file without one in the ANSI code page.
-      TFile.WriteAllText(TPath.Combine(LSrc, ASnippet.FileName), ASnippet.Text,
-        TEncoding.UTF8);
-      LMain := TPath.Combine(LSrc, ASnippet.FileName);
+      // With a BOM: dcc reads a file without one in the ANSI code page. A
+      // file on disk is built where it is, a unit through the wrapper here.
+      if ASnippet.SourcePath = '' then
+      begin
+        TFile.WriteAllText(TPath.Combine(LSrc, ASnippet.FileName),
+          ASnippet.Text, TEncoding.UTF8);
+        LMain := TPath.Combine(LSrc, ASnippet.FileName);
+      end
+      else
+        LMain := ASnippet.SourcePath;
       if ASnippet.MainName <> '' then
       begin
         LMain := TPath.Combine(LSrc, ASnippet.MainName);
@@ -1872,9 +2071,12 @@ begin
       LTick := nil;
     LBefore := DcuStamps(TPath.Combine(LDir, 'dcu'));
     try
+      LStart := Now;
       LSW := TStopwatch.StartNew;
-      LRun := RunProcess(DccExe(LSpec), LArgs, LSrc, EnvironmentBlock(LEnv),
-        BUILD_TIMEOUT_MS, LTick, ACancel);
+      // A file on disk: from its directory, as its project would be built.
+      LRun := RunProcess(DccExe(LSpec), LArgs, IfThen(ASnippet.SourcePath <>
+        '', ExtractFileDir(ASnippet.SourcePath), LSrc),
+        EnvironmentBlock(LEnv), BUILD_TIMEOUT_MS, LTick, ACancel);
       Result.Ms := LSW.ElapsedMilliseconds;
       if not LRun.Started then
       begin
@@ -1899,7 +2101,8 @@ begin
       finally
         LSaved.Free;
       end;
-      ReadMessages(LOutText.Split([#13#10, #10]), LSrc, Result);
+      ReadMessages(LOutText.Split([#13#10, #10]), IfThen(ASnippet.SourcePath
+        <> '', ExtractFileDir(ASnippet.SourcePath), LSrc), Result);
       LAfter := DcuStamps(TPath.Combine(LDir, 'dcu'));
       try
         for var LPair in LAfter do
@@ -1909,6 +2112,10 @@ begin
       finally
         LAfter.Free;
       end;
+      if Result.Ok then
+        Result.OutputFile := NewestOutput(LDir, LStart);
+      if ARun then
+        RunSnippet(Result, LEnv, ACancel);
     finally
       LBefore.Free;
     end;

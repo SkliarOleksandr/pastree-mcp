@@ -466,6 +466,17 @@ Check 'compile code program' (Block $b 'compile {"code":"type') @('compile code 
 Check 'compile code empty' (Block $b 'compile {"code":" "}') @('`code` is empty')
 Check 'compile code library' (Block $b 'compile {"code":"library') @('`code` is a program, a unit or statements - not a library')
 Check 'compile code rebuild' (Block $b 'compile {"code":"Writeln(1);","rebuild"') @('`code` is built alone - `base` and `rebuild` are for the members'' own builds')
+# `studio`: any installed RAD Studio for `code`, named by status; one that is
+# not installed is refused with the list, and the members' builds take none.
+Check 'status installed' (Block $b 'status') @('installed: ', ' - `compile` with `code` builds with any of them (`studio`)')
+Check 'compile code studio unknown' (Block $b 'compile {"code":"Writeln(1);","studio":"99"}') @('no installed RAD Studio is `99` - installed: ', '`studio` takes a BDS version (23.0)') @('compiles')
+Check 'compile studio no code' (Block $b 'compile {"member":"AppA","studio"') @('`studio` is for `code` - the members are built as their projects say')
+# `pastree`: PasTree's analysis of the same code beside dcc's, by the line of
+# the code as given; `platform` and `run`: a member's code built for another
+# platform and run, its output answered, and the exe named.
+Check 'compile code pastree' (Block $b 'compile {"code":"var S := ''a'';\nWriteln(NoSuchName);","member":"AppB","pastree"') @('does not compile - 1 error', "pastree (the index's analysis of the same code, ", "agrees with dcc`nboth report:`n  2  E2003 Undeclared identifier: 'NoSuchName'")
+Check 'compile code platform run' (Block $b 'compile {"code":"Writeln(SizeOf(Pointer));","member":"AppB","platform"') @('compile code (statements) - dcc64 ', 'the settings of AppB (Win64)', 'compiles - in ', 'exe: ', 'PasMcpSnippet.exe', "run: exit code 0 in ", "its output (stdout and stderr):`n8") @('not run')
+Check 'compile code exe' (Block $b 'compile {"code":"var X') @('exe: ', 'snippet-', 'PasMcpSnippet.exe - built to check the compile; `run: true` runs a console program')
 # form: a form's components, their events and the components they name,
 # with the lines of the form file. An inline frame's child under the frame,
 # its handler the host's; a data module; a binary form file, said so. An
@@ -836,15 +847,57 @@ Check 'discovery above' $out @("project $group found above the working directory
 $noProj = Join-Path ([IO.Path]::GetTempPath()) ('pastree-mcp-smoke-noproj-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force (Join-Path $noProj '.git') | Out-Null
 New-Item -ItemType Directory -Force (Join-Path $noProj 'sub') | Out-Null
+# None found: the server starts anyway (an exit before the handshake was
+# "Connection closed" in every repository without one) - the installed
+# library indexed, `compile` with `code` built as a bare program, and the
+# tools for a project's own code refused with the advice.
+$noProjBuild = $noProj + '-build'
+# Every installed RAD Studio but the newest, for `studio`: none on a machine
+# with one, and the row is skipped.
+$studios = @(Get-ChildItem 'HKCU:\Software\Embarcadero\BDS' -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match '^\d+\.\d+$' -and (Get-ItemProperty $_.PSPath).RootDir } | ForEach-Object { $_.PSChildName } | Sort-Object { [double]$_ } -Descending)
+$noProjCalls = Join-Path $noProj 'np.calls'
+$calls = "status`nfind {`"query`":`"TStringList.Sort`"}`nsource {`"symbol`":`"TStringList.Sort`"}`ndiagnostics {}`ncompile {}`ncompile {`"code`":`"var X := 1;\nWriteln(X);`"}`ncompile {`"code`":`"Writeln(1);`",`"member`":`"AppA`"}`n"
+if ($studios.Count -gt 1) { $calls += "compile {`"code`":`"Writeln(1);`",`"studio`":`"$($studios[1])`"}`n" }
+# dcc64 by default, dcc32 on request; run, a timeout killed, a GUI program
+# refused; statements' errors by the line given; a probe on disk by `file`,
+# with PasTree beside it.
+$calls += "compile {`"code`":`"Writeln(SizeOf(Pointer));`",`"run`":true}`n"
+$calls += "compile {`"code`":`"Writeln(SizeOf(Pointer));`",`"platform`":`"Win32`",`"run`":true}`n"
+$calls += "compile {`"code`":`"while True do Sleep(100);`",`"run`":true}`n"
+$calls += "compile {`"code`":`"program G; begin end.`",`"run`":true}`n"
+$calls += "compile {`"code`":`"var X := 1;\nWriteln(X);\nWriteln(Missing);`"}`n"
+$calls += "compile {`"file`":`"Probe.dpr`",`"pastree`":true}`n"
+$calls += "compile {`"file`":`"NoSuch.dpr`"}`n"
+[IO.File]::WriteAllText((Join-Path $noProj 'sub\Probe.dpr'), "program Probe;`r`n{`$APPTYPE CONSOLE}`r`nuses System.SysUtils;`r`nbegin`r`n  Writeln(SizeOf(Pointer));`r`n  Writeln(Bad);`r`nend.`r`n")
+[IO.File]::WriteAllText($noProjCalls, $calls)
 $ErrorActionPreference = 'Continue'
 Push-Location (Join-Path $noProj 'sub')
-try { $out = (& $Exe --log none --call status 2>&1 | ForEach-Object { "$_" }) -join "`n" }
+try { $out = (& $Exe --log none --build-dir $noProjBuild --script $noProjCalls 2>&1 | ForEach-Object { "$_" }) -join "`n" }
 finally { Pop-Location }
 $code = $LASTEXITCODE
 $ErrorActionPreference = 'Stop'
 Remove-Item -Recurse -Force $noProj -ErrorAction SilentlyContinue
-if ($code -ne 2) { Write-Host "FAIL [discovery none] exited with $code, not 2"; $script:failures++ }
-Check 'discovery none' $out @("no .groupproj or .dproj in $(Join-Path $noProj 'sub') or above it up to $noProj\ - pass --project <file>")
+Remove-Item -Recurse -Force $noProjBuild -ErrorAction SilentlyContinue
+if ($code -ne 0) { Write-Host "FAIL [discovery none] exited with $code, not 0"; $script:failures++ }
+$noProjWhy = "no .groupproj or .dproj in $(Join-Path $noProj 'sub') or above it up to $noProj\"
+Check 'discovery none' $out @("no project - $noProjWhy; indexing the installed library (", "project: none - $noProjWhy. The tools for a project's own code need one: start the server with ``--project <.groupproj|.dproj|.dpr>``", 'indexed instead: the installed RTL and VCL (', 'PasMcpLibrary.dpr', 'every `uses` name resolved') @('paths in results are relative to')
+Check 'no project find' $out @('System.Classes.pas:', 'TStringList.Sort (procedure)  procedure Sort; virtual;', 'CustomSort(StringListCompareStrings);')
+Check 'no project refused' $out @("``diagnostics`` needs a Delphi project, and there is none: $noProjWhy. The tools for a project's own code need one", "``compile`` without ``code`` or ``file`` needs a Delphi project, and there is none: ")
+Check 'no project compile code' $out @('compile code (statements) - dcc64 ', 'no project - a bare program (Win64, the default namespaces)', "compiles - in ", 'no errors, warnings or hints', 'no project: `code` is built as a bare program - `member` names a project''s')
+# One directory per working directory: the builds beside the library program.
+Check 'no project exe' $out @("\no-project-sub-", "\build\snippet-", "-Win64\exe\PasMcpSnippet.exe")
+Check 'no project run' $out @("run: exit code 0 in ", "its output (stdout and stderr):`n8`n", "its output (stdout and stderr):`n4`n", 'compile code (statements) - dcc32 ', 'TIMED OUT - killed after 10 s', 'not run: not a console program')
+Check 'no project lines' $out @("errors - 1:`n  3  E2003 Undeclared identifier: 'Missing'`n        Writeln(Missing);")
+Check 'no project file' $out @("Probe.dpr (program) - dcc64 ", "  6  E2003 Undeclared identifier: 'Bad'", "agrees with dcc`nboth report:`n  6  E2003 Undeclared identifier: 'Bad'", 'no such file: ', 'NoSuch.dpr')
+if ($studios.Count -gt 1) {
+    # BDS 22.0 is dcc 35.0, 23.0 is 36.0 (PasMcp.Studio.CompilerOf).
+    $dcc = @{ '22.0' = '35.0'; '23.0' = '36.0' }[$studios[1]]
+    if (-not $dcc) { $dcc = $studios[1] }
+    $at = $out.IndexOf("`"studio`":`"$($studios[1])`"")
+    $tail = if ($at -ge 0) { $out.Substring($at) } else { '' }
+    Check 'no project compile studio' $tail @("compile code (statements) - dcc64 $dcc ", 'compiles - in ')
+}
+else { Write-Host '  (one RAD Studio installed: `studio` with another not tried)' }
 
 # ---- a project outside the group: --also ----------------------------------------------
 # The client group's tests are a project no .groupproj lists: indexed, checked
@@ -1330,6 +1383,48 @@ try {
 finally {
     Remove-Item -Recurse -Force $copy -ErrorAction SilentlyContinue
     Remove-Item -Recurse -Force $mcpBuild -ErrorAction SilentlyContinue
+}
+
+# ---- MCP over stdio with no project ---------------------------------------------
+# Registered for every repository, started in one with no Delphi project: the
+# handshake answers (it exited with 2 before it, "Connection closed"), a tool
+# for the project's own code refuses, `compile` with `code` builds.
+Write-Host '--- MCP over stdio, no project'
+$npDir = Join-Path ([IO.Path]::GetTempPath()) ('pastree-mcp-smoke-noproj-' + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Force (Join-Path $npDir '.git') | Out-Null
+try {
+    $psi = New-Object Diagnostics.ProcessStartInfo
+    $psi.FileName = $Exe
+    $psi.Arguments = '--log none --build-dir "' + $npDir + '-build"'
+    $psi.WorkingDirectory = $npDir
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.StandardOutputEncoding = [Text.Encoding]::UTF8
+    $proc = [Diagnostics.Process]::Start($psi)
+    $null = $proc.StandardError.ReadToEndAsync()
+    $stdin = New-Object IO.StreamWriter($proc.StandardInput.BaseStream, (New-Object Text.UTF8Encoding($false)))
+    $stdin.AutoFlush = $true
+    $stdin.NewLine = "`n"
+    $script:notes = ''
+    $script:replies = @{}
+    $r = Rpc 1 'initialize' '{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}'
+    Check 'no project initialize' ($r | ConvertTo-Json -Depth 6) @('"name":  "pastree"', 'pastree-mcp started with no Delphi project: no .groupproj or .dproj in ', 'Compiler: dcc ')
+    $stdin.WriteLine('{"jsonrpc":"2.0","method":"notifications/initialized"}')
+    $r = Rpc 2 'tools/list' '{}'
+    Check 'no project tools/list' (($r.result.tools | ForEach-Object { $_.name }) -join ',') @('status', 'find', 'compile', 'diagnostics')
+    $r = Rpc 3 'tools/call' '{"name":"impact","arguments":{"symbol":"TStringList"}}'
+    Check 'no project impact' (ToolText $r) @('`impact` needs a Delphi project, and there is none: no .groupproj or .dproj in ', 'start the server with `--project')
+    if (-not $r.result.isError) { Write-Host 'FAIL no project impact not reported as isError'; $script:failures++ }
+    $r = Rpc 4 'tools/call' '{"name":"compile","arguments":{"code":"var S := ''a'';\nS := 1;"}}'
+    Check 'no project mcp compile code' (ToolText $r) @('no project - a bare program (Win64, the default namespaces)', 'does not compile - 1 error', "  2  E2010 Incompatible types: 'Char' and 'Integer'")
+    $stdin.Close()
+    if (-not $proc.WaitForExit(10000)) { Write-Host 'FAIL no-project server did not exit when stdin closed'; $script:failures++; $proc.Kill() }
+}
+finally {
+    Remove-Item -Recurse -Force $npDir -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force ($npDir + '-build') -ErrorAction SilentlyContinue
 }
 
 # ---- 4. the grep hook (`--hook`, PasMcp.Hook) ----------------------------------

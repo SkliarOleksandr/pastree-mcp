@@ -54,7 +54,7 @@ body analyzed too: 6.9 s / 2.8 GB and 12.5 s / 4.6 GB). Typical calls take
 | `impact` | What a change reaches, from `git diff` output or the declarations about to change: which projects of the group to build and test, the declarations touched with what they override and are called through, their callers or uses, the units a changed interface recompiles, and the calls a removed routine left behind - the form lines too: a handler's bindings, a component's lines, a removed handler still bound |
 | `rename_plan` | The edits of a rename as line:column positions to apply yourself (nothing is written): declaration, resolved uses, implementation headers, paired parameters, a property's redeclarations, and the form lines that bind it by name - a component's own handlers carried along, a method's overrides, interface implementations and bare-`inherited` namesakes taken along; a unit renamed in its header, `uses` items, `in '...'` paths and `.dproj` entries, with the file name it needs. Refused whole for a library or read-only file, a binary form file, a `uses` alias; lines in uncompiled branches listed to check |
 | `change_plan` | What a change of a routine's parameters or result must touch, before the edit: the signature lines that change together - its declaration and implementation header, its overrides and the method it overrides, the interface methods it implements and their implementations, a descendant's namesake calling it by a bare `inherited;`, the property it is an accessor of - and every call of any of them, by the routine it sits in. Said: the form lines binding it to an event (a changed signature builds and is called wrong at run time), the references handing it on to an event or a callback, the overloads a call may fall to, a signature a library fixes |
-| `compile` | Builds the members a change reaches with the real compiler (MSBuild over the `.dproj`) into a directory of its own, and answers with the errors - each with its routine and source line - and the warnings and hints the change added. Nothing of the project is overwritten and build events are not run; the first build starts from the developer's own `.dcu` files. With `code`: a program, a unit or statements built alone with a member's compiler and settings - whether a construct compiles here, errors by the line of the code given |
+| `compile` | Builds the members a change reaches with the real compiler (MSBuild over the `.dproj`) into a directory of its own, and answers with the errors - each with its routine and source line - and the warnings and hints the change added. Nothing of the project is overwritten and build events are not run; the first build starts from the developer's own `.dcu` files. With `code`: a program, a unit or statements built alone with a member's compiler and settings - whether a construct compiles here, errors by the line of the code given; `studio` builds it with another installed RAD Studio (`23.0`, `Delphi 12`), which `status` lists, `platform` with dcc32 or dcc64; `run: true` runs a console program for up to 10 s and answers its output and exit code; `pastree: true` puts PasTree's analysis of the same code beside dcc's errors and says where they disagree. The answer names the exe |
 | `related` | `descendants`, `overrides`, `implementations`, `assignments`, `creations`, `destructions` |
 | `outline` | The structure of one unit with line numbers, without reading it; the unit by `file` or by name (`unit`) |
 | `form` | The component tree of one form, merged with its ancestors' form files: each component's class, the method each event runs, the components it names - and a handler or a component a line names that does not exist; of a form class with no form file of its own, the ancestor's it loads |
@@ -124,8 +124,25 @@ directory, else the only `.dproj`; a directory holding neither sends it up to
 the parent, until the repository root (a `.git` directory or file). So a
 session opened in a subdirectory of the project gets the project's index. A
 directory with several `.groupproj` (or several `.dproj` and no `.groupproj`)
-stops the walk with an error - that repository needs its own `.mcp.json` with
+stops the walk - that repository needs its own `.mcp.json` with
 `--project`, which overrides the user-scope registration of the same name.
+
+Where the walk finds no project, or several, the server starts without one
+(0.46.0; it exited before the handshake, and Claude Code showed "Connection
+closed" in every repository without a Delphi project). It indexes the
+installed RTL and VCL instead - a program of its own using 34 of their
+units; 0.2 s, 56 MB - so `find`, `definition`, `source`, `members`,
+`references`, `callers`, `callees`, `related` and `outline` answer over the
+library, and `compile` with `code` builds as a bare program (Win64 unless
+`platform` or `--platform`, the default namespaces) with any installed
+compiler; `file` builds a program or unit on disk the same way, relative to
+the working directory. Everything is under
+`%TEMP%\pastree-mcp\no-project-<dir>-<hash>\`: `library\` (the program),
+`build\` (the exe of each `code`) and `pastree-mcp.log`. `status` says why there is
+no project and that `--project` gives one; the other tools refuse with the
+same. A repository of Pascal notes, such as the language reference, needs
+nothing more to check a claim against dcc.
+
 The tools then appear to the agent as
 `mcp__pastree__find` and so on, together with instructions on when to prefer
 them over grep. A new session is needed after registering or rebuilding -
@@ -176,7 +193,7 @@ no log, only a small state file per session under
 
 | Option | Default | |
 | --- | --- | --- |
-| `--project <file>` | discovered | `.groupproj`, `.dproj`, `.dpr` or `.dpk` |
+| `--project <file>` | discovered | `.groupproj`, `.dproj`, `.dpr` or `.dpk`; none discovered: the installed library, no project (above) |
 | `--also <file>` | none | A `.dproj` or `.dpr` outside the group, indexed, checked and built as a member of it (`status` marks it); repeats. Relative to the project's directory. For a tests project no `.groupproj` lists |
 | `--studio <ver>` | `$BDS`, else newest | RAD Studio registry version: `37.0`, `23.0` |
 | `--platform <p>` | per project | Override every member's platform: `Win32`, `Win64` |

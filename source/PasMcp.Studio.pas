@@ -54,6 +54,16 @@ function FindStudio(const AWanted: string): TMcpStudio;
 // Every installed version, highest first ('37.0', '23.0', ...).
 function InstalledStudioVersions: TArray<string>;
 
+// The installed version AText names - a BDS version ('23.0', '23'), a dcc
+// version ('36.0') or a Delphi one ('Delphi 12', '12 Athens', 'Athens') -
+// or '' when none does. For `compile`'s `studio`.
+function StudioNamed(const AText: string): string;
+
+// The installed versions, highest first, each with its compiler and Delphi
+// version: '37.0 (dcc 37.0, Delphi 13 Florence), 23.0 (dcc 36.0, Delphi 12
+// Athens)'; 'none' when none is.
+function InstalledStudiosText: string;
+
 // What an agent writing code for AStudio's compiler must know of the
 // language: the Delphi version, the constructs newer versions added that
 // this one rejects, how to try one, and where the language reference is.
@@ -82,6 +92,17 @@ function VersionNumber(const AKey: string): Double;
 begin
   if not TryStrToFloat(AKey, Result, TFormatSettings.Invariant) then
     Result := -1;
+end;
+
+// BDS 22.0 is dcc 35.0 and 23.0 is 36.0; the numbers met again at 13
+// (37.0). The same mapping as the demo's ApplyStudio.
+function CompilerOf(const AVersion: string): Double;
+begin
+  Result := VersionNumber(AVersion);
+  if SameValue(Result, 22.0) then
+    Result := 35.0
+  else if SameValue(Result, 23.0) then
+    Result := 36.0;
 end;
 
 function InstalledStudioVersions: TArray<string>;
@@ -158,13 +179,52 @@ begin
   if Result.Version = '' then
     Exit;
   Result.Root := RootOf(Result.Version);
-  // BDS 22.0 is dcc 35.0 and 23.0 is 36.0; the numbers met again at 13
-  // (37.0). The same mapping as the demo's ApplyStudio.
-  Result.CompilerVersion := VersionNumber(Result.Version);
-  if SameValue(Result.CompilerVersion, 22.0) then
-    Result.CompilerVersion := 35.0
-  else if SameValue(Result.CompilerVersion, 23.0) then
-    Result.CompilerVersion := 36.0;
+  Result.CompilerVersion := CompilerOf(Result.Version);
+end;
+
+function StudioNamed(const AText: string): string;
+var
+  LText: string;
+  LNumber: Double;
+begin
+  Result := '';
+  LText := Trim(AText);
+  if LText = '' then
+    Exit;
+  // A BDS version first: 37.0 is both 13's BDS and its dcc version.
+  if TryStrToFloat(LText, LNumber, TFormatSettings.Invariant) then
+  begin
+    for var LV in InstalledStudioVersions do
+      if SameValue(VersionNumber(LV), LNumber) then
+        Exit(LV);
+    for var LV in InstalledStudioVersions do
+      if SameValue(CompilerOf(LV), LNumber) then
+        Exit(LV);
+  end;
+  // 'Delphi 12', '12 Athens', 'Athens': the words of its Delphi name.
+  if not StartsText('Delphi ', LText) then
+    LText := 'Delphi ' + LText;
+  for var LV in InstalledStudioVersions do
+    if (DelphiName(CompilerOf(LV)) <> '') and (StartsText(LText + ' ',
+      DelphiName(CompilerOf(LV)) + ' ') or EndsText(' ' + Copy(LText, 8,
+      MaxInt), DelphiName(CompilerOf(LV)))) then
+      Exit(LV);
+end;
+
+function InstalledStudiosText: string;
+var
+  LName: string;
+begin
+  Result := '';
+  for var LV in InstalledStudioVersions do
+  begin
+    LName := DelphiName(CompilerOf(LV));
+    Result := Result + IfThen(Result <> '', ', ', '') + Format('%s (dcc %.1f%s)',
+      [LV, CompilerOf(LV), IfThen(LName <> '', ', ' + LName, '')],
+      TFormatSettings.Invariant);
+  end;
+  if Result = '' then
+    Result := 'none';
 end;
 
 function TMcpStudio.Found: Boolean;

@@ -119,6 +119,15 @@ type
     Size: Int64;
   end;
 
+  // `compile`'s `pastree`: one diagnostic PasTree reports in the code.
+  TMcpSnippetDiag = record
+    FileName: string;
+    Line: Integer;
+    Col: Integer;
+    Code: string;
+    Msg: string;
+  end;
+
   TMcpAnalysis = class
   public
     Index: Integer;
@@ -170,6 +179,8 @@ type
     FExtraRoots: TArray<string>;
     FStudioWanted: string;
     FStudio: TMcpStudio;
+    // Started with no Delphi project (SetNoProject): why, '' when there is one.
+    FNoProject: string;
     // Light mode (SPEC 9.9): on unless --no-light. FLightDirs: the trees
     // --light names, full paths. FLightNotOwn: those of them under the group
     // directory or an --also root and outside every analysis' project
@@ -260,6 +271,21 @@ type
     // Light mode: AOn False is --no-light; ADirs the --light trees, relative
     // to the project's directory or absolute. Before Load.
     procedure SetLight(AOn: Boolean; const ADirs: TArray<string>);
+    // No Delphi project was found, AReason says where it was looked for; the
+    // project file is the server's own program of the installed library
+    // (PasMcp.Build.NoProjectProgram). Before Load.
+    procedure SetNoProject(const AReason: string);
+    property NoProject: string read FNoProject;
+    // `compile`'s `pastree` (SPEC 9.4): AMain analyzed by PasTree as a
+    // program of its own - configured as member AMember's analysis, but for
+    // APlatform and AStudio's compiler, AExtraSearch after its search path -
+    // and the diagnostics of AFiles (full paths). A project of its own,
+    // freed after: the index is not touched; its parses are lent when the
+    // configuration is the analysis' own. On the thread that runs the tools.
+    function SnippetDiagnostics(AMember: Integer; const AMain: string;
+      const AFiles, AExtraSearch: TArray<string>; APlatform: TPasPlatform;
+      const AStudio: TMcpStudio; out AUnits: Integer;
+      out AMs: Int64): TArray<TMcpSnippetDiag>;
     property LightOn: Boolean read FLightOn;
     // A tool call starts (CallTool): its tally cleared; ACancelled (nil:
     // none) is what every workspace query polls.
@@ -343,6 +369,10 @@ type
 
 function StampOf(const APath: string; out AStamp: TMcpFileStamp): Boolean;
 
+// What a server started with no project says of it: how to give it one, and
+// what answers meanwhile.
+function NoProjectAdvice: string;
+
 implementation
 
 uses
@@ -370,6 +400,18 @@ begin
   AStamp.Size := Int64(LData.nFileSizeHigh) shl 32 or LData.nFileSizeLow;
   if FileTimeToSystemTime(LData.ftLastWriteTime, LSys) then
     AStamp.Time := SystemTimeToDateTime(LSys);
+end;
+
+function NoProjectAdvice: string;
+begin
+  Result := 'The tools for a project''s own code need one: start the server '
+    + 'with `--project <.groupproj|.dproj|.dpr>` (for this repository alone: '
+    + '`claude mcp add --scope local pastree -- <path>\pastree-mcp.exe '
+    + '--project <file>`). Without one, `compile` with `code` builds a '
+    + 'program, a unit or statements with any installed compiler (`studio`), '
+    + 'and `find`, `definition`, `source`, `members`, `references`, '
+    + '`callers`, `callees`, `related` and `outline` answer over the '
+    + 'installed RTL and VCL';
 end;
 
 function SameStamp(const A, B: TMcpFileStamp): Boolean;
@@ -709,9 +751,16 @@ begin
   end;
 end;
 
+procedure TMcpWorkspace.SetNoProject(const AReason: string);
+begin
+  FNoProject := AReason;
+end;
+
 function TMcpWorkspace.IndexedProjects: string;
 begin
-  if Length(FMembers) = 1 then
+  if FNoProject <> '' then
+    Result := 'the installed RTL and VCL (no project)'
+  else if Length(FMembers) = 1 then
     Result := TPath.GetFileName(FMembers[0].ProjectFile)
   else
   begin
@@ -1295,6 +1344,95 @@ begin
     Result.Free;
     raise;
   end;
+end;
+
+function TMcpWorkspace.SnippetDiagnostics(AMember: Integer;
+  const AMain: string; const AFiles, AExtraSearch: TArray<string>;
+  APlatform: TPasPlatform; const AStudio: TMcpStudio; out AUnits: Integer;
+  out AMs: Int64): TArray<TMcpSnippetDiag>;
+var
+  LA: TMcpAnalysis;
+  LProj, LDonor: TPasSemaProject;
+  LSearch: TArray<string>;
+  LSW: TStopwatch;
+  LM: TPasSemaModel;
+  LD: TMcpSnippetDiag;
+  LSame: Boolean;
+begin
+  Result := nil;
+  AUnits := 0;
+  AMs := 0;
+  if (AMember < 0) or (AMember > High(FMembers)) or
+    (FMembers[AMember].Analysis < 0) or
+    (FMembers[AMember].Analysis >= FAnalyses.Count) then
+    raise Exception.Create('the member has no analysis to configure it from');
+  LA := FAnalyses[FMembers[AMember].Analysis];
+  LSearch := LA.SearchPaths;
+  AddUnique(LSearch, AExtraSearch);
+  LSW := TStopwatch.StartNew;
+  if AStudio.Found then
+    LProj := TPasSemaProject.Create(APlatform, LSearch, LA.Defines,
+      AStudio.CompilerVersion)
+  else
+    LProj := TPasSemaProject.Create(APlatform, LSearch, LA.Defines);
+  try
+    // As NewProject configures an analysis.
+    LProj.SetNamespaces(LA.Namespaces);
+    for var LAl in LA.Aliases do
+      LProj.AddUnitAlias(LAl.Alias, LAl.UnitName);
+    LProj.SetProjectDir(LA.ProjectDir);
+    LProj.SwitchStart := PasStartOptState(LA.Switches);
+    LProj.ConsoleTarget := LA.ConsoleTarget;
+    for var LPin in LA.Pins.Values do
+      LProj.PinUnitFile(LPin);
+    if (LA.WS = nil) or not LA.WS.Escalated then
+      LProj.LightPaths := LA.LightTrees;
+    LProj.ReportUnresolvedMembers := True;
+    // The analysis' parses, where it is configured the same: a member's
+    // closure is not parsed again for one statement.
+    LSame := (APlatform = LA.Platform) and (Length(LSearch) =
+      Length(LA.SearchPaths)) and (not AStudio.Found or not FStudio.Found or
+      SameValue(AStudio.CompilerVersion, FStudio.CompilerVersion));
+    LDonor := nil;
+    if LSame and (LA.WS <> nil) then
+      LDonor := LA.WS.Lend;
+    try
+      if LDonor <> nil then
+        LProj.AdoptParseDonor(LDonor);
+      LProj.AnalyzeStaged([AMain], []);
+    finally
+      if LDonor <> nil then
+        LA.WS.EndLend;
+    end;
+    AUnits := LProj.ModelCount;
+    for var LMid := 0 to LProj.ModelCount - 1 do
+    begin
+      if IndexText(LProj.ModelFile(LMid), AFiles) < 0 then
+        Continue;
+      LM := LProj.Model(LMid);
+      for var LDiag in LM.Diags do
+      begin
+        if LDiag.Msg = '' then
+          Continue;
+        LD := Default(TMcpSnippetDiag);
+        if (LDiag.FileId >= 0) and (LDiag.FileId <=
+          High(LM.Tree.Source.FileNames)) then
+          LD.FileName := LM.Tree.Source.FileNames[LDiag.FileId]
+        else
+          LD.FileName := LProj.ModelFile(LMid);
+        LD.Line := LDiag.Line;
+        LD.Col := LDiag.Col;
+        LD.Code := LDiag.Code;
+        LD.Msg := LDiag.Msg;
+        Result := Result + [LD];
+      end;
+    end;
+  finally
+    LProj.Free;
+  end;
+  AMs := LSW.ElapsedMilliseconds;
+  Log('pastree over the code: %d units in %d ms, %d diagnostics', [AUnits,
+    AMs, Length(Result)]);
 end;
 
 procedure TMcpWorkspace.DemoteLibraryText(AProject: TPasSemaProject);
@@ -1956,8 +2094,18 @@ begin
     LSb.AppendLine(Format('server: %s; pid %d, started %s', [PasMcpVersionBanner,
       GetCurrentProcessId, FormatDateTime('yyyy-mm-dd hh:nn', ProcessStarted)]));
     LSb.AppendLine('log: ' + IfThen(LogFile = '', 'none (stderr only)', LogFile));
-    LSb.AppendLine('project: ' + FProjectFile);
-    LSb.AppendLine('paths in results are relative to: ' + FRoot);
+    if FNoProject <> '' then
+    begin
+      LSb.AppendLine('project: none - ' + FNoProject + '. ' + NoProjectAdvice
+        + '.');
+      LSb.AppendLine('indexed instead: the installed RTL and VCL (' +
+        FProjectFile + ')');
+    end
+    else
+    begin
+      LSb.AppendLine('project: ' + FProjectFile);
+      LSb.AppendLine('paths in results are relative to: ' + FRoot);
+    end;
     if FStudio.Found then
     begin
       LSb.AppendLine(Format('RAD Studio %s (dcc %.1f) at %s', [FStudio.Version,
@@ -1966,6 +2114,8 @@ begin
     end
     else
       LSb.AppendLine('RAD Studio: not found (RTL/VCL do not resolve)');
+    LSb.AppendLine('installed: ' + InstalledStudiosText + ' - `compile` with '
+      + '`code` builds with any of them (`studio`)');
     if FPolicy = gpShared then
       LSb.AppendLine('group policy: shared (one analysis per platform)')
     else

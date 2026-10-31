@@ -20,7 +20,8 @@ program pastree_mcp;
 
   Options: --project <.groupproj|.dproj|.dpr> (default: the only .groupproj,
   else the only .dproj, in the current directory or the nearest one above it
-  up to the repository root), --also <.dproj|.dpr> (repeats: a project outside
+  up to the repository root; none: the installed library indexed, and the
+  tools for a project's own code refuse), --also <.dproj|.dpr> (repeats: a project outside
   the group indexed and built with it - relative to the project's directory),
   --studio <BDS version>,
   --platform <Win32|Win64>, --config <Debug|Release>, --groups <shared|strict>,
@@ -66,6 +67,9 @@ type
 
 var
   GProject, GStudio, GPlatform, GConfig, GLog: string;
+  // No project found: why (DiscoverProject); GProject is then the server's
+  // own program of the installed library.
+  GNoProject: string;
   GAlso: TArray<string>;
   GLight: TArray<string>;
   GNoLight: Boolean;
@@ -86,24 +90,35 @@ end;
   ambiguous one fails rather than being passed over for a project above it
   that the session is not in. The walk stops at the repository root (a `.git`
   directory, or the `.git` file of a worktree or submodule) - above it is
-  another repository, or none - and at the drive root. }
+  another repository, or none - and at the drive root.
+
+  None found, or none to choose: '' and GNoProject says why. The server then
+  starts without a project rather than exit - an exit before the handshake
+  is "Connection closed" in every repository without a Delphi project, and
+  `compile` with `code` needs none. }
 function DiscoverProject: string;
 var
   LDir, LUp: string;
   LFound: TArray<string>;
 begin
+  Result := '';
   // With its delimiter throughout: `C:` alone is the drive's current directory.
   LDir := IncludeTrailingPathDelimiter(GetCurrentDir);
   repeat
     LFound := TDirectory.GetFiles(LDir, '*.groupproj');
     if Length(LFound) > 1 then
-      Fail('several .groupproj files in ' + LDir + ' - pass --project');
+    begin
+      GNoProject := 'several .groupproj files in ' + LDir;
+      Exit;
+    end;
     if Length(LFound) = 0 then
     begin
       LFound := TDirectory.GetFiles(LDir, '*.dproj');
       if Length(LFound) > 1 then
-        Fail('several .dproj files and no .groupproj in ' + LDir +
-          ' - pass --project');
+      begin
+        GNoProject := 'several .dproj files and no .groupproj in ' + LDir;
+        Exit;
+      end;
     end;
     if Length(LFound) = 1 then
     begin
@@ -120,9 +135,8 @@ begin
       Break;   // the drive root, or a share's
     LDir := LUp;
   until False;
-  Fail('no .groupproj or .dproj in ' + GetCurrentDir + ' or above it up to ' +
-    LDir + ' - pass --project <file>');
-  Result := '';
+  GNoProject := 'no .groupproj or .dproj in ' + GetCurrentDir +
+    ' or above it up to ' + LDir;
 end;
 
 procedure AddScript(const APath: string);
@@ -218,6 +232,14 @@ begin
   end;
   if GProject = '' then
     GProject := DiscoverProject;
+  if GProject = '' then
+  begin
+    GProject := NoProjectProgram(GetCurrentDir);
+    // Code tried with no project is built with dcc64 unless --platform: the
+    // language reference's claims are checked on it.
+    if GPlatform = '' then
+      GPlatform := 'Win64';
+  end;
   GProject := TPath.GetFullPath(GProject);
   if not TFile.Exists(GProject) then
     Fail('no such project: ' + GProject);
@@ -298,7 +320,12 @@ begin
     ParseArgs;
     if GLog = '' then
     begin
-      if Length(GCalls) = 0 then
+      // No project: in the directory of the working directory's builds,
+      // above the library program's (NoProjectProgram).
+      if (Length(GCalls) = 0) and (GNoProject <> '') then
+        SetLogFile(TPath.Combine(ExtractFileDir(ExtractFileDir(GProject)),
+          'pastree-mcp.log'))
+      else if Length(GCalls) = 0 then
         SetLogFile(TPath.Combine(TPath.GetDirectoryName(GProject),
           TPath.GetFileNameWithoutExtension(GProject) + '-pastree-mcp.log'));
     end
@@ -306,9 +333,16 @@ begin
       SetLogFile(GLog);
     Log(PasMcpVersionBanner);
     CheckPasTreeVersion;
-    Log('project %s', [GProject]);
+    if GNoProject <> '' then
+      Log('no project - %s; indexing the installed library (%s), `compile` '
+        + 'with `code` builds without one; --project <file> names one',
+        [GNoProject, GProject])
+    else
+      Log('project %s', [GProject]);
     GWs := TMcpWorkspace.Create(GProject, GStudio, GPlatform, GConfig, GPolicy,
       GAlso);
+    if GNoProject <> '' then
+      GWs.SetNoProject(GNoProject);
     GWs.SetLight(not GNoLight, GLight);
     if Length(GCalls) > 0 then
       RunCli

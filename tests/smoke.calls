@@ -184,6 +184,10 @@ compile {"code":"type\n  TR = record\n    A: Integer;\n  end;\nvar R: TR;\nbegin
 compile {"code":" "}
 compile {"code":"library L; begin end."}
 compile {"code":"Writeln(1);","rebuild":true}
+compile {"code":"Writeln(1);","studio":"99"}
+compile {"member":"AppA","studio":"37.0"}
+compile {"code":"var S := 'a';\nWriteln(NoSuchName);","member":"AppB","pastree":true}
+compile {"code":"Writeln(SizeOf(Pointer));","member":"AppB","platform":"Win64","run":true}
 form {"file":"AppF/uMainForm.pas"}
 form {"symbol":"TfrmChild"}
 form {"file":"AppF/uData.dfm"}

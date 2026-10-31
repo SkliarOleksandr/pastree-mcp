@@ -18721,13 +18721,18 @@ end;
 // compiler and settings, and what dcc said - by the line of the code as
 // given, not of the program wrapped around it.
 function SnippetAnswer(AWs: TMcpWorkspace; const AR: TBuildResult;
-  const ASnippet: TSnippet; const AWhy: string; ALimit: Integer): string;
+  const ASnippet: TSnippet; const AWhy: string; ALimit: Integer;
+  ARun: Boolean): string;
+const
+  // A program's output an agent reads: a loop printing far more is cut.
+  MAX_RUN_OUTPUT = 8000;
 var
+  LOutput: string;
   LSb: TStringBuilder;
   LM: TMcpMember;
   LCodeLines: TArray<string>;
   LErrors, LWarnings, LHints: TArray<TBuildMsg>;
-  LSrc, LCodeFile, LMainFile, LDelphi, LOwnUnit: string;
+  LSrc, LCodeFile, LMainFile, LDelphi, LOwnUnit, LSettings: string;
   LShown, LCut, LOthers: Integer;
 
   procedure AddRows(const ATitle: string; const AMsgs: TArray<TBuildMsg>);
@@ -18771,6 +18776,8 @@ begin
   LM := AR.Spec.Member;
   LSrc := TPath.Combine(AR.Dir, 'src');
   LCodeFile := TPath.Combine(LSrc, ASnippet.FileName);
+  if ASnippet.SourcePath <> '' then
+    LCodeFile := ASnippet.SourcePath;
   LMainFile := IfThen(ASnippet.MainName <> '', TPath.Combine(LSrc,
     ASnippet.MainName), '');
   LCodeLines := ASnippet.Code.Split([#13#10]);
@@ -18789,12 +18796,19 @@ begin
     end;
   LSb := TStringBuilder.Create;
   try
-    LSb.AppendLine(Format('compile code (%s) - %s %.1f%s, the settings of %s '
-      + '(%s%s)%s', [ASnippet.Kind, IfThen(LM.Platform = pfWin64, 'dcc64',
-      'dcc32'), AR.Spec.Studio.CompilerVersion, IfThen(LDelphi <> '', ' ('
-      + LDelphi + ')', ''), LM.Name, PlatformName(LM.Platform),
-      IfThen(LM.Config <> '', ' ' + LM.Config, ''), IfThen(AWhy <> '', ', '
-      + AWhy, '')], TFormatSettings.Invariant));
+    if AWs.NoProject <> '' then
+      LSettings := Format('no project - a bare program (%s, the default '
+        + 'namespaces)',
+        [PlatformName(LM.Platform)])
+    else
+      LSettings := Format('the settings of %s (%s%s)%s', [LM.Name,
+        PlatformName(LM.Platform), IfThen(LM.Config <> '', ' ' + LM.Config,
+        ''), IfThen(AWhy <> '', ', ' + AWhy, '')]);
+    LSb.AppendLine(Format('compile %s (%s) - %s %.1f%s, %s', [IfThen(
+      ASnippet.SourcePath <> '', ASnippet.SourcePath, 'code'), ASnippet.Kind,
+      IfThen(LM.Platform = pfWin64, 'dcc64', 'dcc32'),
+      AR.Spec.Studio.CompilerVersion, IfThen(LDelphi <> '', ' (' + LDelphi +
+      ')', ''), LSettings], TFormatSettings.Invariant));
     if not (LM.Platform in [pfWin32, pfWin64]) then
       LSb.AppendLine(Format('(%s targets %s: the code is built for Win32, '
         + 'with its defines and switches)', [LM.Name,
@@ -18807,8 +18821,9 @@ begin
     if AR.TimedOut then
       LSb.AppendLine(Format('TIMED OUT after %d s', [AR.Ms div 1000]))
     else if AR.Ok and (Length(LErrors) = 0) then
-      LSb.AppendLine(Format('compiles - in %.1f s, compiled and linked, not '
-        + 'run', [AR.Ms / 1000], TFormatSettings.Invariant))
+      LSb.AppendLine(Format('compiles - in %.1f s, compiled and linked%s',
+        [AR.Ms / 1000, IfThen(ARun, '', ', not run')],
+        TFormatSettings.Invariant))
     else
       LSb.AppendLine(Format('does not compile - %s, in %.1f s',
         [Plural(Length(LErrors), 'error'), AR.Ms / 1000],
@@ -18831,6 +18846,124 @@ begin
       LSb.AppendLine('no errors, warnings or hints')
     else if LCut > 0 then
       LSb.AppendLine(Format('... %d more (raise `limit`)', [LCut]));
+    if AR.OutputFile <> '' then
+      LSb.AppendLine('exe: ' + AR.OutputFile + IfThen(ARun, '', ' - built to '
+        + 'check the compile; `run: true` runs a console program'));
+    if ARun then
+      if not AR.Run then
+        LSb.AppendLine('not run: ' + AR.RunError)
+      else
+      begin
+        LOutput := AR.RunOutput.TrimRight;
+        LSb.AppendLine(Format('run: %s%s', [IfThen(AR.RunTimedOut,
+          Format('TIMED OUT - killed after %d s', [RUN_TIMEOUT_MS div 1000]),
+          Format('exit code %d in %.1f s', [AR.RunExit, AR.RunMs / 1000],
+          TFormatSettings.Invariant)),
+          IfThen(LOutput = '', ', no output', ', its output (stdout and '
+          + 'stderr):')], TFormatSettings.Invariant));
+        if Length(LOutput) > MAX_RUN_OUTPUT then
+          LOutput := Copy(LOutput, 1, MAX_RUN_OUTPUT) + sLineBreak + Format(
+            '... cut at %d of %d characters', [MAX_RUN_OUTPUT,
+            Length(AR.RunOutput.TrimRight)]);
+        if LOutput <> '' then
+          LSb.AppendLine(LOutput);
+      end;
+    Result := LSb.ToString.TrimRight;
+  finally
+    LSb.Free;
+  end;
+end;
+
+// `compile` with `pastree`: what PasTree's analysis says of the same code
+// beside what dcc said, by the line of the code as given - the lines where
+// both report the same code, and those only one of them reports.
+function PasTreeSection(const AR: TBuildResult; const ASnippet: TSnippet;
+  const ACodeFile: string; const ADiags: TArray<TMcpSnippetDiag>;
+  AUnits: Integer; AMs: Int64): string;
+type
+  TRow = record
+    Line: Integer;
+    Code, Text: string;
+    Used: Boolean;
+  end;
+var
+  LDcc, LPt: TArray<TRow>;
+  LRow: TRow;
+  LSb: TStringBuilder;
+  LAgree, LOnlyDcc, LOnlyPt: TArray<string>;
+  LCodeLines: TArray<string>;
+
+  function Place(ALine: Integer): string;
+  begin
+    if (ALine >= 1) and (ALine <= Length(LCodeLines)) then
+      Result := Format('%d  ', [ALine])
+    else
+      Result := '(the program around the code)  ';
+  end;
+
+  function SameCode(const A, B: string): Boolean;
+  begin
+    Result := (A = '') or (B = '') or SameText(A, B);
+  end;
+
+begin
+  LCodeLines := ASnippet.Code.Split([#13#10]);
+  for var LMsg in AR.Messages do
+    // Errors: PasTree's analysis checks what binds, not what dcc warns of.
+    if SameText(LMsg.FileName, ACodeFile) and (LMsg.Kind = bmError) then
+    begin
+      LRow := Default(TRow);
+      LRow.Line := LMsg.Line - ASnippet.Shift;
+      LRow.Code := LMsg.Code;
+      LRow.Text := LMsg.Code + IfThen(LMsg.Code <> '', ' ', '') + LMsg.Text;
+      LDcc := LDcc + [LRow];
+    end;
+  for var LD in ADiags do
+    if SameText(LD.FileName, ACodeFile) then
+    begin
+      LRow := Default(TRow);
+      LRow.Line := LD.Line - ASnippet.Shift;
+      LRow.Code := LD.Code;
+      LRow.Text := IfThen((LD.Code <> '') and not StartsText(LD.Code, LD.Msg),
+        LD.Code + ' ', '') + LD.Msg;
+      LPt := LPt + [LRow];
+    end;
+  // A pair: the same line, the same code (or one without a code).
+  for var LI := 0 to High(LDcc) do
+  begin
+    for var LJ := 0 to High(LPt) do
+      if not LPt[LJ].Used and (LPt[LJ].Line = LDcc[LI].Line) and
+        SameCode(LDcc[LI].Code, LPt[LJ].Code) then
+      begin
+        LPt[LJ].Used := True;
+        LDcc[LI].Used := True;
+        LAgree := LAgree + ['  ' + Place(LDcc[LI].Line) + LDcc[LI].Text];
+        Break;
+      end;
+    if not LDcc[LI].Used then
+      LOnlyDcc := LOnlyDcc + ['  ' + Place(LDcc[LI].Line) + LDcc[LI].Text];
+  end;
+  for var LJ := 0 to High(LPt) do
+    if not LPt[LJ].Used then
+      LOnlyPt := LOnlyPt + ['  ' + Place(LPt[LJ].Line) + LPt[LJ].Text];
+  LSb := TStringBuilder.Create;
+  try
+    LSb.AppendLine(Format('pastree (the index''s analysis of the same code, '
+      + '%d units in %.1f s; dcc''s errors compared): %s', [AUnits,
+      AMs / 1000,
+      IfThen((LOnlyDcc = nil) and (LOnlyPt = nil), IfThen(LAgree = nil,
+      'nothing reported, as dcc', 'agrees with dcc'), Format('DISAGREES - '
+      + '%d only dcc reports, %d only PasTree', [Length(LOnlyDcc),
+      Length(LOnlyPt)]))], TFormatSettings.Invariant));
+    if LAgree <> nil then
+      LSb.AppendLine('both report:' + sLineBreak + String.Join(sLineBreak,
+        LAgree));
+    if LOnlyDcc <> nil then
+      LSb.AppendLine('only dcc reports (PasTree misses it):' + sLineBreak +
+        String.Join(sLineBreak, LOnlyDcc));
+    if LOnlyPt <> nil then
+      LSb.AppendLine('only PasTree reports (dcc does not):' + sLineBreak +
+        String.Join(sLineBreak, LOnlyPt));
     Result := LSb.ToString.TrimRight;
   finally
     LSb.Free;
@@ -18859,6 +18992,10 @@ type
     // `code`: the code built alone, with the settings of FSpecs' one member.
     FHasCode: Boolean;
     FSnippet: TSnippet;
+    FRun: Boolean;   // `run`: the code's program run once built
+    // `pastree`: PasTree's analysis of the code beside dcc's (Finish).
+    FPasTree: Boolean;
+    FExtraSearch: TArray<string>;
   public
     constructor Create(AWs: TMcpWorkspace; const AMembers: TArray<Integer>;
       const AWhy, AShow: string; ALimit: Integer; ARebuild: Boolean;
@@ -18938,7 +19075,8 @@ begin
   FResults := nil;
   if FHasCode then
   begin
-    FResults := [BuildSnippet(FSpecs[0], FSnippet, FProgress, FCancel)];
+    FResults := [BuildSnippet(FSpecs[0], FSnippet, FProgress, FCancel,
+      FRun)];
     Exit;
   end;
   for var LK := 0 to High(FSpecs) do
@@ -18952,6 +19090,10 @@ end;
 
 function TCompileJob.Finish(out AIsError: Boolean): string;
 var
+  LCode, LMain: string;
+  LDiags: TArray<TMcpSnippetDiag>;
+  LUnits: Integer;
+  LMs: Int64;
   LFresh: string;
   LNotes: TArray<string>;
 begin
@@ -18960,8 +19102,33 @@ begin
     Exit('compile cancelled');
   if FHasCode then
   begin
-    Result := SnippetAnswer(FWs, FResults[0], FSnippet, FWhy, FLimit);
+    Result := SnippetAnswer(FWs, FResults[0], FSnippet, FWhy, FLimit, FRun);
     AIsError := not FResults[0].Ran;
+    // Here, where the tools run: PasTree's analysis is a reader of the
+    // index's parses. The files are those the build wrote.
+    if FPasTree and FResults[0].Ran then
+    begin
+      if FSnippet.SourcePath <> '' then
+        LCode := FSnippet.SourcePath
+      else
+        LCode := TPath.Combine(TPath.Combine(FResults[0].Dir, 'src'),
+          FSnippet.FileName);
+      LMain := LCode;
+      if FSnippet.MainName <> '' then
+        LMain := TPath.Combine(TPath.Combine(FResults[0].Dir, 'src'),
+          FSnippet.MainName);
+      try
+        LDiags := FWs.SnippetDiagnostics(FSpecs[0].Index, LMain, [LCode],
+          FExtraSearch, FSpecs[0].Member.Platform, FSpecs[0].Studio, LUnits,
+          LMs);
+        Result := Result + sLineBreak + PasTreeSection(FResults[0], FSnippet,
+          LCode, LDiags, LUnits, LMs);
+      except
+        on E: Exception do
+          Result := Result + sLineBreak + 'pastree: the analysis failed - '
+            + E.ClassName + ': ' + E.Message;
+      end;
+    end;
     Exit;
   end;
   // Files may have changed while it built; the routine names and source
@@ -18999,21 +19166,69 @@ var
   LSnippet: TSnippet;
   LMember: Integer;
   LReach: TMemberReach;
+  LStudio: TMcpStudio;
+  LHasCode, LDiskFile: Boolean;
+  LPlatform: TPasPlatform;
 begin
-  if (AArgs <> nil) and (AArgs.GetValue('code') <> nil) and
-    not (AArgs.GetValue('code') is TJSONNull) then
+  LHasCode := (AArgs <> nil) and (AArgs.GetValue('code') <> nil) and
+    not (AArgs.GetValue('code') is TJSONNull);
+  // No project: `file` is a program or unit on disk built as `code` is - an
+  // earlier probe, not pasted again.
+  LDiskFile := (AWs.NoProject <> '') and not LHasCode and
+    (ArgStr(AArgs, 'file') <> '');
+  if LHasCode or LDiskFile then
   begin
     if (ArgStr(AArgs, 'base') <> '') or ArgBool(AArgs, 'rebuild', False) then
       raise EToolError.Create('`code` is built alone - `base` and `rebuild` '
         + 'are for the members'' own builds');
-    LSnippet := SnippetSource(ArgStr(AArgs, 'code'), LError);
+    if LDiskFile then
+    begin
+      // Relative to where the server was started: there is no group
+      // directory, and the agent names it from its own.
+      LSnippet := SnippetFile(TPath.GetFullPath(ArgStr(AArgs, 'file')),
+        LError);
+      if (LError = '') and (ArgStr(AArgs, 'member') <> '') then
+        LError := 'no project: `file` is built as a bare program - '
+          + '`member` names a project''s';
+    end
+    else
+      LSnippet := SnippetSource(ArgStr(AArgs, 'code'), LError);
     if LError <> '' then
       raise EToolError.Create(LError);
+    LPlatform := pfWin32;
+    if ArgStr(AArgs, 'platform') <> '' then
+      if not TryParsePlatformName(ArgStr(AArgs, 'platform'), LPlatform) or
+        not (LPlatform in [pfWin32, pfWin64]) then
+        raise EToolError.CreateFmt('`platform` is Win32 or Win64 (not `%s`)',
+          [ArgStr(AArgs, 'platform')]);
+    // Which compiler: the server's, or any installed one - a construct
+    // checked on more than one version (the language reference's claims).
+    LStudio := AWs.Studio;
+    if ArgStr(AArgs, 'studio') <> '' then
+    begin
+      // FindStudio('') is the default one: a name that matches nothing must
+      // not reach it.
+      LStudio := Default(TMcpStudio);
+      if StudioNamed(ArgStr(AArgs, 'studio')) <> '' then
+        LStudio := FindStudio(StudioNamed(ArgStr(AArgs, 'studio')));
+      if not LStudio.Found then
+        raise EToolError.CreateFmt('no installed RAD Studio is `%s` - '
+          + 'installed: %s; `studio` takes a BDS version (23.0), a dcc '
+          + 'version (36.0) or a Delphi one (Delphi 12)', [ArgStr(AArgs,
+          'studio'), InstalledStudiosText]);
+    end;
     // Whose settings: the member named, the one compiling `file`, else the
-    // first that loaded.
+    // first that loaded - with no project, the server's own bare program.
     LMember := -1;
     LWhy := '';
-    if ArgStr(AArgs, 'member') <> '' then
+    if (AWs.NoProject <> '') and ((ArgStr(AArgs, 'member') <> '') or
+      (ArgStr(AArgs, 'file') <> '')) and not LDiskFile then
+      raise EToolError.Create('no project: `code` is built as a bare '
+        + 'program - `member` names a project''s, and `file` is a program or '
+        + 'unit to build in place of `code`');
+    if AWs.NoProject <> '' then
+      LMember := 0
+    else if ArgStr(AArgs, 'member') <> '' then
     begin
       LMembers := CompileMembers(AWs, AArgs, LWhy, LSince, LChanged);
       if Length(LMembers) <> 1 then
@@ -19048,9 +19263,28 @@ begin
       if Length(AWs.Members) > 1 then
         LWhy := 'the first of the group (`member` names another)';
     end;
-    Exit(TCompileJob.CreateSnippet(AWs, LMember, LSnippet, LWhy,
-      EnsureRange(ArgInt(AArgs, 'limit', 60), 1, 5000), AProgress));
+    Result := TCompileJob.CreateSnippet(AWs, LMember, LSnippet, LWhy,
+      EnsureRange(ArgInt(AArgs, 'limit', 60), 1, 5000), AProgress);
+    Result.FSpecs[0].Studio := LStudio;
+    if ArgStr(AArgs, 'platform') <> '' then
+      Result.FSpecs[0].Member.Platform := LPlatform;
+    // A unit on disk: the units beside it, as a program there would find
+    // them (a .dpr's own directory dcc searches anyway).
+    if LSnippet.SourcePath <> '' then
+    begin
+      Result.FSpecs[0].Member.SearchPaths := Result.FSpecs[0].Member
+        .SearchPaths + [ExtractFileDir(LSnippet.SourcePath)];
+      Result.FExtraSearch := [ExtractFileDir(LSnippet.SourcePath)];
+    end;
+    Result.FRun := ArgBool(AArgs, 'run', False);
+    Result.FPasTree := ArgBool(AArgs, 'pastree', False);
+    Exit;
   end;
+  for var LArg in ['studio', 'platform', 'run', 'pastree'] do
+    if (AArgs <> nil) and (AArgs.GetValue(LArg) <> nil) then
+      raise EToolError.CreateFmt('`%s` is for `code` - the members are '
+        + 'built as their projects say, with the server''s RAD Studio (%s)',
+        [LArg, AWs.Studio.Version]);
   LShow := LowerCase(ArgStr(AArgs, 'show', 'new'));
   if not MatchText(LShow, ['new', 'warnings', 'all']) then
     raise EToolError.Create('`show` is new, warnings or all');
@@ -19331,7 +19565,9 @@ const
     + 'call stops the build: use `diagnostics` while editing, `compile` '
     + 'before saying a change is done. With `code` it builds that code alone, '
     + 'with the compiler and settings of a member: whether a construct '
-    + 'compiles here, when unsure of the language.",'
+    + 'compiles here, when unsure of the language - and with `studio`, '
+    + 'whether it does on another installed version. Started with no '
+    + 'project, the server builds `code` alone, as a bare program.",'
     + '"inputSchema":{"type":"object","properties":{'
     + '"code":{"type":"string","description":"A program, a unit, or '
     + 'statements alone (put in a program''s begin-end, System.SysUtils '
@@ -19339,11 +19575,29 @@ const
     + 'units - statements by a `uses` clause first. Built with the settings of `member`, of the member compiling '
     + '`file`, or of the group''s first; compiled and linked, not run. '
     + 'Errors come by the line of the code as given"},'
+    + '"studio":{"type":"string","description":"With `code`: the installed '
+    + 'RAD Studio to build it with - a BDS version (37.0, 23.0), a dcc '
+    + 'version (36.0) or a Delphi one (Delphi 12); `status` lists them. '
+    + 'Default: the server''s"},'
+    + '"platform":{"type":"string","enum":["Win32","Win64"],"description":'
+    + '"With `code`: build it with dcc32 or dcc64. Default: the member''s '
+    + 'platform; with no project, Win64"},'
+    + '"run":{"type":"boolean","description":"With `code`: run the program '
+    + 'once built - a console one only (statements are put in one) - for '
+    + 'up to 10 s, its process tree killed past that; answers its exit code '
+    + 'and its output (stdout and stderr, cut at 8000 characters). Default '
+    + 'false: compiled and linked, not run"},'
+    + '"pastree":{"type":"boolean","description":"With `code`: also '
+    + 'analyze it with PasTree - the index''s own analysis - and say where '
+    + 'it and dcc disagree, by line: what only dcc reports (the index '
+    + 'misses it) and what only PasTree does. For checking the index, or a '
+    + 'language rule against both. Default false"},'
     + '"member":{"type":"string","description":"Group members to build, by '
     + 'name: AppA, or AppA,AppB. Default: those the files changed this '
     + 'session reach"},'
     + '"file":{"type":"string","description":"Or build the members that '
-    + 'compile this file"},'
+    + 'compile this file. With no project: a program or unit on disk '
+    + '(relative to the working directory) built as `code` is"},'
     + '"show":{"type":"string","enum":["new","warnings","all"],"description":'
     + '"new (default): the errors, and the warnings and hints not reported '
     + 'before; warnings: every warning in the group''s files; all: every hint '
@@ -19516,7 +19770,25 @@ end;
 function ServerInstructions(AWs: TMcpWorkspace): string;
 var
   LLanguage: string;
+  LOthers: TArray<string>;
+  LStudio: TMcpStudio;
 begin
+  // Asked of the registry again: the workspace finds the Studio as it
+  // loads, on another thread, and this is answered before.
+  LStudio := FindStudio(AWs.StudioWanted);
+  LLanguage := LanguageNote(LStudio);
+  LOthers := nil;
+  for var LV in InstalledStudioVersions do
+    if LV <> LStudio.Version then
+      LOthers := LOthers + [LV];
+  if (LLanguage <> '') and (LOthers <> nil) then
+    LLanguage := LLanguage + ' The other installed compilers: `compile` with '
+      + '`code` and `studio` (' + String.Join(', ', LOthers) + ').';
+  if AWs.NoProject <> '' then
+    Exit(Trim('pastree-mcp started with no Delphi project: ' + AWs.NoProject
+      + '. ' + NoProjectAdvice + '. Use `compile` with `code` to check '
+      + 'whether a construct compiles - dcc says, not the documentation. '
+      + LLanguage));
   Result := 'PasTree semantic index of the Delphi/Object Pascal project '
     + ExtractFileName(AWs.ProjectFile) + ' (' + AWs.Root + '). For Object '
     + 'Pascal code prefer these tools over grep and reading whole files: '
@@ -19568,9 +19840,6 @@ begin
       + 'call analyzes those bodies first (the whole library, when a '
       + 'question about a hub class makes that cheaper - the answer says '
       + 'so), and answers as a full analysis would.';
-  // Asked of the registry again: the workspace finds the Studio as it
-  // loads, on another thread, and this is answered before.
-  LLanguage := LanguageNote(FindStudio(AWs.StudioWanted));
   if LLanguage <> '' then
     Result := Result + ' ' + LLanguage;
 end;
@@ -19916,6 +20185,17 @@ begin
   AWs.BeginCall(ACancelled);
   try
     CheckArguments(AName, AArgs);
+    // No project (pastree-mcp.dpr): the index is the installed library's,
+    // and a tool about a project's own code - its diagnostics, its builds,
+    // its edits - would answer about the server's own program.
+    if (AWs.NoProject <> '') and not (MatchText(AName, ['status', 'find',
+      'definition', 'source', 'members', 'references', 'callers', 'callees',
+      'related', 'outline']) or ((AName = 'compile') and (AArgs <> nil) and
+      ((AArgs.GetValue('code') <> nil) or (AArgs.GetValue('file') <> nil))))
+      then
+      raise EToolError.CreateFmt('`%s` needs a Delphi project, and there is '
+        + 'none: %s. %s.', [AName + IfThen(AName = 'compile', '` without '
+        + '`code` or `file', ''), AWs.NoProject, NoProjectAdvice]);
     if AName <> 'status' then
     begin
       // The handshake does not wait for the analysis; the first real call
