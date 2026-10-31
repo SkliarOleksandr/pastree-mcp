@@ -180,9 +180,10 @@ A search for a name - an identifier with both cases in it, `TFoo`,
 `SaveToFile` - over Pascal sources (Grep with no glob or a Pascal one;
 grep, rg, findstr or Select-String in a command naming a Pascal file or
 searching recursively; not a search in files named one by one, which is
-a read), or `sed -n A,Bp` of a Pascal file, is denied once
-with a note naming the call that answers it (`references`, `find`,
-`callers`, `source` with `lines`). The same command run again goes through:
+a read, nor one with no file that reads a pipe - a build's output), or
+`sed -n A,Bp` of a Pascal file, is denied once with a note naming the call
+that answers it (`references`, `find`, `callers`, `source` with `lines` -
+one `targets` entry per range when sed reads several). The same command run again goes through:
 a search for a comment or a string is the agent's to make. At most one note
 per 10 minutes, and none within 5 minutes of a pastree call - the agent
 knows the tools then. About 15 ms a call; it reads no project and writes

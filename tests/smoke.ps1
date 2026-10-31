@@ -1464,6 +1464,15 @@ Check 'hook grep named file' (Hook 'h' 'Grep' '{"pattern":"TCircle","path":"Shar
 Check 'hook powershell named file' (Hook 'h' 'PowerShell' '{"command":"Select-String -Path Shared/uShapes.pas -Pattern TCircle"}') @() @($deny)
 Check 'hook bash wildcard' (Hook 'i' 'Bash' '{"command":"grep -n TCircle *.pas"}') @($deny, '`TCircle`')
 Check 'hook powershell' (Hook 'e' 'PowerShell' '{"command":"Get-ChildItem -Recurse -Include *.pas | Select-String -Pattern LoadFromStream"}') @($deny, '`LoadFromStream`')
+# Several sed ranges are a read of each: one `targets` entry per range, not
+# one mangled `lines` (0.46.1); a sed script doing more is not a line read.
+Check 'hook sed ranges' (Hook 'j' 'Bash' '{"command":"sed -n ''1695,1700p;1762,1766p'' source/PasMcp.Build.pas"}') @($deny, '`source` {"targets":[{"file":"source/PasMcp.Build.pas","lines":"1695-1700"},{"file":"source/PasMcp.Build.pas","lines":"1762-1766"}]}')
+Check 'hook sed ranges -e' (Hook 'k' 'Bash' '{"command":"sed -n -e 10,20p -e 40,50p source/uShapes.pas"}') @($deny, '{"file":"source/uShapes.pas","lines":"40-50"}')
+Check 'hook sed script' (Hook 'l' 'Bash' '{"command":"sed -n ''10,20p;/TCircle/p'' source/uShapes.pas"}') @() @($deny)
+# A search with no file reads the pipe - a build's output, not Pascal
+# sources, though the command names a .dpr (0.46.1).
+Check 'hook powershell piped' (Hook 'm' 'PowerShell' '{"command":"& dcc64 AppB.dpr 2>&1 | Select-String \"commit:|Error|error|Fatal|built\""}') @() @($deny)
+Check 'hook bash piped dpr' (Hook 'm' 'Bash' '{"command":"dcc64 AppB.dpr 2>&1 | grep -E \"Error|Fatal\""}') @() @($deny)
 # A pastree call just made: the agent knows the tools, its grep is its own.
 Check 'hook pastree used' (Hook 'f' 'mcp__pastree__find' '{"query":"TCircle"}') @() @($deny)
 Check 'hook after pastree' (Hook 'f' 'Grep' '{"pattern":"TCircle"}') @() @($deny)

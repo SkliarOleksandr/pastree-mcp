@@ -33,7 +33,8 @@ unit PasMcp.Hook;
   the session's directory is a Delphi project's - a `.groupproj` or `.dproj`
   there or above it, up to the repository root - or the hook says nothing.
   A command is over them when it names a Pascal file or extension, or
-  searches recursively (rg, -r) without an include of another kind.
+  searches recursively (rg, -r) without an include of another kind - unless
+  it names no file and reads a pipe.
 
   State per session is one small file under %TEMP%\pastree-mcp\hook. This
   mode reads no project and writes no log: stderr and stdout are the hook
@@ -72,7 +73,7 @@ type
   TFinding = record
     Name: string;      // the name searched for, '' for a line read
     FileName: string;  // a line read: the file
-    Lines: string;     // a line read: `A-B`
+    Lines: TArray<string>;  // a line read: `A-B`, one per sed range
   end;
 
 function ReadStdin: string;
@@ -220,8 +221,10 @@ begin
   Result := LPascal and (AFinding.Name <> '');
 end;
 
-// Words of one shell command, quotes taken off; a pipe, `;`, `&&` or `||`
-// outside quotes is a word of its own, so the caller splits on it.
+// Words of one shell command, quotes taken off; outside quotes a pipe (`|`,
+// `|&`) is the word `|` and `;`, `&`, `&&` or `||` the word `;`, so the caller
+// splits on them and knows which segments read the one before. `2>&1` is a
+// word.
 function ShellWords(const ACommand: string): TArray<string>;
 var
   LWord: string;
@@ -260,10 +263,14 @@ begin
     end
     else if CharInSet(LC, [' ', #9, #10, #13]) then
       Push
+    else if (LC = '&') and LWord.EndsWith('>') then
+      LWord := LWord + LC
     else if CharInSet(LC, ['|', ';', '&']) then
     begin
       Push;
-      Result := Result + ['|'];
+      var LPipe := (LC = '|') and ((LI = Length(ACommand)) or
+        (ACommand[LI + 1] <> '|'));
+      Result := Result + [IfThen(LPipe, '|', ';')];
       while (LI < Length(ACommand)) and CharInSet(ACommand[LI + 1], ['|', '&']) do
         Inc(LI);
     end
@@ -282,9 +289,17 @@ end;
 // names a Pascal file or extension anywhere (`Get-ChildItem -Recurse
 // -Include *.pas | Select-String Foo` names it in another segment), or the
 // search is recursive and includes no other kind of file - and it is not
-// a search in files named one by one, without recursion (IsNamedFile).
+// a search in files named one by one, without recursion (IsNamedFile), nor
+// one with no file that reads the pipe (APipeIn): `build.bat | Select-String
+// "Error|Fatal"` searches a build's output, and a command naming `.dpr` on
+// the left of it made that a search for `Error` (0.46.1).
+//
+// A `sed -n` of several ranges (`'10,20p;40,50p'`, `-e 10,20p -e 40,50p`) is
+// a read of each: the note gives `source` one `targets` entry per range -
+// pieces of one file the agent knows by line, which `source` answers as they
+// are. A script doing anything else (`s/../../`, `/re/p`) is not a line read.
 function SegmentFinding(const AWords: TArray<string>; const AWhole: string;
-  out AFinding: TFinding): Boolean;
+  APipeIn: Boolean; out AFinding: TFinding): Boolean;
 const
   cValued: array[0..17] of string = ('-A', '-B', '-C', '-m', '-f', '-g', '-t',
     '-T', '--max-count', '--context', '--glob', '--type', '--include',
@@ -303,14 +318,21 @@ begin
   if SameText(LTool, 'sed') then
   begin
     for LI := 1 to High(AWords) do
-      if (AWords[LI].Length > 2) and AWords[LI].EndsWith('p') and
-         CharInSet(AWords[LI][1], ['0'..'9']) and
-         (Pos(',', AWords[LI]) > 0) then
-        AFinding.Lines := Copy(AWords[LI], 1, Length(AWords[LI]) - 1)
-          .Replace(',', '-')
+      if (AWords[LI] <> '') and CharInSet(AWords[LI][1], ['0'..'9']) then
+      begin
+        for var LCmd in AWords[LI].Split([';', #10],
+          TStringSplitOptions.ExcludeEmpty) do
+        begin
+          var LRange := TRegEx.Match(LCmd.Trim, '^(\d+),(\d+)p$');
+          if not LRange.Success then
+            Exit;
+          AFinding.Lines := AFinding.Lines + [LRange.Groups[1].Value + '-' +
+            LRange.Groups[2].Value];
+        end;
+      end
       else if IsPascalFile(AWords[LI]) then
         AFinding.FileName := AWords[LI];
-    Exit((AFinding.Lines <> '') and (AFinding.FileName <> ''));
+    Exit((AFinding.Lines <> nil) and (AFinding.FileName <> ''));
   end;
   LStart := 1;
   if SameText(LTool, 'git') and (Length(AWords) > 1) and
@@ -366,23 +388,39 @@ begin
     end;
     Inc(LI);
   end;
+  // No file and no recursion of its own: it searches what the pipe brings
+  // (rg and Select-String read a pipe when given no path, recursive or not).
+  if APipeIn and (LPaths = 0) and (LStart = 1) and
+     not (LGrepLike and LRecursive) then
+    Exit;
   AFinding.Name := NameInPattern(LPattern);
   Result := (AFinding.Name <> '') and
     not ((LPaths > 0) and LNamedOnly and not LRecursive) and
     (NamesPascal(AWhole) or (LRecursive and not LOtherInclude));
 end;
 
+// A segment piping files, not text, to the next: Get-ChildItem and its
+// aliases hand Select-String the files to search.
+function ListsFiles(const ASeg: TArray<string>): Boolean;
+begin
+  Result := (Length(ASeg) > 0) and MatchText(ASeg[0], ['Get-ChildItem', 'gci',
+    'dir', 'ls', 'Get-Item', 'gi']);
+end;
+
 function CommandFinding(const ACommand: string; out AFinding: TFinding): Boolean;
 var
   LWords, LSeg: TArray<string>;
+  LPipeIn: Boolean;
 begin
-  LWords := ShellWords(ACommand) + ['|'];
+  LWords := ShellWords(ACommand) + [';'];
   LSeg := nil;
+  LPipeIn := False;
   for var LW in LWords do
-    if LW = '|' then
+    if (LW = '|') or (LW = ';') then
     begin
-      if SegmentFinding(LSeg, ACommand, AFinding) then
+      if SegmentFinding(LSeg, ACommand, LPipeIn, AFinding) then
         Exit(True);
+      LPipeIn := (LW = '|') and not ListsFiles(LSeg);
       LSeg := nil;
     end
     else
@@ -465,11 +503,23 @@ end;
 // read as a wall of text (0.45.2). The agent needs the call, and that a
 // repeat goes through.
 function NoteFor(const AFinding: TFinding): string;
+var
+  LFile, LTargets: string;
 begin
-  if AFinding.Name = '' then
+  LFile := AFinding.FileName.Replace('\', '/');
+  if (AFinding.Name = '') and (Length(AFinding.Lines) = 1) then
     Result := Format('pastree index: `source` {"file":"%s","lines":"%s"} ' +
       'gives these lines; `file` + `line` alone, the whole routine.',
-      [AFinding.FileName.Replace('\', '/'), AFinding.Lines])
+      [LFile, AFinding.Lines[0]])
+  else if AFinding.Name = '' then
+  begin
+    LTargets := '';
+    for var LLines in AFinding.Lines do
+      LTargets := LTargets + IfThen(LTargets <> '', ',') +
+        Format('{"file":"%s","lines":"%s"}', [LFile, LLines]);
+    Result := Format('pastree index: `source` {"targets":[%s]} gives these ' +
+      'lines; `file` + `line` alone, the whole routine.', [LTargets]);
+  end
   else
     Result := Format('pastree index: `%s` looks like a Pascal name - ' +
       '`references` {"symbol":"%0:s"} for its resolved uses (form lines and ' +
