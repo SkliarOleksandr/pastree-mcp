@@ -18717,6 +18717,25 @@ begin
   end;
 end;
 
+// The line of ACodeLines (1-based) whose inline `var` or `const` declares
+// the first name AText quotes ('P'), 0 when none does. dcc reports an
+// inline variable never used (H2164) at the end of its block - for
+// statements, the `end.` of the program around them.
+function InlineDeclLine(const ACodeLines: TArray<string>;
+  const AText: string): Integer;
+var
+  LName: TMatch;
+begin
+  Result := 0;
+  LName := TRegEx.Match(AText, '''([A-Za-z_]\w*)''');
+  if not LName.Success then
+    Exit;
+  for var LI := 0 to High(ACodeLines) do
+    if TRegEx.IsMatch(ACodeLines[LI], '\b(var|const)\s+([\w\s,]*,\s*)?' +
+      LName.Groups[1].Value + '\b', [roIgnoreCase]) then
+      Exit(LI + 1);
+end;
+
 // `compile` with `code`: whether the code compiles with the member's
 // compiler and settings, and what dcc said - by the line of the code as
 // given, not of the program wrapped around it.
@@ -18737,7 +18756,7 @@ var
 
   procedure AddRows(const ATitle: string; const AMsgs: TArray<TBuildMsg>);
   var
-    LLine: Integer;
+    LLine, LDecl: Integer;
     LText: string;
   begin
     if Length(AMsgs) = 0 then
@@ -18753,12 +18772,22 @@ var
       Inc(LShown);
       LText := LMsg.Code + IfThen(LMsg.Code <> '', ' ', '') + LMsg.Text;
       LLine := LMsg.Line - ASnippet.Shift;
+      LDecl := 0;
+      if SameText(LMsg.FileName, LCodeFile) and ((LLine < 1) or (LLine >
+        Length(LCodeLines))) then
+        LDecl := InlineDeclLine(LCodeLines, LMsg.Text);
       if SameText(LMsg.FileName, LCodeFile) and (LMsg.Line > 0) and
         (LLine >= 1) and (LLine <= Length(LCodeLines)) then
       begin
         LSb.AppendLine(Format('  %d%s  %s', [LLine, IfThen(LMsg.Col > 0, ':'
           + IntToStr(LMsg.Col), ''), LText]));
         LSb.AppendLine('        ' + Trim(LCodeLines[LLine - 1]));
+      end
+      else if LDecl > 0 then
+      begin
+        LSb.AppendLine(Format('  %d  %s  (dcc reports it at the end of the '
+          + 'block, past the code)', [LDecl, LText]));
+        LSb.AppendLine('        ' + Trim(LCodeLines[LDecl - 1]));
       end
       else if SameText(LMsg.FileName, LCodeFile) then
         LSb.AppendLine('  (the program around the code)  ' + LText)
@@ -19573,7 +19602,8 @@ const
     + 'statements alone (put in a program''s begin-end, System.SysUtils '
     + 'used; inline var declares a variable). It may use the member''s own '
     + 'units - statements by a `uses` clause first. Built with the settings of `member`, of the member compiling '
-    + '`file`, or of the group''s first; compiled and linked, not run. '
+    + '`file`, or of the group''s first (with no project, a bare program); '
+    + 'compiled and linked, and run only with `run`. '
     + 'Errors come by the line of the code as given"},'
     + '"studio":{"type":"string","description":"With `code`: the installed '
     + 'RAD Studio to build it with - a BDS version (37.0, 23.0), a dcc '
@@ -20194,8 +20224,12 @@ begin
       ((AArgs.GetValue('code') <> nil) or (AArgs.GetValue('file') <> nil))))
       then
       raise EToolError.CreateFmt('`%s` needs a Delphi project, and there is '
-        + 'none: %s. %s.', [AName + IfThen(AName = 'compile', '` without '
-        + '`code` or `file', ''), AWs.NoProject, NoProjectAdvice]);
+        + 'none: %s. %s.%s', [AName + IfThen(AName = 'compile', '` without '
+        + '`code` or `file', ''), AWs.NoProject, NoProjectAdvice,
+        // What the index says of some code, with no project to hold it.
+        IfThen(AName = 'diagnostics', ' PasTree''s diagnostics of a piece '
+        + 'of code: `compile` with `code` (or `file`) and `pastree: true`, '
+        + 'beside dcc''s.', '')]);
     if AName <> 'status' then
     begin
       // The handshake does not wait for the analysis; the first real call

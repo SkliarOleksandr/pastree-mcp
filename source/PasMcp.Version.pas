@@ -16,7 +16,7 @@ unit PasMcp.Version;
 interface
 
 const
-  PasTreeMcpVersion = '0.46.1';
+  PasTreeMcpVersion = '0.46.2';
   // 0.145.0: nkAmbiguous and AmbigReadingOf - `F(Gen<A, B>(D))` is one node
   // whose head is a call only when the model reads it as type arguments (a
   // compile error without them).

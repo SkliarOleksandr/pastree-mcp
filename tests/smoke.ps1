@@ -868,6 +868,9 @@ $calls += "compile {`"code`":`"program G; begin end.`",`"run`":true}`n"
 $calls += "compile {`"code`":`"var X := 1;\nWriteln(X);\nWriteln(Missing);`"}`n"
 $calls += "compile {`"file`":`"Probe.dpr`",`"pastree`":true}`n"
 $calls += "compile {`"file`":`"NoSuch.dpr`"}`n"
+# An inline var never used: dcc's H2164 at the end of its block - the
+# wrapper's `end.` - put back on the line declaring it.
+$calls += "compile {`"code`":`"var P: Pointer;\nWriteln(1);`"}`n"
 [IO.File]::WriteAllText((Join-Path $noProj 'sub\Probe.dpr'), "program Probe;`r`n{`$APPTYPE CONSOLE}`r`nuses System.SysUtils;`r`nbegin`r`n  Writeln(SizeOf(Pointer));`r`n  Writeln(Bad);`r`nend.`r`n")
 [IO.File]::WriteAllText($noProjCalls, $calls)
 $ErrorActionPreference = 'Continue'
@@ -887,6 +890,8 @@ Check 'no project compile code' $out @('compile code (statements) - dcc64 ', 'no
 # One directory per working directory: the builds beside the library program.
 Check 'no project exe' $out @("\no-project-sub-", "\build\snippet-", "-Win64\exe\PasMcpSnippet.exe")
 Check 'no project run' $out @("run: exit code 0 in ", "its output (stdout and stderr):`n8`n", "its output (stdout and stderr):`n4`n", 'compile code (statements) - dcc32 ', 'TIMED OUT - killed after 10 s', 'not run: not a console program')
+Check 'no project inline var' $out @("hints - 1:`n  1  H2164 Variable 'P' is declared but never used in 'PasMcpSnippet'  (dcc reports it at the end of the block, past the code)`n        var P: Pointer;") @('(the program around the code)  H2164')
+Check 'no project diagnostics hint' $out @('PasTree''s diagnostics of a piece of code: `compile` with `code` (or `file`) and `pastree: true`, beside dcc''s.')
 Check 'no project lines' $out @("errors - 1:`n  3  E2003 Undeclared identifier: 'Missing'`n        Writeln(Missing);")
 Check 'no project file' $out @("Probe.dpr (program) - dcc64 ", "  6  E2003 Undeclared identifier: 'Bad'", "agrees with dcc`nboth report:`n  6  E2003 Undeclared identifier: 'Bad'", 'no such file: ', 'NoSuch.dpr')
 if ($studios.Count -gt 1) {
