@@ -70,6 +70,11 @@ var
   // No project found: why (DiscoverProject); GProject is then the server's
   // own program of the installed library.
   GNoProject: string;
+  // No --project: the project was looked for from the working directory, and
+  // a client root elsewhere may name another (PasMcp.Server's roots). The
+  // --platform given, before the no-project default replaced it.
+  GDiscovered: Boolean;
+  GPlatformGiven: string;
   GAlso: TArray<string>;
   GLight: TArray<string>;
   GNoLight: Boolean;
@@ -83,61 +88,6 @@ begin
   ExitProcess(2);
 end;
 
-{ Registered once for every repository (`claude mcp add --scope user`), the
-  server starts in whatever directory the session was opened in - often a
-  subdirectory of the project's. So the nearest directory holding a project
-  file, from the current one up: the first one holding any decides, and an
-  ambiguous one fails rather than being passed over for a project above it
-  that the session is not in. The walk stops at the repository root (a `.git`
-  directory, or the `.git` file of a worktree or submodule) - above it is
-  another repository, or none - and at the drive root.
-
-  None found, or none to choose: '' and GNoProject says why. The server then
-  starts without a project rather than exit - an exit before the handshake
-  is "Connection closed" in every repository without a Delphi project, and
-  `compile` with `code` needs none. }
-function DiscoverProject: string;
-var
-  LDir, LUp: string;
-  LFound: TArray<string>;
-begin
-  Result := '';
-  // With its delimiter throughout: `C:` alone is the drive's current directory.
-  LDir := IncludeTrailingPathDelimiter(GetCurrentDir);
-  repeat
-    LFound := TDirectory.GetFiles(LDir, '*.groupproj');
-    if Length(LFound) > 1 then
-    begin
-      GNoProject := 'several .groupproj files in ' + LDir;
-      Exit;
-    end;
-    if Length(LFound) = 0 then
-    begin
-      LFound := TDirectory.GetFiles(LDir, '*.dproj');
-      if Length(LFound) > 1 then
-      begin
-        GNoProject := 'several .dproj files and no .groupproj in ' + LDir;
-        Exit;
-      end;
-    end;
-    if Length(LFound) = 1 then
-    begin
-      if not SameText(LDir, IncludeTrailingPathDelimiter(GetCurrentDir)) then
-        Log('project %s found above the working directory %s',
-          [LFound[0], GetCurrentDir]);
-      Exit(LFound[0]);
-    end;
-    if TDirectory.Exists(LDir + '.git') or TFile.Exists(LDir + '.git') then
-      Break;
-    LUp := IncludeTrailingPathDelimiter(
-      ExtractFileDir(ExcludeTrailingPathDelimiter(LDir)));
-    if Length(LUp) >= Length(LDir) then
-      Break;   // the drive root, or a share's
-    LDir := LUp;
-  until False;
-  GNoProject := 'no .groupproj or .dproj in ' + GetCurrentDir +
-    ' or above it up to ' + LDir;
-end;
 
 procedure AddScript(const APath: string);
 var
@@ -230,8 +180,23 @@ begin
       Fail('unknown argument: ' + ParamStr(LIdx));
     Inc(LIdx);
   end;
-  if GProject = '' then
-    GProject := DiscoverProject;
+  GPlatformGiven := GPlatform;
+  // Registered once for every repository (`claude mcp add --scope user`), the
+  // server starts in whatever directory the client starts it in - often a
+  // subdirectory of the project's (DiscoverProject). None found, or none to
+  // choose: GNoProject says why, and the server starts without a project
+  // rather than exit - an exit before the handshake is "Connection closed" in
+  // every repository without a Delphi project, and `compile` with `code`
+  // needs none.
+  GDiscovered := GProject = '';
+  if GDiscovered then
+  begin
+    GProject := DiscoverProject(GetCurrentDir, GNoProject);
+    if (GProject <> '') and not SameText(ExtractFileDir(GProject),
+       ExcludeTrailingPathDelimiter(GetCurrentDir)) then
+      Log('project %s found above the working directory %s', [GProject,
+        GetCurrentDir]);
+  end;
   if GProject = '' then
   begin
     GProject := NoProjectProgram(GetCurrentDir);
@@ -290,19 +255,53 @@ begin
   end;
 end;
 
+// The session's directory as the client gives it (MCP roots), when the
+// project was looked for from the working directory: the workspace of the
+// project found from it, when that is another - a session in a git worktree
+// inside the repository got a server started in the main checkout, which
+// indexed the main checkout's files while the session edited its own (a
+// field report) - else nil. ANote: what status says of it.
+function WorkspaceForRoot(const ADir: string; out ANote: string): TMcpWorkspace;
+var
+  LProject, LWhy, LHad: string;
+begin
+  Result := nil;
+  ANote := '';
+  LHad := IfThen(GNoProject <> '', 'no project', GProject);
+  LProject := DiscoverProject(ADir, LWhy);
+  if LProject = '' then
+  begin
+    if GNoProject = '' then
+      ANote := Format('it has no project of its own (%s): the answers are '
+        + 'about %s, found from the directory the server was started in', [LWhy,
+        GProject]);
+    Exit;
+  end;
+  if SameText(LProject, GProject) then
+    Exit;
+  ANote := Format('the server was started in %s (%s) and indexes %s, the '
+    + 'session''s project, instead', [GetCurrentDir, LHad, LProject]);
+  Log('the client''s root %s holds the project %s - indexing it rather than '
+    + '%s, found from the working directory %s', [ADir, LProject, LHad,
+    GetCurrentDir]);
+  Result := TMcpWorkspace.Create(LProject, GStudio, GPlatformGiven, GConfig,
+    GPolicy, GAlso);
+  Result.SetLight(not GNoLight, GLight);
+  Result.SetLaunch(Format('%s, the project found from the client''s root %s',
+    [GetCurrentDir, ADir]));
+end;
+
 procedure RunServer;
 var
   LTransport: TMcpTransport;
   LServer: TMcpServer;
 begin
-  // The handshake must not wait for a closure-sized analysis.
-  TThread.CreateAnonymousThread(
-    procedure
-    begin
-      GWs.Load;
-    end).Start;
+  // The handshake must not wait for a closure-sized analysis: the server
+  // starts the load once it knows which project (TMcpServer.Settle).
   LTransport := TMcpTransport.Create;
   LServer := TMcpServer.Create(GWs, LTransport);
+  if GDiscovered then
+    LServer.RootWorkspace := WorkspaceForRoot;
   LServer.Run;
   // stdin closed: the client is gone. An analysis still running on the other
   // thread has nobody to answer, so do not wait for it.
@@ -341,9 +340,13 @@ begin
       Log('project %s', [GProject]);
     GWs := TMcpWorkspace.Create(GProject, GStudio, GPlatform, GConfig, GPolicy,
       GAlso);
+    Log('working directory %s', [GetCurrentDir]);
     if GNoProject <> '' then
       GWs.SetNoProject(GNoProject);
     GWs.SetLight(not GNoLight, GLight);
+    GWs.SetLaunch(GetCurrentDir + IfThen(not GDiscovered, ', the project given '
+      + 'by --project', IfThen(GNoProject <> '', ', no project found from it',
+      ', the project found from it')));
     if Length(GCalls) > 0 then
       RunCli
     else

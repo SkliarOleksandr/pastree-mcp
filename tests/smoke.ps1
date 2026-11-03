@@ -226,6 +226,12 @@ Check 'source targets string' (Block $b 'source {"targets":"TCircle.Area RunB"')
 Check 'source targets none found' (Block $b 'source {"targets":["NoSuchA"') @("=== 1 of 2: NoSuchA`nno declaration named ``NoSuchA``", "=== 2 of 2: NoSuchB`n")
 Check 'source targets empty' (Block $b 'source {"targets":[]}') @('`targets` is empty')
 Check 'source targets and symbol' (Block $b 'source {"targets":["TCircle"],"symbol"') @('`targets` takes the place of `symbol` - give it in each target')
+# `file` with the call: every target's that names none - the file a name is
+# looked for in, the file of a `line` target (a field report: refused).
+Check 'source targets with file' (Block $b 'source {"file":"Shared/uShapes.pas","targets"') @('=== 1 of 2: TCircle.Area', 'TCircle.Area (function) implemented at Shared\uShapes.pas:53-56', '=== 2 of 2: Shared/uShapes.pas:55') @('takes the place of')
+# A name asked for where a comment writes it: said so, not "a local without
+# declaration, a keyword, or a name the analysis could not resolve".
+Check 'source position in comment' (Block $b 'source {"file":"AppB/uBoxes.pas","line":97,"name":"TShapeBox"}') @('AppB\uBoxes.pas:97:', '(TShapeBox) is inside a comment - nothing there is resolved') @('nothing resolvable')
 Check 'source targets bad argument' (Block $b 'source {"targets":[{"symbol":"TCircle","bogus"') @('`source` takes no argument `bogus` - its arguments: ')
 Check 'references targets' (Block $b 'references {"targets"') @("=== 1 of 2: TCircle`nTCircle (class) declared at Shared\uShapes.pas:21 - 3 references in 2 files", "=== 2 of 2: TShape.Area`nTShape.Area (function) declared at Shared\uShapes.pas:17 - 1 references in 1 files")
 # `symbol` with `file` and no `line`: the file narrows the name - it
@@ -1436,6 +1442,48 @@ finally {
     Remove-Item -Recurse -Force ($npDir + '-build') -ErrorAction SilentlyContinue
 }
 
+# ---- MCP over stdio, the client's root elsewhere ---------------------------------
+# The Claude desktop app starts a worktree session's servers in the main
+# checkout: the server asks a client with roots for them, and indexes the
+# project found from the session's directory. Started with no project here,
+# the root the fixture - written as Claude Code 2.1 writes it, file://C:\...
+Write-Host '--- MCP over stdio, the client''s root elsewhere'
+$rtDir = Join-Path ([IO.Path]::GetTempPath()) ('pastree-mcp-smoke-root-' + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Force (Join-Path $rtDir '.git') | Out-Null
+try {
+    $psi = New-Object Diagnostics.ProcessStartInfo
+    $psi.FileName = $Exe
+    $psi.Arguments = '--log none --build-dir "' + $rtDir + '-build"'
+    $psi.WorkingDirectory = $rtDir
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.StandardOutputEncoding = [Text.Encoding]::UTF8
+    $proc = [Diagnostics.Process]::Start($psi)
+    $null = $proc.StandardError.ReadToEndAsync()
+    $stdin = New-Object IO.StreamWriter($proc.StandardInput.BaseStream, (New-Object Text.UTF8Encoding($false)))
+    $stdin.AutoFlush = $true
+    $stdin.NewLine = "`n"
+    $script:notes = ''
+    $script:replies = @{}
+    $null = Rpc 1 'initialize' '{"protocolVersion":"2025-06-18","capabilities":{"roots":{}},"clientInfo":{"name":"smoke","version":"1"}}'
+    $stdin.WriteLine('{"jsonrpc":"2.0","method":"notifications/initialized"}')
+    $ask = $proc.StandardOutput.ReadLine() | ConvertFrom-Json
+    if ($ask.method -ne 'roots/list') { Write-Host "FAIL roots: the server sent $($ask | ConvertTo-Json -Compress) instead of roots/list"; $script:failures++ }
+    $stdin.WriteLine('{"jsonrpc":"2.0","id":"' + $ask.id + '","result":{"roots":[{"uri":"file://' + $fixture.Replace('\', '\\') + '"}]}}')
+    $r = Rpc 2 'tools/call' '{"name":"status","arguments":{}}'
+    Check 'roots status' (ToolText $r) @("session directory (the client's root): $fixture - the server was started in $rtDir (no project) and indexes $group, the session's project, instead", "project: $group")
+    $r = Rpc 3 'tools/call' '{"name":"find","arguments":{"query":"TCircle"}}'
+    Check 'roots find' (ToolText $r) @('Shared\uShapes.pas:21  TCircle (class)')
+    $stdin.Close()
+    if (-not $proc.WaitForExit(10000)) { Write-Host 'FAIL roots server did not exit when stdin closed'; $script:failures++; $proc.Kill() }
+}
+finally {
+    Remove-Item -Recurse -Force $rtDir -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force ($rtDir + '-build') -ErrorAction SilentlyContinue
+}
+
 # ---- 4. the grep hook (`--hook`, PasMcp.Hook) ----------------------------------
 # A Claude Code PreToolUse call on stdin: a text search for a name over Pascal
 # sources is denied once with the call that answers it, the same command then
@@ -1470,6 +1518,12 @@ Check 'hook sed lines' (Hook 'd' 'Bash' '{"command":"sed -n 120,160p source/uSha
 # its git commands with it; a wildcard or a recursive search is a search.
 Check 'hook bash named file' (Hook 'h' 'Bash' '{"command":"git status; grep -n \"TCircle =\" source/uShapes.pas; git diff --stat"}') @() @($deny)
 Check 'hook grep named file' (Hook 'h' 'Grep' '{"pattern":"TCircle","path":"Shared/uShapes.pas"}') @() @($deny)
+# grep's -c counts, -C takes a value: read as -C, the file name after the
+# pattern was taken for one, a search for `PasTree` (`object-pascal-tree`
+# names Pascal). An empty pattern is a pattern too.
+Check 'hook grep -c' (Hook 'm' 'Bash' '{"command":"cd /c/Repos/object-pascal-tree; grep -c \"\" PasTree-pastree-mcp-1.log"}') @() @($deny)
+Check 'hook grep empty pattern' (Hook 'm' 'Bash' '{"command":"cd /c/Repos/object-pascal-tree; grep -n \"\" PasTree-pastree-mcp-1.log"}') @() @($deny)
+Check 'hook grep -C value' (Hook 'n' 'Bash' '{"command":"grep -rn -C 3 SaveToFile source/"}') @($deny, '`SaveToFile`')
 Check 'hook powershell named file' (Hook 'h' 'PowerShell' '{"command":"Select-String -Path Shared/uShapes.pas -Pattern TCircle"}') @() @($deny)
 Check 'hook bash wildcard' (Hook 'i' 'Bash' '{"command":"grep -n TCircle *.pas"}') @($deny, '`TCircle`')
 Check 'hook powershell' (Hook 'e' 'PowerShell' '{"command":"Get-ChildItem -Recurse -Include *.pas | Select-String -Pattern LoadFromStream"}') @($deny, '`LoadFromStream`')

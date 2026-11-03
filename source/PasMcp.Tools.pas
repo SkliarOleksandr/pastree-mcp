@@ -1350,6 +1350,72 @@ begin
   AWs.QueryDone(AA);
 end;
 
+// 'a comment' or 'a string literal' when column ACol of line ALine (both
+// 1-based) is inside one, else '' - a `{ }` or `(* *)` comment opened on an
+// earlier line counted, a directive taken for a comment. For the refusal of
+// a position nothing resolves at: `Aux` on a `// Aux 1: ...` line got "a
+// local without declaration, a keyword, or a name the analysis could not
+// resolve" (a field report).
+function PositionLexeme(const ALines: TArray<string>; ALine,
+  ACol: Integer): string;
+var
+  LState: Integer;   // 0 code, 1 string, 2 { }, 3 (* *), 4 // to the end
+  LText: string;
+begin
+  Result := '';
+  LState := 0;
+  for var LIdx := 0 to Min(ALine, Length(ALines)) - 1 do
+  begin
+    LText := ALines[LIdx];
+    if LState in [1, 4] then
+      LState := 0;
+    var LI := 1;
+    while LI <= Length(LText) do
+    begin
+      if (LIdx = ALine - 1) and (LI = ACol) then
+      begin
+        case LState of
+          1: Exit('a string literal');
+          2, 3, 4: Exit('a comment');
+        else
+          // The opener itself: `{`, `(*`, `//` at the column.
+          if (LText[LI] = '{') or (Copy(LText, LI, 2) = '(*') or
+             (Copy(LText, LI, 2) = '//') then
+            Exit('a comment');
+          Exit('');
+        end;
+      end;
+      case LState of
+        0:
+          if LText[LI] = '''' then
+            LState := 1
+          else if LText[LI] = '{' then
+            LState := 2
+          else if Copy(LText, LI, 2) = '(*' then
+          begin
+            LState := 3;
+            Inc(LI);
+          end
+          else if Copy(LText, LI, 2) = '//' then
+            LState := 4;
+        1:
+          if LText[LI] = '''' then
+            LState := 0;
+        2:
+          if LText[LI] = '}' then
+            LState := 0;
+        3:
+          if Copy(LText, LI, 2) = '*)' then
+          begin
+            LState := 0;
+            Inc(LI);
+          end;
+      end;
+      Inc(LI);
+    end;
+  end;
+end;
+
 // file + line + (name | column) -> what is there.
 function RoutineHeaderAt(AWs: TMcpWorkspace; const AFile: string;
   ALine: Integer; out AName: string; out AHeadLine, AHeadCol: Integer): Boolean;
@@ -1509,6 +1575,11 @@ begin
           ' (' + AWs.Members[LA.Members[0]].Config + ')', '')]);
       Break;
     end;
+    LText := PositionLexeme(LLines, LLine, LCol);
+    if LText <> '' then
+      raise EToolError.CreateFmt('%s:%d:%d (%s) is inside %s - nothing there '
+        + 'is resolved', [AWs.RelPath(
+        LFile), LLine, LCol, LName, LText]);
     raise EToolError.CreateFmt('nothing resolvable at %s:%d:%d (%s) - a '
       + 'local without declaration, a keyword, or a name the analysis could '
       + 'not resolve', [AWs.RelPath(LFile), LLine, LCol, LName]);
@@ -10632,7 +10703,6 @@ var
   LBound: Integer;
 begin
   BuildIndex(AA);
-  Result := False;
   LBound := DispatchClassBound;
   LM := AA.Proj.Model(AMid);
   LName := LM.Symbols[ASym].NameLower;
@@ -19396,8 +19466,8 @@ const
     '"targets":{"type":"array","items":{},"description":"Several targets in '
     + 'one call, answered one after another - names (\"TFoo.Bar\") or objects '
     + 'with what one call takes ({\"file\": ..., \"line\": ...}, `lines` '
-    + 'too). In place of `symbol`, `file`, `line`, `name`, `column`; the '
-    + 'other arguments go for every target"}';
+    + 'too). In place of `symbol`, `line`, `name`, `column`; the other '
+    + 'arguments, `file` too, go for every target"}';
 
   TOOLS_JSON = '[' +
     '{"name":"status","description":"What is loaded: project group members, '
@@ -19942,7 +20012,11 @@ function EachTarget(AWs: TMcpWorkspace; const AName: string;
   string;
 const
   MAX_TARGETS = 20;
-  PLACE: array[0..4] of string = ('symbol', 'file', 'line', 'name', 'column');
+  // `file` is not among them: given with the call, it is every target's
+  // that names none - their file (`line` targets) or the one their names
+  // are looked for in. An agent wrote `file` beside name targets and was
+  // refused (a field report).
+  PLACE: array[0..3] of string = ('symbol', 'line', 'name', 'column');
 var
   LV, LParsed: TJSONValue;
   LItems: TObjectList<TJSONObject>;

@@ -25,9 +25,14 @@ unit PasMcp.Server;
     answer to its request by id.
   - Writes to stdout are serialized by TMcpTransport, a message at a time.
 
-  The initial analysis runs on a thread of its own too (pastree-mcp.dpr). A
-  tool call waits for it (PasMcp.Tools.CallTool); the handshake and `status`
-  never do.
+  The initial analysis runs on a thread of its own too, started once the
+  project is known (Settle). A client with MCP roots is asked for them after
+  the handshake: the session's directory may hold another project than the
+  one found from the directory the server was started in - the Claude
+  desktop app starts the servers of a session in a git worktree in the main
+  checkout - and the load waits for the answer, ROOTS_WAIT_MS at most. A tool
+  call waits for the load (PasMcp.Tools.CallTool); the handshake and
+  `status` never do.
 
   A cancelled request (notifications/cancelled) is not answered, as MCP asks:
   dropped while still queued, its answer suppressed once running, and a
@@ -71,6 +76,12 @@ type
     destructor Destroy; override;
   end;
 
+  // The session's directory as the client gives it -> the workspace to use
+  // instead of the one the server was started with, or nil to keep that.
+  // ANote: what `status` says of it.
+  TMcpRootWorkspace = reference to function(const ADir: string;
+    out ANote: string): TMcpWorkspace;
+
   TMcpServer = class
   private
     FWs: TMcpWorkspace;
@@ -78,6 +89,17 @@ type
     FQueue: TThreadedQueue<TMcpTask>;
     FLock: TCriticalSection;
     FPending: TDictionary<string, TMcpTask>;   // not answered yet, by Key
+    // MCP roots: a client that has them is asked for them after the
+    // handshake, and the load waits for the answer (ROOTS_WAIT_MS at most).
+    // Settled once, under FLock: the workspace chosen and its load started.
+    FRootWorkspace: TMcpRootWorkspace;
+    FClientRoots: Boolean;
+    FRootsAsked: Integer;
+    FSettled: Boolean;
+    FSettledEvt: TEvent;
+    procedure Settle(ANew: TMcpWorkspace; const ARoot, ANote: string);
+    procedure AskRoots;
+    procedure TakeRoots(AMsg: TJSONObject);
     procedure Reply(AId: TJSONValue; AResult: TJSONValue);
     procedure ReplyError(AId: TJSONValue; ACode: Integer; const AMsg: string);
     procedure Progress(const AToken: string; ACount: Integer;
@@ -95,6 +117,9 @@ type
     procedure Handle(const AJson: string);
     // Starts the executor and reads until stdin closes.
     procedure Run;
+    // Set before Run when the project was looked for from the working
+    // directory; nil keeps the workspace whatever the roots.
+    property RootWorkspace: TMcpRootWorkspace write FRootWorkspace;
   end;
 
 const
@@ -108,8 +133,46 @@ implementation
 uses
   System.SysUtils,
   System.Classes,
+  System.StrUtils,
   PasMcp.Version,
   PasMcp.Log;
+
+const
+  // How long the load waits for the client's roots/list answer: a client
+  // answers in milliseconds, one that never does costs this once.
+  ROOTS_WAIT_MS = 3000;
+  ROOTS_ID_PREFIX = 'pastree-roots-';
+
+// A URI's path with its %XX escapes read as UTF-8 bytes. Not a URL query:
+// `+` stays a plus, as a file name may have one.
+function PercentDecoded(const AText: string): string;
+var
+  LBytes: TBytes;
+  LI, LN: Integer;
+begin
+  SetLength(LBytes, Length(AText) * 3);
+  LN := 0;
+  LI := 1;
+  while LI <= Length(AText) do
+  begin
+    if (AText[LI] = '%') and (LI + 2 <= Length(AText)) and
+       CharInSet(AText[LI + 1], ['0'..'9', 'A'..'F', 'a'..'f']) and
+       CharInSet(AText[LI + 2], ['0'..'9', 'A'..'F', 'a'..'f']) then
+    begin
+      LBytes[LN] := StrToInt('$' + Copy(AText, LI + 1, 2));
+      Inc(LN);
+      Inc(LI, 3);
+      Continue;
+    end;
+    for var LB in TEncoding.UTF8.GetBytes(AText[LI]) do
+    begin
+      LBytes[LN] := LB;
+      Inc(LN);
+    end;
+    Inc(LI);
+  end;
+  Result := TEncoding.UTF8.GetString(LBytes, 0, LN);
+end;
 
 { ---- TMcpTask ------------------------------------------------------------------ }
 
@@ -133,6 +196,102 @@ begin
   FQueue := TThreadedQueue<TMcpTask>.Create(10000, INFINITE, INFINITE);
   FLock := TCriticalSection.Create;
   FPending := TDictionary<string, TMcpTask>.Create;
+  FSettledEvt := TEvent.Create(nil, True, False, '');
+end;
+
+// The workspace the calls use from now on - ANew, or the one the server was
+// started with when nil - told the session's directory, and its load
+// started. Once; a later call frees ANew. From the reader (the roots answer,
+// a client without roots) or the executor (no answer in time).
+procedure TMcpServer.Settle(ANew: TMcpWorkspace; const ARoot, ANote: string);
+var
+  LWs: TMcpWorkspace;
+begin
+  FLock.Enter;
+  try
+    if FSettled then
+    begin
+      ANew.Free;
+      Exit;
+    end;
+    FSettled := True;
+    // The one the server was started with is left as it is: `initialize`'s
+    // instructions were written from it.
+    if ANew <> nil then
+      FWs := ANew;
+    if ARoot <> '' then
+      FWs.SetClientRoot(ARoot, ANote);
+    LWs := FWs;
+  finally
+    FLock.Leave;
+  end;
+  TThread.CreateAnonymousThread(
+    procedure
+    begin
+      LWs.Load;
+    end).Start;
+  FSettledEvt.SetEvent;
+end;
+
+procedure TMcpServer.AskRoots;
+begin
+  Inc(FRootsAsked);
+  FTransport.WriteMessage(Format('{"jsonrpc":"2.0","id":"%s%d","method":'
+    + '"roots/list"}', [ROOTS_ID_PREFIX, FRootsAsked]));
+end;
+
+// On the reader: the client's answer to roots/list. Its first file root is
+// the session's directory.
+procedure TMcpServer.TakeRoots(AMsg: TJSONObject);
+var
+  LRoots: TJSONValue;
+  LUri, LDir, LAll, LNote: string;
+  LNew: TMcpWorkspace;
+begin
+  LDir := '';
+  LAll := '';
+  LRoots := AMsg.FindValue('result.roots');
+  if LRoots is TJSONArray then
+    for var LRoot in TJSONArray(LRoots) do
+    begin
+      LUri := LRoot.GetValue<string>('uri', '');
+      LAll := LAll + IfThen(LAll <> '', ', ') + LUri;
+      if (LDir = '') and StartsText('file://', LUri) then
+      begin
+        // file:///C:/Repos/x%20y -> C:\Repos\x y; file://host/share ->
+        // \\host\share. Claude Code 2.1 writes file://C:\Repos\x, a path
+        // after the scheme as it is.
+        LDir := PercentDecoded(Copy(LUri, 8, MaxInt));
+        if (Length(LDir) >= 3) and (LDir[1] = '/') and (LDir[3] = ':') then
+          Delete(LDir, 1, 1)
+        else if (LDir <> '') and (LDir[1] <> '/') and
+           not ((Length(LDir) >= 2) and (LDir[2] = ':')) then
+          LDir := '//' + LDir;
+        LDir := ExcludeTrailingPathDelimiter(LDir.Replace('/', '\'));
+      end;
+    end;
+  if AMsg.GetValue('error') <> nil then
+    Log('roots/list: the client answered with an error: %s', [AMsg.GetValue(
+      'error').ToJSON])
+  else
+    Log('roots/list: %s', [IfThen(LAll <> '', LAll, 'none')]);
+  if FSettled then
+  begin
+    if LDir <> '' then
+      Log('the client''s root %s came after the load started - the server '
+        + 'keeps %s', [LDir, FWs.ProjectFile]);
+    Exit;
+  end;
+  LNew := nil;
+  LNote := '';
+  if (LDir <> '') and Assigned(FRootWorkspace) then
+  try
+    LNew := FRootWorkspace(LDir, LNote);
+  except
+    on E: Exception do
+      Log('the client''s root %s: %s: %s', [LDir, E.ClassName, E.Message]);
+  end;
+  Settle(LNew, LDir, LNote);
 end;
 
 procedure TMcpServer.Reply(AId: TJSONValue; AResult: TJSONValue);
@@ -194,8 +353,9 @@ end;
 
 function TMcpServer.Initialize(AParams: TJSONObject): TJSONObject;
 var
-  LVersion: string;
+  LVersion, LNames: string;
   LCaps, LTools, LInfo: TJSONObject;
+  LV: TJSONValue;
 begin
   LVersion := cMcpProtocolVersion;
   if AParams <> nil then
@@ -214,9 +374,23 @@ begin
   LInfo.AddPair('version', PasTreeMcpVersion);
   Result.AddPair('serverInfo', LInfo);
   Result.AddPair('instructions', ServerInstructions(FWs));
+  LNames := '';
   if AParams <> nil then
-    Log('initialize from %s, protocol %s', [AParams.GetValue<string>(
-      'clientInfo.name', '?'), LVersion]);
+  begin
+    LV := AParams.GetValue('capabilities');
+    if LV is TJSONObject then
+      for var LPair in TJSONObject(LV) do
+        LNames := LNames + IfThen(LNames <> '', ', ') + LPair.JsonString.Value;
+    FClientRoots := (LV is TJSONObject) and (TJSONObject(LV).GetValue('roots')
+      <> nil);
+    Log('initialize from %s %s, protocol %s, client capabilities: %s', [
+      AParams.GetValue<string>('clientInfo.name', '?'), AParams.GetValue<string>(
+      'clientInfo.version', ''), LVersion, IfThen(LNames <> '', LNames,
+      'none')]);
+  end;
+  // No roots to wait for: the load starts now.
+  if not FClientRoots then
+    Settle(nil, '', '');
 end;
 
 // On the reader: the call, cloned out of the message, into the queue.
@@ -283,6 +457,14 @@ procedure TMcpServer.Execute;
 var
   LTask: TMcpTask;
 begin
+  // No call before the workspace is chosen: a call queued behind the roots
+  // answer would run on the one about to be replaced.
+  if FSettledEvt.WaitFor(ROOTS_WAIT_MS) <> wrSignaled then
+  begin
+    Log('no roots/list answer in %d ms - the project the server was started '
+      + 'with', [ROOTS_WAIT_MS]);
+    Settle(nil, '', '');
+  end;
   while FQueue.PopItem(LTask) = wrSignaled do
   begin
     if LTask = nil then
@@ -470,9 +652,25 @@ begin
       LParams := nil;
     if LId = nil then
     begin
-      // A notification: initialized needs nothing, cancelled stops a request.
+      // A notification: initialized asks for the roots (a client may send
+      // no request before it), cancelled stops a request.
       if LMethod = 'notifications/cancelled' then
-        Cancel(LParams);
+        Cancel(LParams)
+      else if (LMethod = 'notifications/initialized') and FClientRoots then
+        AskRoots
+      else if LMethod = 'notifications/roots/list_changed' then
+      begin
+        Log('the client''s roots changed - asked again; the project stays');
+        AskRoots;
+      end;
+      Exit;
+    end;
+    // A response: to roots/list, the one request this server sends.
+    if (LMethod = '') and ((LObj.GetValue('result') <> nil) or
+       (LObj.GetValue('error') <> nil)) then
+    begin
+      if StartsStr(ROOTS_ID_PREFIX, LId.Value) then
+        TakeRoots(LObj);
       Exit;
     end;
     try

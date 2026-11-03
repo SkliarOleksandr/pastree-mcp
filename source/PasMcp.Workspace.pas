@@ -181,6 +181,12 @@ type
     FStudio: TMcpStudio;
     // Started with no Delphi project (SetNoProject): why, '' when there is one.
     FNoProject: string;
+    // Where the server was started and how the project was chosen, and the
+    // directory the client says the session works in (SetLaunch,
+    // SetClientRoot): for `status`.
+    FLaunch: string;
+    FClientRoot: string;
+    FClientNote: string;
     // Light mode (SPEC 9.9): on unless --no-light. FLightDirs: the trees
     // --light names, full paths. FLightNotOwn: those of them under the group
     // directory or an --also root and outside every analysis' project
@@ -276,6 +282,12 @@ type
     // (PasMcp.Build.NoProjectProgram). Before Load.
     procedure SetNoProject(const AReason: string);
     property NoProject: string read FNoProject;
+    // `status`'s lines on where the server runs: AText the directory it was
+    // started in and how the project was chosen. Before Load.
+    procedure SetLaunch(const AText: string);
+    // The session's directory as the client gives it (MCP roots), and what
+    // was done about it (ANote, may be ''). Before the first tool call.
+    procedure SetClientRoot(const ARoot, ANote: string);
     // `compile`'s `pastree` (SPEC 9.4): AMain analyzed by PasTree as a
     // program of its own - configured as member AMember's analysis, but for
     // APlatform and AStudio's compiler, AExtraSearch after its search path -
@@ -375,6 +387,15 @@ function StampOf(const APath: string; out AStamp: TMcpFileStamp): Boolean;
 // what answers meanwhile.
 function NoProjectAdvice: string;
 
+// The project a server started in ADir indexes: the nearest directory
+// holding a project file, from ADir up - the first one holding any decides,
+// and an ambiguous one fails rather than being passed over for a project
+// above it that the session is not in. The walk stops at the repository
+// root (a `.git` directory, or the `.git` file of a worktree or submodule) -
+// above it is another repository, or none - and at the drive root. '' when
+// none is found or none to choose, and AWhy says why.
+function DiscoverProject(const ADir: string; out AWhy: string): string;
+
 implementation
 
 uses
@@ -415,6 +436,45 @@ begin
     + 'and `find`, `definition`, `source`, `members`, `references`, '
     + '`callers`, `callees`, `related` and `outline` answer over the '
     + 'installed RTL and VCL';
+end;
+
+function DiscoverProject(const ADir: string; out AWhy: string): string;
+var
+  LDir, LUp: string;
+  LFound: TArray<string>;
+begin
+  Result := '';
+  AWhy := '';
+  // With its delimiter throughout: `C:` alone is the drive's current directory.
+  LDir := IncludeTrailingPathDelimiter(ADir);
+  repeat
+    LFound := TDirectory.GetFiles(LDir, '*.groupproj');
+    if Length(LFound) > 1 then
+    begin
+      AWhy := 'several .groupproj files in ' + LDir;
+      Exit;
+    end;
+    if Length(LFound) = 0 then
+    begin
+      LFound := TDirectory.GetFiles(LDir, '*.dproj');
+      if Length(LFound) > 1 then
+      begin
+        AWhy := 'several .dproj files and no .groupproj in ' + LDir;
+        Exit;
+      end;
+    end;
+    if Length(LFound) = 1 then
+      Exit(LFound[0]);
+    if TDirectory.Exists(LDir + '.git') or TFile.Exists(LDir + '.git') then
+      Break;
+    LUp := IncludeTrailingPathDelimiter(
+      ExtractFileDir(ExcludeTrailingPathDelimiter(LDir)));
+    if Length(LUp) >= Length(LDir) then
+      Break;   // the drive root, or a share's
+    LDir := LUp;
+  until False;
+  AWhy := 'no .groupproj or .dproj in ' + ExcludeTrailingPathDelimiter(ADir) +
+    ' or above it up to ' + LDir;
 end;
 
 function SameStamp(const A, B: TMcpFileStamp): Boolean;
@@ -757,6 +817,17 @@ end;
 procedure TMcpWorkspace.SetNoProject(const AReason: string);
 begin
   FNoProject := AReason;
+end;
+
+procedure TMcpWorkspace.SetLaunch(const AText: string);
+begin
+  FLaunch := AText;
+end;
+
+procedure TMcpWorkspace.SetClientRoot(const ARoot, ANote: string);
+begin
+  FClientRoot := ARoot;
+  FClientNote := ANote;
 end;
 
 function TMcpWorkspace.IndexedProjects: string;
@@ -2161,6 +2232,14 @@ begin
       LSb.AppendLine('project: ' + FProjectFile);
       LSb.AppendLine('paths in results are relative to: ' + FRoot);
     end;
+    if FLaunch <> '' then
+      LSb.AppendLine('started in: ' + FLaunch);
+    // A session in a git worktree inside the repository got a server started
+    // in the main checkout, and read its own edits with sed for a day (a
+    // field report): which directory the answers are about, said.
+    if FClientRoot <> '' then
+      LSb.AppendLine('session directory (the client''s root): ' + FClientRoot
+        + IfThen(FClientNote <> '', ' - ' + FClientNote, ''));
     if FStudio.Found then
     begin
       LSb.AppendLine(Format('RAD Studio %s (dcc %.1f) at %s', [FStudio.Version,

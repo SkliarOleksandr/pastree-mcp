@@ -307,7 +307,7 @@ const
 var
   LStart, LI: Integer;
   LPattern, LTool: string;
-  LRecursive, LOtherInclude, LGrepLike, LNamedOnly: Boolean;
+  LRecursive, LOtherInclude, LGrepLike, LNamedOnly, LHasPattern: Boolean;
   LPaths: Integer;
 begin
   AFinding := Default(TFinding);
@@ -347,6 +347,9 @@ begin
   LNamedOnly := True;
   LPaths := 0;
   LPattern := '';
+  // Set by the word, not by its text: `grep "" PasTree-x.log` has an empty
+  // pattern, and the file name is not one.
+  LHasPattern := False;
   LI := LStart;
   while LI <= High(AWords) do
   begin
@@ -356,9 +359,14 @@ begin
     begin
       if LI < High(AWords) then
         LPattern := AWords[LI + 1];
+      LHasPattern := True;
       Inc(LI);
     end
-    else if MatchText(LW, cValued) then
+    // A letter option by its case: grep's -c counts and -C takes a value, and
+    // `grep -c x PasTree-mcp.log` was read as -C x and a search for the file
+    // name, `PasTree` (a field report). PowerShell's words are any case.
+    else if ((Length(LW) = 2) and MatchStr(LW, cValued)) or
+      ((Length(LW) > 2) and MatchText(LW, cValued)) then
     begin
       if (LI < High(AWords)) and MatchText(LW, ['-g', '--glob', '--include',
         '-Include', '-t', '--type', '-T']) and
@@ -379,8 +387,11 @@ begin
       LRecursive := True
     else if LW.StartsWith('-') or (LW.StartsWith('/') and (Length(LW) = 2)) then
       // another option
-    else if LPattern = '' then
-      LPattern := LW
+    else if not LHasPattern then
+    begin
+      LPattern := LW;
+      LHasPattern := True;
+    end
     else
     begin
       Inc(LPaths);

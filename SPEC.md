@@ -261,6 +261,27 @@ is own - but for one under a tree `--light` names, which is library. Everything
 else is library: not watched, demoted after every build, listed after own
 files, and read interface-only where it lies in a library tree (9.9).
 
+**The session's directory** (0.47.0). The working directory the walk
+starts from is the client's choice, not the session's: three PasTree
+sessions in git worktrees inside the repository got servers started in the
+main checkout, which indexed its files while they edited their own, and
+they read their edits with `sed -n` about 135 times (a field report). The
+log did not name the working directory, so it was found only by the logs
+being all beside the main checkout's project. MCP roots say where the
+session works: after `notifications/initialized` the server sends
+`roots/list` to a client declaring `roots`, and when the walk from its
+first `file` root finds another project than the working directory's, the
+calls use a workspace of that one, configured by the same command line.
+The load starts once that is settled - on the answer, at once for a client
+without roots, or after 3 s - and the executor takes no call before, so
+none runs on a workspace about to be replaced. `initialize`'s instructions
+were written before the answer, from the working directory's project. A
+root answered later, and `notifications/roots/list_changed`, are logged and
+change nothing. Claude Code 2.1.168 declares `roots` and answers in about
+600 ms with `file://C:\...` - the path after the scheme as it is, not a
+`file:///C:/...` URI - so both are read. With `--project` the roots are
+asked for `status` only.
+
 **No project** (0.46.0). Registered at user scope without `--project`, the
 server finds its project by walking up from the working directory to the
 repository root (README). Where the walk finds none - or several, which it

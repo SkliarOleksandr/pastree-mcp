@@ -94,6 +94,8 @@ source {"targets":[{"file":"Shared/uShapes.pas","line":55},{"symbol":"NoSuchThin
 source {"targets":"TCircle.Area RunB","limit":2}
 source {"targets":["NoSuchA","NoSuchB"]}
 source {"targets":[]}
+source {"file":"Shared/uShapes.pas","targets":["TCircle.Area",{"line":55}]}
+source {"file":"AppB/uBoxes.pas","line":97,"name":"TShapeBox"}
 source {"targets":["TCircle"],"symbol":"TShape"}
 source {"targets":[{"symbol":"TCircle","bogus":1}]}
 references {"targets":["TCircle","TShape.Area"],"mode":"count"}

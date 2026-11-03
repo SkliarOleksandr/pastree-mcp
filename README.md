@@ -127,6 +127,15 @@ directory with several `.groupproj` (or several `.dproj` and no `.groupproj`)
 stops the walk - that repository needs its own `.mcp.json` with
 `--project`, which overrides the user-scope registration of the same name.
 
+The working directory is not always the session's: the Claude desktop app
+starts the servers of a session in a git worktree in the main checkout. So
+the server asks a client that has MCP roots (Claude Code does) for them,
+and when the walk from the first root finds another project, indexes that
+one (0.47.0). The load waits for the answer, 3 s at most. `status` says
+where the server was started, the session's directory, and which project
+it took; the log names the working directory too. With `--project` the
+roots are only shown.
+
 Where the walk finds no project, or several, the server starts without one
 (0.46.0; it exited before the handshake, and Claude Code showed "Connection
 closed" in every repository without a Delphi project). It indexes the
