@@ -2150,7 +2150,7 @@ end;
   file whose best is 1 for a qualified name only has the words somewhere,
   and is left out. A declaration's line comes with the lines its parameter
   list goes on over (JoinedTextLine). The files are read until SCAN_MS runs
-  out, and the answer says so. '' for a wildcard query; with AAlways, a line
+  out, and the answer says so, as it says a walk cut short. '' for a wildcard query; with AAlways, a line
   saying that nothing was found, else '' then too. }
 function OutsideIndexNote(AWs: TMcpWorkspace; const AQuery: string;
   AAlways: Boolean): string;
@@ -2164,7 +2164,7 @@ var
   LSite: TWordSite;
   LText, LTextLower, LWord, LDotted: string;
   LSearched, LCol, LScore: Integer;
-  LAll: Boolean;
+  LAll, LCut: Boolean;
   LSW: TStopwatch;
   LSb: TStringBuilder;
 begin
@@ -2187,7 +2187,7 @@ begin
     LDotted := string.Join('.', LSegs);
   // Outside the index as the full analysis has it (light mode).
   QClosure(AWs);
-  LFiles := AWs.UnindexedSources;
+  LFiles := AWs.UnindexedSources(LCut);
   LSearched := 0;
   LSW := TStopwatch.StartNew;
   LSites := TList<TWordSite>.Create;
@@ -2271,6 +2271,9 @@ begin
       LSb.AppendLine(Format('(%d of %d files outside the index searched - the '
         + 'search stops after %d s)', [LSearched, Length(LFiles),
         SCAN_MS div 1000]));
+    if LCut and ((LSites.Count > 0) or AAlways) then
+      LSb.AppendLine('(the walk of the group directory stopped after 2 s - '
+        + 'the files beyond it were not searched)');
     Result := LSb.ToString.TrimRight;
   finally
     LSb.Free;
@@ -2472,6 +2475,32 @@ begin
     ASb.AppendLine(Format('%s... %d more', [AIndent, AMore]));
 end;
 
+// The own units' names like the last segment of the qualified AQuery under
+// any qualifier, for when its qualifier has nothing like it: for
+// `TPasCompleter.ArgTypedOverload` (the class is TPasCompletion) the refusal
+// said no name of the own units contains `ArgTypedOverload` (a field report).
+// Own units only, as the refusal's own search: a library wildcard would make
+// light units full, for a hint.
+function LikeUnqualified(AWs: TMcpWorkspace; const AQuery, AKind: string;
+  ALimit: Integer): TArray<TTarget>;
+var
+  LParts: TArray<string>;
+  LLast: string;
+  LMore: Integer;
+begin
+  Result := nil;
+  LParts := AQuery.Split(['.']);
+  if (Length(LParts) < 2) or (ALimit <= 0) then
+    Exit;
+  LLast := StripGenerics(LParts[High(LParts)]);
+  if (LLast = '') or IsWildPattern(LLast) then
+    Exit;
+  Result := ResolveName(AWs, '*' + LLast + '*', AKind, True, ALimit, LMore);
+  if Length(Result) < ALimit then
+    Result := Result + SimilarNames(AWs, LLast, AKind, True, ALimit -
+      Length(Result));
+end;
+
 // The refusal of a name no declaration matches, for every tool that takes
 // `symbol`: what was searched, and where the name is written outside it.
 function NoSuchDeclaration(AWs: TMcpWorkspace; const ASymbol: string): string;
@@ -2482,6 +2511,7 @@ var
   LLike, LLocals: TArray<TTarget>;
   LMore: Integer;
   LSb: TStringBuilder;
+  LOtherQual: Boolean;
 begin
   LLast := StripGenerics(ASymbol.Split(['.'])[High(ASymbol.Split(['.']))]);
   LLocals := LocalDecls(AWs, ASymbol, '', '', LIKE_ROWS, LMore);
@@ -2512,10 +2542,18 @@ begin
       LIKE_ROWS, LMore);
     LLike := LLike + SimilarNames(AWs, ASymbol, '', True, LIKE_ROWS -
       Length(LLike));
+    LOtherQual := (Length(LLike) = 0) and (LQual <> '');
+    if LOtherQual then
+      LLike := LikeUnqualified(AWs, ASymbol, '', LIKE_ROWS);
     if Length(LLike) > 0 then
     begin
-      Result := Result + sLineBreak + 'names like it in the group''s own '
-        + 'units:';
+      if LOtherQual then
+        Result := Result + sLineBreak + Format('nothing in `%s` is like it - '
+          + 'names like `%s` elsewhere in the group''s own units:', [Copy(LQual,
+          1, Length(LQual) - 1), LLast])
+      else
+        Result := Result + sLineBreak + 'names like it in the group''s own '
+          + 'units:';
       for var LT in LLike do
         Result := Result + sLineBreak + '  ' + DescribeTarget(AWs, LT);
     end
@@ -3436,11 +3474,12 @@ begin
 end;
 
 procedure AppendLike(ASb: TStringBuilder; AWs: TMcpWorkspace;
-  const ALike: TArray<TTarget>);
+  const ALike: TArray<TTarget>; AHeader: Boolean = True);
 begin
   if Length(ALike) = 0 then
     Exit;
-  ASb.AppendLine('names like it:');
+  if AHeader then
+    ASb.AppendLine('names like it:');
   for var LT in ALike do
     ASb.AppendLine(DescribeTarget(AWs, LT));
 end;
@@ -3451,7 +3490,7 @@ var
   LLimit, LMore: Integer;
   LCands, LLike, LLocals: TArray<TTarget>;
   LSb: TStringBuilder;
-  LFallback, LOwnOnly: Boolean;
+  LFallback, LOwnOnly, LOtherQual: Boolean;
   LAll, LOwn: Integer;
   LExtras: TFindExtras;
   LIn: string;
@@ -3481,6 +3520,7 @@ begin
       LExtras);
     LogStep('find: the search', LSW);
     LFallback := False;
+    LOtherQual := False;
     // Nothing named: a body's own declaration of that name is the answer
     // (`find LCount` - the routine declaring it), before any name like it.
     if (Length(LCands) = 0) and (LMore = 0) and not IsWildPattern(LQuery) then
@@ -3525,6 +3565,11 @@ begin
       // for TCreditStatus (a field report). The same words, or a misspelling.
       if LLimit > 0 then
         LLike := SimilarNames(AWs, LQuery, LKind, LOwnOnly, Min(LLimit, 8));
+      LOtherQual := (Length(LCands) = 0) and (LMore = 0) and
+        (Length(LLike) = 0);
+      if LOtherQual then
+        LLike := LikeUnqualified(AWs, LQuery, LKind, Min(LLimit, 8));
+      LOtherQual := LOtherQual and (Length(LLike) > 0);
       LogStep('find: names like it', LSW);
     end;
     LSb := TStringBuilder.Create;
@@ -3546,7 +3591,12 @@ begin
         LSb.AppendLine(Format('no declaration%s matches `%s`%s among %s',
           [IfThen(LKind <> '', ' of kind ' + LKind), LQuery, LIn,
           IndexScope(AWs)]));
-      AppendLike(LSb, AWs, LLike);
+      if LOtherQual then
+        LSb.AppendLine(Format('nothing under `%s` is like it - names like '
+          + '`%s` elsewhere in the group''s own units:', [Copy(LQuery, 1,
+          LQuery.LastIndexOf('.')), Copy(LQuery, LQuery.LastIndexOf('.') + 2,
+          MaxInt)]));
+      AppendLike(LSb, AWs, LLike, not LOtherQual);
       LSb.AppendLine(OutsideIndexNote(AWs, LQuery, True));
       LogStep('find: where it is written outside the index', LSW);
       Exit(LSb.ToString.TrimRight);

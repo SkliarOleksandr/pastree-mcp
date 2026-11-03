@@ -131,6 +131,10 @@ Check 'find similar misspelt' (Block $b 'find {"query":"TBigCirle"}') @("names l
 Check 'source similar' (Block $b 'source {"symbol":"TCircleBig"}') @('no declaration named `TCircleBig` among ', "names like it in the group's own units:`n  AppB\uAppB.pas:11  TBigCircle (class)")
 Check 'source similar member' (Block $b 'source {"symbol":"TCircle.Areaa"}') @("names like it in the group's own units:`n  Shared\uShapes.pas:26  TCircle.Area (function)")
 Check 'source nothing like' (Block $b 'source {"symbol":"Zzzqqq"}') @("no name of the group's own units contains ``Zzzqqq`` or is like it either")
+# A wrong qualifier (TPasCompleter for TPasCompletion, a field report): the
+# names like the last segment under any other, not "no name contains it".
+Check 'source other qualifier' (Block $b 'source {"symbol":"TNoSuchShape.Area"}') @("nothing in ``TNoSuchShape`` is like it - names like ``Area`` elsewhere in the group's own units:", 'Shared\uShapes.pas:26  TCircle.Area (function)') @('no name of the group')
+Check 'find other qualifier' (Block $b 'find {"query":"TNoSuchShape.Area"}') @("nothing under ``TNoSuchShape`` is like it - names like ``Area`` elsewhere in the group's own units:", 'Shared\uShapes.pas:26  TCircle.Area (function)')
 # Ranked (0.43.1): of names as many words alike, the type, whose last word is
 # the query's and which a T-prefixed query asks for, before the property and
 # the field - alphabetically the property came first.

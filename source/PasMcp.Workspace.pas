@@ -346,12 +346,14 @@ type
     // `pastree-mcp.dproj`, `the 9 projects of Foo.groupproj`.
     function IndexedProjects: string;
     // The Pascal sources (.pas .dpr .dpk .inc) no analysis holds, under the
-    // group directory (every level, but .git and the IDE's __history and
-    // __recovery) and in the members' own search path directories. The index
-    // is the projects' closure, not the directory: a unit nothing uses is
-    // invisible to every tool, and "no declaration matches" alone does not
-    // say that the name may be declared in one.
-    function UnindexedSources: TArray<string>;
+    // group directory (every level, but a directory named with a leading dot
+    // and the IDE's __history and __recovery; in a git work tree only what
+    // git lists - tracked, or untracked and not ignored) and in the members'
+    // own search path directories. The index is the projects' closure, not
+    // the directory: a unit nothing uses is invisible to every tool, and "no
+    // declaration matches" alone does not say that the name may be declared
+    // in one. ACut: the walk ran out of time and listed only part of them.
+    function UnindexedSources(out ACut: Boolean): TArray<string>;
     // APath relative to Root when it lies under it, else APath unchanged.
     function RelPath(const APath: string): string;
     // AFile as the user wrote it (relative to Root, or absolute) -> full path.
@@ -386,7 +388,8 @@ uses
   PasTree.Preprocessor,
   PasMcp.Log,
   PasMcp.Version,
-  PasMcp.GroupProj;
+  PasMcp.GroupProj,
+  PasMcp.Build;
 
 function StampOf(const APath: string; out AStamp: TMcpFileStamp): Boolean;
 var
@@ -773,11 +776,17 @@ begin
   end;
 end;
 
-function TMcpWorkspace.UnindexedSources: TArray<string>;
+function TMcpWorkspace.UnindexedSources(out ACut: Boolean): TArray<string>;
+const
+  // The walk without git: a directory of probe outputs and corpus copies
+  // holds hundreds of thousands of files.
+  WALK_MS = 2000;
 var
   LIndexed, LDone: TDictionary<string, Boolean>;
   LList: TList<string>;
   LFull: string;
+  LSW: TStopwatch;
+  LCut: Boolean;
 
   function IsSource(const AName: string): Boolean;
   var
@@ -786,6 +795,47 @@ var
     LExt := LowerCase(TPath.GetExtension(AName));
     Result := (LExt = '.pas') or (LExt = '.dpr') or (LExt = '.dpk') or
       (LExt = '.inc');
+  end;
+
+  // A junction could lead back up; the IDE's backups repeat every unit under
+  // another extension anyway.
+  function SkippedDir(const AName: string): Boolean;
+  begin
+    Result := StartsStr('.', AName) or SameText(AName, '__history') or
+      SameText(AName, '__recovery');
+  end;
+
+  // Under a git work tree, the files git lists: what it ignores is build
+  // output and working papers. PasTree's ignored local\ and out\ hold
+  // 390,000 Pascal files of probes and copies, and their walk kept a
+  // no-match answer 8 minutes (a field report, 0.46.2). False when git is
+  // missing or the group directory is in no work tree.
+  function FromGit: Boolean;
+  var
+    LLines, LSegs: TArray<string>;
+    LSkip: Boolean;
+  begin
+    Result := RunGit(FRoot, 'ls-files -co --exclude-standard', LLines);
+    if not Result then
+      Exit;
+    for var LLine in LLines do
+    begin
+      LSegs := LLine.Split(['/']);
+      if (Length(LSegs) = 0) or not IsSource(LSegs[High(LSegs)]) then
+        Continue;
+      LSkip := False;
+      for var LIdx := 0 to High(LSegs) - 1 do
+        if SkippedDir(LSegs[LIdx]) then
+        begin
+          LSkip := True;
+          Break;
+        end;
+      if LSkip then
+        Continue;
+      LFull := TPath.Combine(FRoot, string.Join(PathDelim, LSegs));
+      if not LIndexed.ContainsKey(LowerCase(LFull)) and TFile.Exists(LFull) then
+        LList.Add(LFull);
+    end;
   end;
 
   procedure Walk(const ADir: string; ADeep: Boolean);
@@ -799,17 +849,18 @@ var
       Exit;
     try
       repeat
+        if LSW.ElapsedMilliseconds > WALK_MS then
+        begin
+          LCut := True;
+          Break;
+        end;
         if (LSr.Name = '.') or (LSr.Name = '..') then
           Continue;
         LPath := TPath.Combine(ADir, LSr.Name);
         if (LSr.Attr and faDirectory) <> 0 then
         begin
-          // A junction could lead back up; the IDE's backups repeat every
-          // unit under another extension anyway.
           if ADeep and ((LSr.Attr and FILE_ATTRIBUTE_REPARSE_POINT) = 0) and
-             not StartsStr('.', LSr.Name) and
-             not SameText(LSr.Name, '__history') and
-             not SameText(LSr.Name, '__recovery') then
+             not SkippedDir(LSr.Name) then
             Walk(LPath, True);
         end
         else if IsSource(LSr.Name) and
@@ -845,7 +896,10 @@ begin
               LIndexed.AddOrSetValue(LowerCase(LFile), True);
         end;
       end;
-    Walk(FRoot, True);
+    LCut := False;
+    LSW := TStopwatch.StartNew;
+    if not FromGit then
+      Walk(FRoot, True);
     // A search path directory holds units by name, not by level. Its path
     // may be written `..\lib`: the index holds full paths.
     for var LMem in FMembers do
@@ -863,6 +917,7 @@ begin
         then
           Walk(LFull, False);
       end;
+    ACut := LCut;
     Result := LList.ToArray;
   finally
     LList.Free;

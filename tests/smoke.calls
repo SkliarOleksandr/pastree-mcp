@@ -20,6 +20,8 @@ find {"query":"TfixRankStatus"}
 source {"symbol":"TfixRankStatus"}
 source {"symbol":"TCircle.Areaa"}
 source {"symbol":"Zzzqqq"}
+source {"symbol":"TNoSuchShape.Area"}
+find {"query":"TNoSuchShape.Area"}
 find {"query":"*Circ*", "scope":"project", "limit":2}
 find {"query":"*Circ*", "scope":"project", "limit":0}
 find {"query":"*Circ*", "in":"Shared"}

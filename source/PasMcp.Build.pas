@@ -202,6 +202,10 @@ function BuildMember(const ASpec: TBuildSpec; ARebuild: Boolean;
 procedure CompareWithBaseline(var AResult: TBuildResult;
   const AChangedFiles: TArray<string>);
 
+// One git command in ADir: its output lines, or False when git is not on the
+// PATH, ADir is in no work tree, or the command fails.
+function RunGit(const ADir, AArgs: string; out ALines: TArray<string>): Boolean;
+
 // The files git reports changed under ADir, full paths, those on disk only:
 // the ones not committed (staged, unstaged, untracked) and the ones the
 // branch's own commits changed since it left ABase - by default the remote's
@@ -667,8 +671,6 @@ end;
 
 { ---- what git says changed --------------------------------------------------- }
 
-// One git command in ADir: its output lines, or False when git is not on the
-// PATH, ADir is in no work tree, or the command fails.
 function RunGit(const ADir, AArgs: string; out ALines: TArray<string>): Boolean;
 var
   LGit: string;
