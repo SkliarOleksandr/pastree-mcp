@@ -136,6 +136,27 @@ where the server was started, the session's directory, and which project
 it took; the log names the working directory too. With `--project` the
 roots are only shown.
 
+A project the group does not list - its tests, a tool - is invisible to
+every tool until it is indexed with the group. `pastree-mcp.json` beside the
+project file names such projects:
+
+```json
+{"also": ["tests/*.dpr", "tools/Gen.dproj"], "like": "PasTreeDemo"}
+```
+
+`also` takes paths and patterns (a wildcard in the file name), relative to
+the project file's directory; a `.dpr` beside a `.dproj` that is matched
+too, or that the group lists, is that project. A bare `.dpr` takes the
+settings - platform, search path, defines, namespaces - of the member `like`
+names, else of the group's largest, and shares its analysis. The file is
+read again on the call after it changes, so an agent can write it and go
+on; that call says which projects it added and what in it is wrong, and
+`status` shows it. `--also` does the same from the command line (0.48.0).
+Until then, `callers`, `references`, `impact`, `rename_plan` and
+`change_plan` of an own declaration say which files outside the index use
+its unit and write its name - not counted, a word match - and the `also`
+entry that indexes them.
+
 Where the walk finds no project, or several, the server starts without one
 (0.46.0; it exited before the handshake, and Claude Code showed "Connection
 closed" in every repository without a Delphi project). It indexes the
@@ -204,7 +225,7 @@ no log, only a small state file per session under
 | Option | Default | |
 | --- | --- | --- |
 | `--project <file>` | discovered | `.groupproj`, `.dproj`, `.dpr` or `.dpk`; none discovered: the installed library, no project (above) |
-| `--also <file>` | none | A `.dproj` or `.dpr` outside the group, indexed, checked and built as a member of it (`status` marks it); repeats. Relative to the project's directory. For a tests project no `.groupproj` lists |
+| `--also <file>` | none | A `.dproj` or `.dpr` outside the group, or a pattern (`tests/*.dpr`), indexed, checked and built as a member of it (`status` marks it); repeats. Relative to the project's directory. For a tests project no `.groupproj` lists; `pastree-mcp.json` (above) names them without a new session |
 | `--studio <ver>` | `$BDS`, else newest | RAD Studio registry version: `37.0`, `23.0` |
 | `--platform <p>` | per project | Override every member's platform: `Win32`, `Win64` |
 | `--config <c>` | per project | Build configuration: `Debug`, `Release` |

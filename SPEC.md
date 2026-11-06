@@ -282,6 +282,45 @@ change nothing. Claude Code 2.1.168 declares `roots` and answers in about
 `file:///C:/...` URI - so both are read. With `--project` the roots are
 asked for `status` only.
 
+**Projects the group does not list** (0.48.0). The index is the members'
+`uses` closure, and PasTree's group lists its demo and one test: its 16
+other tests, `.dpr` files that `tests\build.bat` builds with dcc32, were
+read with Read and `sed -n` (one of them about 42 times over a report's
+sessions) and searched with grep. Worse than the cost, the answers were
+wrong without a word: `callers` of a routine only a test calls said "no
+callers", a `rename_plan` left the tests broken, `impact` named no test to
+run. Two parts:
+
+- *Said.* `callers`, `references`, `impact`, `rename_plan` and `change_plan`
+  of an own declaration end with the files outside the index (the sources
+  `find` searches on a miss, section 3) that name its unit and write its
+  name in code - a word match, not resolved, and not counted: to use a
+  declaration a file's `uses` must name its unit, so a name as common as
+  `Create` does not list every file. The first line writing it outside the
+  `uses` clause, 5 files, the rest counted, and the `also` entry that
+  indexes them - the projects among them, a directory's several as a
+  pattern. The texts are kept by stamp, the list taken again per call: on
+  PasTree 12 files, 70-100 ms more a call.
+- *Fixed by the agent.* `pastree-mcp.json` beside the project file:
+  `{"also": [paths or patterns], "like": "<member>"}`. `--also` (0.23.0)
+  needs a new session, and the agent that found the gap cannot give it: the
+  file is a project file of the freshness check (section 5), its change -
+  written, edited, deleted, or a project its patterns match come or gone -
+  reloads the workspace on the next call, whose answer says what it added
+  and what in it is wrong (an unknown key, a pattern that matches nothing,
+  a `like` no member is named), in one line. A bare `.dpr` takes the
+  settings of the member `like` names, else of the largest - the one an
+  analysis takes its configuration from (section 4): with the IDE's
+  defaults, Win32 and no search path, PasTree's tests made a Win32 analysis
+  of their own beside the demo's Win64, and a test whose `uses` names a unit
+  without `in` resolved nothing. A `.dpr` whose `.dproj` the group lists is
+  that member (`tests\*.dpr` matches SemaNavSmoke's). PasTree with its 16
+  tests: 1.8 s to load, 17 units and 15 MB more; `status` folds many alike
+  into one line. Not chosen: finding such projects without being told - a
+  `.dpr` under the directory that reaches the group's units is a test as
+  often as a probe or a copy, and the settings it would take are a guess
+  nobody confirmed.
+
 **No project** (0.46.0). Registered at user scope without `--project`, the
 server finds its project by walking up from the working directory to the
 repository root (README). Where the walk finds none - or several, which it

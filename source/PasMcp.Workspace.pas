@@ -111,7 +111,10 @@ type
     Files: TArray<string>;   // the .pas files the project lists
     Analysis: Integer;       // index into TMcpWorkspace.Analyses; -1 = failed
     Error: string;
-    Extra: Boolean;          // not in the group: given by --also
+    Extra: Boolean;          // not in the group: --also or ALSO_FILE_NAME
+    AddedBy: string;         // '--also' or ALSO_FILE_NAME, for an Extra one
+    // A bare project file's settings taken from this member (LoadMembers).
+    Like: string;
   end;
 
   TMcpFileStamp = record
@@ -173,10 +176,24 @@ type
   private
     FProjectFile: string;
     FRoot: string;
-    // Projects outside the group indexed with it (--also), full paths, and
-    // the directories of those outside FRoot: their files are own too.
+    // Projects outside the group indexed with it, full paths - given by
+    // --also (FAlsoArgs) and named by ALSO_FILE_NAME beside the project file
+    // (read by LoadMembers) - and the directories of those outside FRoot:
+    // their files are own too.
+    FAlsoArgs: TArray<string>;
     FExtra: TArray<string>;
     FExtraRoots: TArray<string>;
+    // ALSO_FILE_NAME as LoadMembers read it: whether it existed, its stamp,
+    // its patterns and the projects they matched (a new file matching one
+    // reloads too), its `like`, and what was wrong with it - for `status` and
+    // the answer of the call that reloads.
+    FAlsoFile: string;
+    FAlsoExists: Boolean;
+    FAlsoStamp: TMcpFileStamp;
+    FAlsoPatterns: TArray<string>;
+    FAlsoListed: TArray<string>;
+    FAlsoLike: string;
+    FAlsoNote: string;
     FStudioWanted: string;
     FStudio: TMcpStudio;
     // Started with no Delphi project (SetNoProject): why, '' when there is one.
@@ -264,13 +281,16 @@ type
     function FormChanges: string;
     procedure RebuildAnalysis(AAnalysis: TMcpAnalysis; const AWhy: string);
     function ChangedConfigFiles: TArray<string>;
+    procedure ReadAlsoFile;
+    function AlsoListedNow: TArray<string>;
     procedure ClearAnalyses;
     procedure RebuildOwners;
     procedure AssignLightTrees;
     procedure AppendLightStatus(ASb: TStringBuilder; AA: TMcpAnalysis);
   public
     // AExtra: projects outside the group to index with it, as its members are
-    // (the client group's tests are a project no .groupproj lists).
+    // (the client group's tests are a project no .groupproj lists), full
+    // paths; ALSO_FILE_NAME beside the project file can name more.
     constructor Create(const AProjectFile, AStudio, APlatform, AConfig: string;
       APolicy: TMcpGroupPolicy; const AExtra: TArray<string> = nil);
     destructor Destroy; override;
@@ -382,6 +402,18 @@ type
   end;
 
 function StampOf(const APath: string; out AStamp: TMcpFileStamp): Boolean;
+function SameStamp(const A, B: TMcpFileStamp): Boolean;
+
+const
+  // Beside the project file, the projects outside the group to index with
+  // it: "also", a list of paths or patterns, and "like", the member whose
+  // settings a bare .dpr takes. A file an agent can write: it is read again
+  // on the call after it changes, where --also needs a new session.
+  ALSO_FILE_NAME = 'pastree-mcp.json';
+
+// The project files APattern names, relative to ABaseDir or absolute: a path,
+// or a wildcard in its file name (tests\*.dpr), sorted. Nil when none.
+function ExpandProjectPattern(const ABaseDir, APattern: string): TArray<string>;
 
 // What a server started with no project says of it: how to give it one, and
 // what answers meanwhile.
@@ -401,6 +433,7 @@ implementation
 uses
   System.IOUtils,
   System.StrUtils,
+  System.JSON,
   System.Math,
   System.Diagnostics,
   System.Generics.Defaults,
@@ -475,6 +508,31 @@ begin
   until False;
   AWhy := 'no .groupproj or .dproj in ' + ExcludeTrailingPathDelimiter(ADir) +
     ' or above it up to ' + LDir;
+end;
+
+function ExpandProjectPattern(const ABaseDir, APattern: string): TArray<string>;
+var
+  LFull, LDir, LMask: string;
+begin
+  Result := nil;
+  LFull := TPath.GetFullPath(TPath.Combine(ABaseDir,
+    APattern.Replace('/', PathDelim)));
+  LMask := ExtractFileName(LFull);
+  if (Pos('*', LMask) = 0) and (Pos('?', LMask) = 0) then
+  begin
+    if TFile.Exists(LFull) then
+      Result := [LFull];
+    Exit;
+  end;
+  LDir := ExtractFileDir(LFull);
+  if not TDirectory.Exists(LDir) then
+    Exit;
+  // A project file only: `*` also matches the .dproj beside a .dpr, which
+  // then counts once (LoadMembers keeps the .dproj).
+  for var LF in TDirectory.GetFiles(LDir, LMask) do
+    if MatchText(ExtractFileExt(LF), ['.dproj', '.dpr', '.dpk']) then
+      Result := Result + [LF];
+  TArray.Sort<string>(Result, TStringComparer.Ordinal);
 end;
 
 function SameStamp(const A, B: TMcpFileStamp): Boolean;
@@ -591,10 +649,12 @@ begin
   inherited Create;
   FProjectFile := TPath.GetFullPath(AProjectFile);
   FRoot := TPath.GetDirectoryName(FProjectFile);
+  FAlsoFile := TPath.Combine(FRoot, ALSO_FILE_NAME);
   for var LOne in AExtra do
   begin
     if SameText(TPath.GetFullPath(LOne), FProjectFile) then
       Continue;
+    FAlsoArgs := FAlsoArgs + [TPath.GetFullPath(LOne)];
     FExtra := FExtra + [TPath.GetFullPath(LOne)];
     LDir := TPath.GetDirectoryName(TPath.GetFullPath(LOne));
     if not StartsText(IncludeTrailingPathDelimiter(FRoot),
@@ -831,6 +891,8 @@ begin
 end;
 
 function TMcpWorkspace.IndexedProjects: string;
+var
+  LGroup, LExtra: Integer;
 begin
   if FNoProject <> '' then
     Result := 'the installed RTL and VCL (no project)'
@@ -839,11 +901,24 @@ begin
   else
   begin
     Result := '';
+    LGroup := 0;
+    LExtra := 0;
     for var LMem in FMembers do
-      if LMem.Extra then
+      if not LMem.Extra then
+        Inc(LGroup)
+      else
+      begin
+        Inc(LExtra);
         Result := Result + ' + ' + TPath.GetFileName(LMem.ProjectFile);
-    Result := Format('the %d projects of %s%s', [Length(FMembers),
-      TPath.GetFileName(FProjectFile), Result]);
+      end;
+    // PasTree's tests are 16 projects.
+    if LExtra > 3 then
+      Result := Format(' + %d projects outside it', [LExtra]);
+    if LGroup = 1 then
+      Result := TPath.GetFileName(FProjectFile) + Result
+    else
+      Result := Format('the %d projects of %s%s', [LGroup,
+        TPath.GetFileName(FProjectFile), Result]);
   end;
 end;
 
@@ -999,12 +1074,67 @@ end;
 
 procedure TMcpWorkspace.LoadMembers;
 var
-  LFiles, LMissing: TArray<string>;
-  LExt, LFile: string;
+  LFiles, LMissing, LBy: TArray<string>;
+  LExt, LFile, LDir: string;
   LGroupCount: Integer;
   LM: TMcpMember;
   LD: TPasDProj;
   LStamp: TMcpFileStamp;
+  LAddedBy: TDictionary<string, string>;
+
+  // A bare .dpr outside the group has no MSBuild properties, and the IDE's
+  // defaults (Win32, no search path) put it in an analysis of its own, where
+  // nothing of the group's resolves unless its `uses` names every file with
+  // `in` - and PasTree's tests, which do, would have the library analyzed a
+  // second time for Win32 beside its demo's Win64. It takes the settings
+  // of the group's member `like` names, else of its largest - the member an
+  // analysis takes its configuration from (AssignAnalyses): the same key,
+  // so it shares that analysis. --platform still wins.
+  procedure BorrowSettings;
+  var
+    LDonor, LBest: Integer;
+    LNames: string;
+  begin
+    LDonor := -1;
+    LBest := -1;
+    LNames := '';
+    for var LIdx := 0 to High(FMembers) do
+      if not FMembers[LIdx].Extra and (FMembers[LIdx].Error = '') then
+      begin
+        LNames := LNames + IfThen(LNames <> '', ', ', '') + FMembers[LIdx].Name;
+        if (FAlsoLike <> '') and SameText(FMembers[LIdx].Name, FAlsoLike) then
+          LDonor := LIdx;
+        if Length(FMembers[LIdx].Files) > LBest then
+        begin
+          LBest := Length(FMembers[LIdx].Files);
+          if FAlsoLike = '' then
+            LDonor := LIdx;
+        end;
+      end;
+    if (FAlsoLike <> '') and (LDonor < 0) then
+    begin
+      FAlsoNote := FAlsoNote + Format('"like": no member of the group is '
+        + 'named %s (%s) - the projects it adds take their own defaults'#13#10,
+        [FAlsoLike, LNames]);
+      Exit;
+    end;
+    if LDonor < 0 then
+      Exit;
+    for var LIdx := 0 to High(FMembers) do
+      if FMembers[LIdx].Extra and (FMembers[LIdx].Error = '') and
+         not SameText(ExtractFileExt(FMembers[LIdx].ProjectFile), '.dproj') then
+      begin
+        if FPlatformOverride = '' then
+          FMembers[LIdx].Platform := FMembers[LDonor].Platform;
+        FMembers[LIdx].SearchPaths := FMembers[LDonor].SearchPaths;
+        FMembers[LIdx].Defines := FMembers[LDonor].Defines;
+        FMembers[LIdx].Switches := FMembers[LDonor].Switches;
+        FMembers[LIdx].Namespaces := FMembers[LDonor].Namespaces;
+        FMembers[LIdx].Aliases := FMembers[LDonor].Aliases;
+        FMembers[LIdx].Like := FMembers[LDonor].Name;
+      end;
+  end;
+
 begin
   FMembers := nil;
   FMissing := nil;
@@ -1025,11 +1155,39 @@ begin
   if StampOf(FProjectFile, LStamp) then
     FConfigStamps.AddOrSetValue(FProjectFile, LStamp);
   LGroupCount := Length(LFiles);
-  for var LOne in FExtra do
-    if not TFile.Exists(LOne) then
-      FMissing := FMissing + [LOne]
-    else if IndexText(LOne, LFiles) < 0 then
-      LFiles := LFiles + [LOne];
+  ReadAlsoFile;
+  FExtra := nil;
+  FExtraRoots := nil;
+  LAddedBy := TDictionary<string, string>.Create;
+  try
+    for var LOne in FAlsoArgs do
+      if LAddedBy.TryAdd(LowerCase(LOne), '--also') then
+        FExtra := FExtra + [LOne];
+    for var LOne in FAlsoListed do
+      // A .dpr whose .dproj the group lists is that member (tests\*.dpr
+      // matches the main source of PasTree's SemaNavSmoke.dproj).
+      if (IndexText(LOne, LFiles) < 0) and
+         (IndexText(ChangeFileExt(LOne, '.dproj'), LFiles) < 0) and
+         LAddedBy.TryAdd(LowerCase(LOne), ALSO_FILE_NAME) then
+        FExtra := FExtra + [LOne];
+    for var LOne in FExtra do
+    begin
+      LDir := TPath.GetDirectoryName(LOne);
+      if not StartsText(IncludeTrailingPathDelimiter(FRoot),
+        IncludeTrailingPathDelimiter(LDir)) and
+        (IndexText(LDir, FExtraRoots) < 0) then
+        FExtraRoots := FExtraRoots + [LDir];
+      if not TFile.Exists(LOne) then
+        FMissing := FMissing + [LOne]
+      else if IndexText(LOne, LFiles) < 0 then
+      begin
+        LFiles := LFiles + [LOne];
+        LBy := LBy + [LAddedBy[LowerCase(LOne)]];
+      end;
+    end;
+  finally
+    LAddedBy.Free;
+  end;
 
   for var LIdx := 0 to High(LFiles) do
   begin
@@ -1039,6 +1197,8 @@ begin
     LM.Name := TPath.GetFileNameWithoutExtension(LFile);
     LM.Analysis := -1;
     LM.Extra := LIdx >= LGroupCount;
+    if LM.Extra then
+      LM.AddedBy := LBy[LIdx - LGroupCount];
     if SameText(TPath.GetExtension(LFile), '.dproj') then
     begin
       LD := TPasDProj.Create;
@@ -1083,6 +1243,7 @@ begin
     end;
     FMembers := FMembers + [LM];
   end;
+  BorrowSettings;
   FListed.Clear;
   for var LMem in FMembers do
   begin
@@ -1905,6 +2066,112 @@ begin
   for var LPair in FConfigStamps do
     if not StampOf(LPair.Key, LStamp) or not SameStamp(LStamp, LPair.Value) then
       Result := Result + [LPair.Key];
+  // Written, changed or deleted, or a project file its patterns match came
+  // or went.
+  if (StampOf(FAlsoFile, LStamp) <> FAlsoExists) or
+     (FAlsoExists and not SameStamp(LStamp, FAlsoStamp)) or
+     (string.Join(#10, AlsoListedNow) <> string.Join(#10, FAlsoListed)) then
+    Result := Result + [FAlsoFile];
+end;
+
+// The projects FAlsoPatterns match now, each once - a .dpr beside a .dproj
+// that is matched too is that project - with ANote what matched nothing.
+function AlsoMatches(const ARoot, AProjectFile: string;
+  const APatterns: TArray<string>; out ANote: string): TArray<string>;
+var
+  LAll: TArray<string>;
+begin
+  Result := nil;
+  ANote := '';
+  LAll := nil;
+  for var LPat in APatterns do
+  begin
+    var LGot := ExpandProjectPattern(ARoot, LPat);
+    if LGot = nil then
+      ANote := ANote + Format('"also": %s matches no .dproj, .dpr or .dpk '
+        + 'under %s'#13#10, [LPat, ARoot]);
+    for var LF in LGot do
+      if (IndexText(LF, LAll) < 0) and not SameText(LF, AProjectFile) then
+        LAll := LAll + [LF];
+  end;
+  for var LF in LAll do
+    if not SameText(ExtractFileExt(LF), '.dproj') and
+       (IndexText(ChangeFileExt(LF, '.dproj'), LAll) >= 0) then
+      Continue
+    else
+      Result := Result + [LF];
+end;
+
+function TMcpWorkspace.AlsoListedNow: TArray<string>;
+var
+  LNote: string;
+begin
+  Result := AlsoMatches(FRoot, FProjectFile, FAlsoPatterns, LNote);
+end;
+
+procedure TMcpWorkspace.ReadAlsoFile;
+var
+  LText, LNote: string;
+  LJson, LAlso, LLike: TJSONValue;
+begin
+  FAlsoPatterns := nil;
+  FAlsoListed := nil;
+  FAlsoLike := '';
+  FAlsoNote := '';
+  FAlsoExists := StampOf(FAlsoFile, FAlsoStamp);
+  if not FAlsoExists then
+    Exit;
+  try
+    LText := TFile.ReadAllText(FAlsoFile);   // BOM-aware
+    LJson := TJSONValue.ParseJSONValue(LText, False, True);
+  except
+    on E: Exception do
+    begin
+      FAlsoNote := Format('not read - %s: %s'#13#10, [E.ClassName, E.Message]);
+      Log('%s: %s', [FAlsoFile, FAlsoNote.TrimRight]);
+      Exit;
+    end;
+  end;
+  try
+    if not (LJson is TJSONObject) then
+    begin
+      FAlsoNote := 'not read - not a JSON object; the form is {"also": '
+        + '["tests/*.dpr"], "like": "<member>"}'#13#10;
+      Exit;
+    end;
+    for var LPair in TJSONObject(LJson) do
+      if not MatchText(LPair.JsonString.Value, ['also', 'like']) then
+        FAlsoNote := FAlsoNote + Format('"%s" is not a key of it - "also" (the '
+          + 'projects: paths or patterns, relative to the group''s directory) '
+          + 'and "like" (the member whose settings a .dpr takes) are'#13#10,
+          [LPair.JsonString.Value]);
+    LAlso := TJSONObject(LJson).GetValue('also');
+    if LAlso is TJSONString then
+      FAlsoPatterns := [TJSONString(LAlso).Value]
+    else if LAlso is TJSONArray then
+    begin
+      for var LItem in TJSONArray(LAlso) do
+        if LItem is TJSONString then
+          FAlsoPatterns := FAlsoPatterns + [TJSONString(LItem).Value]
+        else
+          FAlsoNote := FAlsoNote + Format('"also": %s is not a string - '
+            + 'left out'#13#10, [LItem.ToJSON]);
+    end
+    else if LAlso <> nil then
+      FAlsoNote := FAlsoNote + '"also" is not a list of paths - left out'#13#10;
+    LLike := TJSONObject(LJson).GetValue('like');
+    if LLike is TJSONString then
+      FAlsoLike := TJSONString(LLike).Value
+    else if LLike <> nil then
+      FAlsoNote := FAlsoNote + '"like" is not a member''s name - left out'#13#10;
+  finally
+    LJson.Free;
+  end;
+  FAlsoListed := AlsoMatches(FRoot, FProjectFile, FAlsoPatterns, LNote);
+  FAlsoNote := FAlsoNote + LNote;
+  Log('%s: %d project(s) from [%s]%s', [FAlsoFile, Length(FAlsoListed),
+    string.Join(', ', FAlsoPatterns), IfThen(FAlsoNote <> '', ' - ' +
+    FAlsoNote.Replace(#13#10, '; ').TrimRight([' ', ';']), '')]);
 end;
 
 // ` (<reason>)` from the `module=refused:<reason>;` a refused module run
@@ -1967,6 +2234,26 @@ begin
     Load;
     AReport := Format('project file(s) changed: %s; the workspace was reloaded',
       [NamedFiles(Self, LConfig)]);
+    // What the agent that wrote it asked for: the projects it added, or why
+    // not - `status` would be one call more.
+    if IndexText(FAlsoFile, LConfig) >= 0 then
+    begin
+      LAdded := nil;
+      for var LMem in FMembers do
+        if SameText(LMem.AddedBy, ALSO_FILE_NAME) then
+          LAdded := LAdded + [LMem.Name + IfThen(LMem.Error <> '', ' (SKIPPED - '
+            + LMem.Error + ')', '')];
+      if not FAlsoExists then
+        AReport := AReport + Format(' - %s is gone, the projects it added '
+          + 'with it', [ALSO_FILE_NAME])
+      else if LAdded = nil then
+        AReport := AReport + Format(' - %s adds no project', [ALSO_FILE_NAME])
+      else
+        AReport := AReport + Format(' - %s adds %d project(s): %s', [
+          ALSO_FILE_NAME, Length(LAdded), string.Join(', ', LAdded)]);
+      if FAlsoNote <> '' then
+        AReport := AReport + '; ' + FAlsoNote.TrimRight.Replace(#13#10, '; ');
+    end;
     Exit;
   end;
   // First: a rebuild below records the form stamps afresh.
@@ -2211,6 +2498,16 @@ var
   LM: TPasSemaModel;
   LN: Integer;
   LNames: TList<string>;
+  LAlike: TDictionary<string, string>;
+  LAlikeKey, LAlikeNames: string;
+
+  function AlikeKey(const AM: TMcpMember): string;
+  begin
+    Result := Format('%s, analysis %d - not in the group, added by %s%s',
+      [PlatformName(AM.Platform), AM.Analysis, AM.AddedBy, IfThen(AM.Like <> '',
+      ', the settings of ' + AM.Like, '')]);
+  end;
+
 begin
   LSb := TStringBuilder.Create;
   try
@@ -2231,6 +2528,26 @@ begin
     begin
       LSb.AppendLine('project: ' + FProjectFile);
       LSb.AppendLine('paths in results are relative to: ' + FRoot);
+      if not FAlsoExists then
+        LSb.AppendLine(Format('%s: none - {"also": ["tests/*.dpr"]} in it '
+          + 'indexes projects the group does not list, from the next call',
+          [ALSO_FILE_NAME]))
+      else
+      begin
+        LN := 0;
+        for var LMem in FMembers do
+          if SameText(LMem.AddedBy, ALSO_FILE_NAME) then
+            Inc(LN);
+        // tests\*.dpr matches SemaNavSmoke.dpr, the group's SemaNavSmoke.dproj.
+        LSb.AppendLine(Format('%s: "also" [%s] - %d project(s) added%s%s', [
+          ALSO_FILE_NAME, string.Join(', ', FAlsoPatterns), LN,
+          IfThen(Length(FAlsoListed) > LN, Format(', %d in the group already',
+          [Length(FAlsoListed) - LN]), ''),
+          IfThen(FAlsoLike <> '', ', "like" ' + FAlsoLike, '')]));
+        for var LLine in FAlsoNote.TrimRight.Split([#13#10]) do
+          if LLine <> '' then
+            LSb.AppendLine('  ' + LLine);
+      end;
     end;
     if FLaunch <> '' then
       LSb.AppendLine('started in: ' + FLaunch);
@@ -2257,17 +2574,43 @@ begin
     LSb.AppendLine('state: ' + State);
     if not IsReady then
       Exit(LSb.ToString);
-    for var LMem in FMembers do
-      if LMem.Error <> '' then
-        LSb.AppendLine(Format('  member %s: SKIPPED - %s', [LMem.Name,
-          LMem.Error]))
-      else
-        LSb.AppendLine(Format('  member %s: %s %s, %d listed files, analysis %d%s',
-          [LMem.Name, PlatformName(LMem.Platform), IfThen(LMem.Config = '',
-          '(bare project file)', LMem.Config),
-          Length(LMem.Files), LMem.Analysis, IfThen(LMem.Extra,
-          ' - not in the group, added by --also (' + RelPath(LMem.ProjectFile) +
-          ')', '')]));
+    // Many bare project files alike - PasTree's 16 tests - are one line
+    // naming them, after the members listed one by one.
+    LAlike := TDictionary<string, string>.Create;
+    try
+      for var LMem in FMembers do
+        if LMem.Extra and (LMem.Error = '') and (LMem.Config = '') then
+        begin
+          LAlikeKey := AlikeKey(LMem);
+          if LAlike.TryGetValue(LAlikeKey, LAlikeNames) then
+            LAlike[LAlikeKey] := LAlikeNames + ', ' + LMem.Name
+          else
+            LAlike.Add(LAlikeKey, LMem.Name);
+        end;
+      for var LPair in LAlike.ToArray do
+        if Length(LPair.Value.Split([','])) <= 3 then
+          LAlike.Remove(LPair.Key);
+      for var LMem in FMembers do
+        if LMem.Extra and (LMem.Error = '') and (LMem.Config = '') and
+           LAlike.ContainsKey(AlikeKey(LMem)) then
+          Continue
+        else if LMem.Error <> '' then
+          LSb.AppendLine(Format('  member %s: SKIPPED - %s', [LMem.Name,
+            LMem.Error]))
+        else
+          LSb.AppendLine(Format('  member %s: %s %s, %d listed files, analysis %d%s',
+            [LMem.Name, PlatformName(LMem.Platform), IfThen(LMem.Config = '',
+            '(bare project file)', LMem.Config),
+            Length(LMem.Files), LMem.Analysis, IfThen(LMem.Extra,
+            ' - not in the group, added by ' + LMem.AddedBy + ' (' +
+            RelPath(LMem.ProjectFile) + ')' + IfThen(LMem.Like <> '',
+            ', the settings of ' + LMem.Like, ''), '')]));
+      for var LPair in LAlike do
+        LSb.AppendLine(Format('  %d members, bare project files: %s: %s', [
+          Length(LPair.Value.Split([','])), LPair.Key, LPair.Value]));
+    finally
+      LAlike.Free;
+    end;
     for var LMiss in FMissing do
       LSb.AppendLine('  member missing on disk: ' + RelPath(LMiss));
     for var LA in FAnalyses do

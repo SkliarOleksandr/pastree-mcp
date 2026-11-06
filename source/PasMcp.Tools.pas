@@ -2352,6 +2352,226 @@ begin
   end;
 end;
 
+type
+  // A file outside the index as OutsideUsesNote last read it.
+  TOutsideText = record
+    Stamp: TMcpFileStamp;
+    Lower: string;
+    Lines: TArray<string>;
+  end;
+
+var
+  // By lower-cased path; the executor's alone, as the index is.
+  GOutsideTexts: TDictionary<string, TOutsideText>;
+
+{ The uses of an own declaration that no answer counts: the files outside the
+  index that use its unit and write its name (TMcpWorkspace.UnindexedSources).
+  `callers` and `references` answer for the projects the group compiles, and
+  "3 calls" of a routine PasTree's tests call too - in .dpr files the group
+  does not list - read as all of them: a change planned from it breaks the
+  tests, and nothing said so. A word match, not resolved, so said; a file
+  must name the unit (to use a declaration, its `uses` must) and write the
+  name in code, and the row is the first line that writes it outside the
+  `uses` clause. With the projects among those files, the `also` entry of
+  ALSO_FILE_NAME that indexes them. '' when none, or for a library
+  declaration or one of a program. The file texts are kept by stamp: the
+  same files are searched on every call. }
+function OutsideUsesNote(AWs: TMcpWorkspace; ARows: Boolean;
+  const ATargets: TArray<TTarget>): string;
+const
+  SCAN_MS = 2000;
+  MAX_ROWS = 5;
+  MAX_NAMES = 8;
+type
+  TAsk = record
+    UnitName, Word: string;
+  end;
+  TRow = record
+    FilePath, Word, Text: string;
+    Line: Integer;
+  end;
+var
+  LAsks: TArray<TAsk>;
+  LAsk: TAsk;
+  LRows: TList<TRow>;
+  LRow: TRow;
+  LFiles, LProjects, LEntries, LDirs: TArray<string>;
+  LText: TOutsideText;
+  LStamp: TMcpFileStamp;
+  LSearched, LInDir: Integer;
+  LCut, LNamed, LFound: Boolean;
+  LSW: TStopwatch;
+  LSb: TStringBuilder;
+  LRel, LExt: string;
+begin
+  Result := '';
+  LAsks := nil;
+  for var LT in ATargets do
+  begin
+    if not LT.Own or (LT.Kind in [tkBuiltin, tkDefine]) or
+       not SameText(ExtractFileExt(LT.DeclFile), '.pas') then
+      Continue;
+    LAsk.UnitName := TPath.GetFileNameWithoutExtension(LT.DeclFile);
+    if LT.Kind = tkUnit then
+      LAsk.Word := LAsk.UnitName
+    else
+    begin
+      LAsk.Word := StripGenerics(LT.Name);
+      if LastDelimiter('.', LAsk.Word) > 0 then
+        LAsk.Word := Copy(LAsk.Word, LastDelimiter('.', LAsk.Word) + 1, MaxInt);
+    end;
+    if LAsk.Word = '' then
+      Continue;
+    LFound := False;
+    for var LHave in LAsks do
+      if SameText(LHave.UnitName, LAsk.UnitName) and SameText(LHave.Word,
+        LAsk.Word) then
+        LFound := True;
+    if not LFound and (Length(LAsks) < MAX_NAMES) then
+      LAsks := LAsks + [LAsk];
+  end;
+  if LAsks = nil then
+    Exit;
+  // Outside the index as the full analysis has it (light mode).
+  QClosure(AWs);
+  LFiles := AWs.UnindexedSources(LCut);
+  if LFiles = nil then
+    Exit;
+  if GOutsideTexts = nil then
+    GOutsideTexts := TDictionary<string, TOutsideText>.Create;
+  LSearched := 0;
+  LSW := TStopwatch.StartNew;
+  LRows := TList<TRow>.Create;
+  LSb := TStringBuilder.Create;
+  try
+    for var LFile in LFiles do
+    begin
+      if LSW.ElapsedMilliseconds > SCAN_MS then
+        Break;
+      Inc(LSearched);
+      if not StampOf(LFile, LStamp) then
+        Continue;
+      if not GOutsideTexts.TryGetValue(LowerCase(LFile), LText) or
+         not SameStamp(LText.Stamp, LStamp) then
+      begin
+        LText.Stamp := LStamp;
+        try
+          LText.Lines := TFile.ReadAllLines(LFile);   // BOM-aware
+        except
+          Continue;
+        end;
+        LText.Lower := LowerCase(string.Join(#10, LText.Lines));
+        GOutsideTexts.AddOrSetValue(LowerCase(LFile), LText);
+      end;
+      for var LA in LAsks do
+      begin
+        if (Pos(LowerCase(LA.UnitName), LText.Lower) = 0) or
+           (Pos(LowerCase(LA.Word), LText.Lower) = 0) then
+          Continue;
+        LNamed := False;
+        LRow := Default(TRow);
+        for var LIdx := 0 to High(LText.Lines) do
+        begin
+          if FindWord(LText.Lines[LIdx], LA.UnitName) > 0 then
+          begin
+            LNamed := True;
+            // A unit's own uses are its `uses` entry.
+            if not SameText(LA.Word, LA.UnitName) then
+              Continue;
+          end;
+          if (LRow.Line = 0) and (FindWord(LText.Lines[LIdx], LA.Word) > 0) then
+          begin
+            LRow.FilePath := LFile;
+            LRow.Word := LA.Word;
+            LRow.Line := LIdx + 1;
+            LRow.Text := CleanLine(LText.Lines[LIdx]);
+          end;
+          if LNamed and (LRow.Line > 0) then
+            Break;
+        end;
+        if LNamed and (LRow.Line > 0) then
+        begin
+          LRows.Add(LRow);
+          Break;
+        end;
+      end;
+    end;
+    if LRows.Count = 0 then
+      Exit;
+    if Length(LAsks) = 1 then
+      LSb.AppendLine(Format('not counted above - %d file(s) outside the index '
+        + 'use %s and write `%s` (a word match, not resolved)%s', [LRows.Count,
+        LAsks[0].UnitName, LAsks[0].Word, IfThen(ARows, ':', '')]))
+    else
+      LSb.AppendLine(Format('not counted above - %d file(s) outside the index '
+        + 'use the unit of a name here and write it (a word match, not '
+        + 'resolved)%s', [LRows.Count, IfThen(ARows, ':', '')]));
+    // `limit: 0` asks how many: the files counted, the entry still given.
+    for var LIdx := 0 to IfThen(ARows, Min(LRows.Count, MAX_ROWS), 0) - 1 do
+      LSb.AppendLine(Format('  %s:%d  %s%s', [AWs.RelPath(LRows[LIdx].FilePath),
+        LRows[LIdx].Line, IfThen(Length(LAsks) > 1, '[' + LRows[LIdx].Word +
+        ']  ', ''), LRows[LIdx].Text]));
+    if ARows and (LRows.Count > MAX_ROWS) then
+      LSb.AppendLine(Format('  ... and %d more files', [LRows.Count - MAX_ROWS]));
+    // The entry that indexes them: a directory's projects as a pattern.
+    LProjects := nil;
+    for var LR in LRows do
+    begin
+      LExt := LowerCase(ExtractFileExt(LR.FilePath));
+      if ((LExt = '.dpr') or (LExt = '.dpk')) and
+         StartsText(IncludeTrailingPathDelimiter(AWs.Root), LR.FilePath) then
+        LProjects := LProjects + [LR.FilePath];
+    end;
+    LEntries := nil;
+    LDirs := nil;
+    for var LP in LProjects do
+    begin
+      LInDir := 0;
+      for var LQ in LProjects do
+        if SameText(ExtractFileDir(LQ), ExtractFileDir(LP)) and
+           SameText(ExtractFileExt(LQ), ExtractFileExt(LP)) then
+          Inc(LInDir);
+      LRel := AWs.RelPath(LP).Replace('\', '/');
+      if LInDir > 1 then
+      begin
+        LRel := AWs.RelPath(TPath.Combine(ExtractFileDir(LP), '*' +
+          LowerCase(ExtractFileExt(LP)))).Replace('\', '/');
+        if IndexText(LRel, LDirs) >= 0 then
+          Continue;
+        LDirs := LDirs + [LRel];
+      end;
+      LEntries := LEntries + ['"' + LRel + '"'];
+    end;
+    if LEntries <> nil then
+      LSb.AppendLine(Format('to index them with the group: "also": [%s] in %s '
+        + 'beside %s - read on the next call', [string.Join(', ', LEntries),
+        ALSO_FILE_NAME, ExtractFileName(AWs.ProjectFile)]))
+    else
+      LSb.AppendLine(Format('to index them with the group: the project that '
+        + 'compiles them, in "also" of %s beside %s', [ALSO_FILE_NAME,
+        ExtractFileName(AWs.ProjectFile)]));
+    if LSearched < Length(LFiles) then
+      LSb.AppendLine(Format('(%d of %d files outside the index searched - the '
+        + 'search stops after %d s)', [LSearched, Length(LFiles),
+        SCAN_MS div 1000]));
+    if LCut then
+      LSb.AppendLine('(the walk of the group directory stopped after 2 s - '
+        + 'the files beyond it were not searched)');
+    Result := LSb.ToString.TrimRight;
+  finally
+    LSb.Free;
+    LRows.Free;
+  end;
+end;
+
+// Result, then ANote on a line of its own when there is one.
+function WithNote(const AResult, ANote: string): string;
+begin
+  Result := AResult;
+  if ANote <> '' then
+    Result := Result + sLineBreak + ANote;
+end;
+
 // Is AName a conditional symbol - one the project or the platform defines,
 // or one a directive of the analyzed code names? Asked by name, it has no
 // declaration to find.
@@ -5138,7 +5358,8 @@ begin
             LForms + sLineBreak);
         Break;
       end;
-    Result := LSb.ToString.TrimRight;
+    Result := WithNote(LSb.ToString.TrimRight, OutsideUsesNote(AWs,
+      LLimit <> 0, LTargets));
   finally
     LEnclosing.Free;
     LSb.Free;
@@ -6871,7 +7092,8 @@ begin
         + 'name visible at an edit - `compile` or `diagnostics` after the '
         + 'edits says)');
     end;
-    Result := LSb.ToString.TrimRight;
+    Result := WithNote(LSb.ToString.TrimRight, OutsideUsesNote(AWs, True,
+      [LT]));
   finally
     LSb.Free;
     LSeen.Free;
@@ -9092,8 +9314,9 @@ begin
       LTargets[0].Head]);
   LWalk := TCallerWalk.Create(AWs);
   try
-    Result := LWalk.Answer(LTargets, EnsureRange(ArgInt(AArgs, 'depth', 1), 1, 4),
-      EnsureRange(ArgInt(AArgs, 'limit', 150), 0, 5000));
+    Result := WithNote(LWalk.Answer(LTargets, EnsureRange(ArgInt(AArgs,
+      'depth', 1), 1, 4), EnsureRange(ArgInt(AArgs, 'limit', 150), 0, 5000)),
+      OutsideUsesNote(AWs, ArgInt(AArgs, 'limit', 150) <> 0, LTargets));
   finally
     LWalk.Free;
   end;
@@ -9482,7 +9705,8 @@ begin
         8, ', ...', '')]));
     for var LNote in LNotes do
       LSb.AppendLine('(' + LNote + ')');
-    Result := LSb.ToString.TrimRight;
+    Result := WithNote(LSb.ToString.TrimRight, OutsideUsesNote(AWs, True,
+      [LT]));
   finally
     LSb.Free;
     LLevels.Free;
@@ -17835,6 +18059,7 @@ var
   LDiff: string;
   LV: TJSONValue;
   LSW: TStopwatch;
+  LTargets: TArray<TTarget>;
 begin
   LDiff := '';
   LV := nil;
@@ -17879,6 +18104,12 @@ begin
         + '`line` + `name`');
     Result := LImpact.Answer(EnsureRange(ArgInt(AArgs, 'depth', 1), 1, 4),
       EnsureRange(ArgInt(AArgs, 'limit', 150), 0, 5000));
+    LTargets := nil;
+    for var LD in LImpact.FDecls do
+      if LD.Place = '' then
+        LTargets := LTargets + [LD.T];
+    Result := WithNote(Result, OutsideUsesNote(AWs, ArgInt(AArgs, 'limit',
+      150) <> 0, LTargets));
   finally
     LImpact.Free;
   end;
@@ -19979,7 +20210,10 @@ begin
     + 'Symbols are addressed by name (TFoo, '
     + 'TFoo.Bar, Unit.TFoo.Bar) or by file + line + name. Result paths are '
     + 'relative to ' + AWs.Root + '. The index holds what the projects '
-    + 'compile - their `uses` closure, not every file of the directory. It '
+    + 'compile - their `uses` closure, not every file of the directory. A '
+    + 'project the group does not list - its tests - is indexed with it when '
+    + '`' + ALSO_FILE_NAME + '` beside the group file names it: '
+    + '`{"also": ["tests/*.dpr"]}`, read on the next call. It '
     + 're-reads changed files before every call, so results match the files '
     + 'on disk, and names them: one you did not edit is someone else''s edit. '
     + 'An edit still in an IDE editor buffer, not saved, is not on disk: '
@@ -20443,6 +20677,7 @@ initialization
   GGenerated := TDictionary<string, Boolean>.Create;
 
 finalization
+  GOutsideTexts.Free;
   GGenerated.Free;
   GToolProps.Free;
   GToolCatalogue.Free;

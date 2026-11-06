@@ -118,6 +118,7 @@ procedure ParseArgs;
 var
   LIdx: Integer;
   LCall: TCall;
+  LAlso, LGot: TArray<string>;
 
   function Next: string;
   begin
@@ -208,13 +209,16 @@ begin
   GProject := TPath.GetFullPath(GProject);
   if not TFile.Exists(GProject) then
     Fail('no such project: ' + GProject);
-  for var LI := 0 to High(GAlso) do
+  LAlso := nil;
+  for var LOne in GAlso do
   begin
-    GAlso[LI] := TPath.GetFullPath(TPath.Combine(TPath.GetDirectoryName(
-      GProject), GAlso[LI]));
-    if not TFile.Exists(GAlso[LI]) then
-      Fail('no such project (--also): ' + GAlso[LI]);
+    LGot := ExpandProjectPattern(TPath.GetDirectoryName(GProject), LOne);
+    if LGot = nil then
+      Fail('no such project (--also): ' + TPath.GetFullPath(TPath.Combine(
+        TPath.GetDirectoryName(GProject), LOne)));
+    LAlso := LAlso + LGot;
   end;
+  GAlso := LAlso;
 end;
 
 procedure RunCli;

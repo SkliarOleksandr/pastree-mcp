@@ -203,7 +203,7 @@ Check 'find joined cut' (Block $b 'find {"query":"TWideBox.Many"}') @('AppB\uBox
 # A name no declaration matches: what the index is, and where the name is
 # written outside it - in a unit no project uses - or that it is nowhere.
 Check 'find outside the index' (Block $b 'find {"query":"OrphanRoutine"}') @('no declaration matches `OrphanRoutine` among the ', ' units indexed - what the 3 projects of Fixture.groupproj compile: 47 of their own, ', "``OrphanRoutine`` is written in 1 file(s) that no indexed project uses - no tool here sees them:`n  AppB\uOrphan.pas:8  procedure OrphanRoutine;")
-Check 'find nowhere' (Block $b 'find {"query":"NothingAnywhere"}') @('no declaration matches `NothingAnywhere` among the ', 'no Pascal file outside them writes `NothingAnywhere` either (1 searched, under the group directory')
+Check 'find nowhere' (Block $b 'find {"query":"NothingAnywhere"}') @('no declaration matches `NothingAnywhere` among the ', 'no Pascal file outside them writes `NothingAnywhere` either (2 searched, under the group directory')
 Check 'definition' (Block $b 'definition {"symbol":"TCircle.Area"') @('declared at Shared\uShapes.pas:26', 'implemented at Shared\uShapes.pas:53', 'Result := Pi * FRadius * FRadius;')
 Check 'source' (Block $b 'source {"symbol":"TCircle.Area"}') @('TCircle.Area (function) implemented at Shared\uShapes.pas:53-56', "53  function TCircle.Area: Double;`n54  begin", "56  end;`n") @('declared at')
 # A tab after the number: spaces there ran into the line's own indentation.
@@ -923,13 +923,13 @@ $alsoCalls = Join-Path ([IO.Path]::GetTempPath()) ('pastree-mcp-smoke-also-' + [
 $alsoBuild = Join-Path ([IO.Path]::GetTempPath()) ('pastree-mcp-smoke-build-' + [Guid]::NewGuid().ToString('N'))
 [IO.File]::WriteAllText($alsoCalls, "status`nfind {`"query`":`"CheckAreas`"}`nreferences {`"symbol`":`"TotalArea`"}`ndiagnostics {`"file`":`"../extra/AppT/uAppT.pas`"}`ncompile {`"member`":`"AppT`"}`n")
 $ErrorActionPreference = 'Continue'
-try { $out = (& $Exe --project $group --also '..\extra\AppT\AppT.dpr' --log none --build-dir $alsoBuild --script $alsoCalls 2>$null | ForEach-Object { "$_" }) -join "`n" }
+try { $out = (& $Exe --project $group --also '..\extra\AppT\*.dpr' --log none --build-dir $alsoBuild --script $alsoCalls 2>$null | ForEach-Object { "$_" }) -join "`n" }
 finally {
     $ErrorActionPreference = 'Stop'
     Remove-Item -Force $alsoCalls -ErrorAction SilentlyContinue
     Remove-Item -Recurse -Force $alsoBuild -ErrorAction SilentlyContinue
 }
-Check 'also status' $out @('member AppT: Win32 (bare project file), 0 listed files, analysis 0 - not in the group, added by --also (', 'member AppF')
+Check 'also status' $out @('member AppT: Win32 (bare project file), 0 listed files, analysis 0 - not in the group, added by --also (', '\extra\AppT\AppT.dpr), the settings of AppA', 'member AppF')
 Check 'also find' $out @('uAppT.pas:8  CheckAreas (procedure)')
 Check 'also references' $out @('uAppT.pas', '  CheckAreas', '17  if TotalArea([TCircle.Create(1)]) <= 0 then')
 Check 'also diagnostics' $out @('no diagnostics')
@@ -1386,6 +1386,26 @@ try {
     # still binds the handler that is gone.
     $r = Rpc 21 'tools/call' '{"name":"form","arguments":{"symbol":"TfrmChild"}}'
     Check 'form after a removed handler' (ToolText $r) @('2 naming nothing', '14      OnClick -> btnSaveClick - no such published method: the form fails to load', '25      Items[1].OnClick -> btnSaveClick - no such published method')
+
+    # A project under the group's directory the group does not list: its uses
+    # are said, not counted, with the entry of pastree-mcp.json that indexes
+    # it; the file written during the session is read on the next call, a
+    # mistake in it said there, and its removal drops the project again.
+    $r = Rpc 60 'tools/call' '{"name":"callers","arguments":{"symbol":"TotalArea"}}'
+    Check 'outside uses note' (ToolText $r) @('- 1 call in 1 routine', "not counted above - 1 file(s) outside the index use uShapes and write ``TotalArea`` (a word match, not resolved):`n  Tests\AppU.dpr:14  if TotalArea([TCircle.Create(2)]) <= 0 then", 'to index them with the group: "also": ["Tests/AppU.dpr"] in pastree-mcp.json beside Fixture.groupproj - read on the next call')
+    $alsoJson = Join-Path $copy 'pastree-mcp.json'
+    [IO.File]::WriteAllText($alsoJson, '{"also": ["Tests/*.dpr", "Nowhere/*.dpr"], "like": "AppX"}', $utf8)
+    $r = Rpc 61 'tools/call' '{"name":"callers","arguments":{"symbol":"TotalArea"}}'
+    Check 'also file written' (ToolText $r) @('project file(s) changed: pastree-mcp.json; the workspace was reloaded - pastree-mcp.json adds 1 project(s): AppU; "also": Nowhere/*.dpr matches no .dproj, .dpr or .dpk under ', '; "like": no member of the group is named AppX (AppA, AppB, AppF) - the projects it adds take their own defaults)', '- 2 calls in 2 routines', "Tests\AppU.dpr`n  14  [main block]  if TotalArea") @('not counted above')
+    [IO.File]::WriteAllText($alsoJson, '{"also": "Tests/AppU.dpr", "like": "AppA"}', $utf8)
+    # `status` answers as the index is; a call reads the file.
+    $r = Rpc 62 'tools/call' '{"name":"find","arguments":{"query":"TotalArea"}}'
+    Check 'also file rewritten' (ToolText $r) @('the workspace was reloaded - pastree-mcp.json adds 1 project(s): AppU)') @('matches no')
+    $r = Rpc 63 'tools/call' '{"name":"status","arguments":{}}'
+    Check 'also file status' (ToolText $r) @('pastree-mcp.json: "also" [Tests/AppU.dpr] - 1 project(s) added, "like" AppA', 'member AppU: Win32 (bare project file), 0 listed files, analysis 0 - not in the group, added by pastree-mcp.json (Tests\AppU.dpr), the settings of AppA') @('matches no')
+    Remove-Item $alsoJson
+    $r = Rpc 64 'tools/call' '{"name":"references","arguments":{"symbol":"TotalArea"}}'
+    Check 'also file removed' (ToolText $r) @('the workspace was reloaded - pastree-mcp.json is gone, the projects it added with it', '- 1 references in 1 files', 'Tests\AppU.dpr:14  if TotalArea')
 
     $r = Rpc 15 'tools/call' '{"name":"no_such_tool","arguments":{}}'
     if (-not $r.result.isError) { Write-Host 'FAIL unknown tool not reported as isError'; $script:failures++ }
