@@ -50,7 +50,7 @@ call "%BDSROOT%\bin\rsvars.bat"
 if not defined PASTREE set PASTREE=..\object-pascal-tree
 if not exist "%PASTREE%\source" (
   echo === PasTree not found next to this repo, cloning it ===
-  git clone https://github.com/SkliarOleksandr/object-pascal-tree.git "%PASTREE%"
+  git clone https://github.com/oskliar83/object-pascal-tree.git "%PASTREE%"
   if errorlevel 1 goto :fail
 )
 rem Which PasTree went in - the directory, the commit and whether its working

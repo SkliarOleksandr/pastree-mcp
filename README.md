@@ -2,7 +2,7 @@
 
 An [MCP](https://modelcontextprotocol.io) server that gives an AI coding agent
 (Claude Code, or any MCP client) a **semantic index of a Delphi / Object Pascal
-project group**, built by [PasTree](https://github.com/SkliarOleksandr/object-pascal-tree).
+project group**, built by [PasTree](https://github.com/oskliar83/object-pascal-tree).
 
 Without it, an agent answers "who calls `TFoo.Bar`" with grep: every `Bar` in
 the tree, comments and strings included, then reading files to sort out which
@@ -74,7 +74,7 @@ Design and rationale of each: [SPEC.md](SPEC.md).
 
 Requirements: Windows, a RAD Studio installation (12 or 13; its registry
 library paths and RTL/VCL sources are what third-party and system units resolve
-against), and [PasTree](https://github.com/SkliarOleksandr/object-pascal-tree)
+against), and [PasTree](https://github.com/oskliar83/object-pascal-tree)
 checked out next to this repository as `..\object-pascal-tree`.
 
 ```

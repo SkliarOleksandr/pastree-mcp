@@ -465,7 +465,7 @@ Check 'compile nothing changed' (Block $b 'compile {}') @('no file has changed s
 # column (AppB). A unit may use the member's own units - uShapes, which
 # AppB names only in its `uses ... in`. Then the refusals: no code, a
 # library, `rebuild` beside it.
-Check 'status language' (Block $b 'status') @('language: Compiler: dcc ', 'Its newest constructs, which compile here: ', 'Whether a construct compiles here: `compile` with `code`.', 'https://github.com/SkliarOleksandr/object-pascal-spec')
+Check 'status language' (Block $b 'status') @('language: Compiler: dcc ', 'Its newest constructs, which compile here: ', 'Whether a construct compiles here: `compile` with `code`.', 'https://github.com/oskliar83/object-pascal-spec')
 Check 'compile code' (Block $b 'compile {"code":"var X') @('compile code (statements) - dcc32 ', 'the settings of AppA (Win32 Debug), the first of the group (`member` names another)', 'compiles - in ', 'compiled and linked, not run', 'no errors, warnings or hints')
 Check 'compile code error' (Block $b 'compile {"code":"var S') @('compile code (statements) - dcc32 ', 'the settings of AppB (Win32)', 'does not compile - 1 error', "errors - 1:`n  2  E2010 Incompatible types: 'Char' and 'Integer'`n        S := 1;") @('internal error')
 # Statements after a `uses` clause: the units join the program's, the lines

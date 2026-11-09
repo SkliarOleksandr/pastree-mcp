@@ -391,7 +391,7 @@ const
      Added: 'if-expressions (X := if C then A else B), NameOf, `is not` and '
        + '`not in`, {$PUSHOPT}/{$POPOPT}, noreturn'));
 
-  LANGUAGE_REFERENCE = 'https://github.com/SkliarOleksandr/object-pascal-spec';
+  LANGUAGE_REFERENCE = 'https://github.com/oskliar83/object-pascal-spec';
 
 function DelphiName(ACompiler: Double): string;
 const
