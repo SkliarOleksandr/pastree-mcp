@@ -33,8 +33,8 @@ if /i "%~1"=="--yes" (
 if /i "%~2"=="--yes" set "LYES=1"
 if not defined LWANT if defined PASTREE_IDE_VERSION set "LWANT=%PASTREE_IDE_VERSION%"
 
-rem The floor is a real requirement, not caution: the package targets Delphi 12
-rem and newer (see README.md).
+rem The floor is the oldest Delphi the server is built and smoke-tested with:
+rem 11 Alexandria and newer (see README.md).
 rem
 rem DELPHI 12 ATHENS IS BDS 23.0 - the registry key is the IDE's own version,
 rem which has not matched the product name since "Delphi 10 Seattle" was 17.0:
@@ -44,7 +44,7 @@ rem 12, and the effect was not a crash: it silently withheld an installed,
 rem perfectly suitable IDE and called it too old. Change this only against the
 rem actual key under HKCU\Software\Embarcadero\BDS on a machine that has the
 rem version in question.
-set "LMINMAJOR=23"
+set "LMINMAJOR=22"
 
 set "LCOUNT=0"
 set "LOLD="
@@ -58,7 +58,7 @@ if %LCOUNT%==0 (
   echo.
   echo No suitable RAD Studio installation found.
   if defined LOLD echo Installed but too old:!LOLD!
-  echo This package needs Delphi 12 ^(BDS 23.0^) or newer.
+  echo This server needs Delphi 11 ^(BDS 22.0^) or newer.
   goto :fail
 )
 
@@ -96,7 +96,7 @@ for /l %%I in (1,1,%LCOUNT%) do (
   echo   [%%I] !LVER[%%I]!  !LROOT[%%I]!
   set "LKEYS=!LKEYS!%%I"
 )
-if defined LOLD echo   ^(too old for this package, not offered:!LOLD! ^)
+if defined LOLD echo   ^(too old for this server, not offered:!LOLD! ^)
 choice /c !LKEYS! /n /m "Choose [1-%LCOUNT%]: "
 set "LPICK=!errorlevel!"
 

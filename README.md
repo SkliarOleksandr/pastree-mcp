@@ -12,7 +12,7 @@ exactly the uses the compiler would bind, one line each.
 - **Semantic, not textual.** References, callers, overrides, implementations,
   descendants, assignments, creations and destructions come from resolved
   symbol identity - the same analysis that drives the
-  [pastree-lsp](../pastree-lsp) editor features.
+  [pastree-lsp](https://github.com/oskliar83/pastree-lsp) editor features.
 - **Project groups.** A `.groupproj` is read whole. Its projects are folded
   into as few analyses as their configurations allow, so shared units are
   parsed once, and every search runs across all of them.
@@ -72,17 +72,29 @@ Design and rationale of each: [SPEC.md](SPEC.md).
 
 ## Setup
 
-Requirements: Windows, a RAD Studio installation (12 or 13; its registry
-library paths and RTL/VCL sources are what third-party and system units resolve
-against), and [PasTree](https://github.com/oskliar83/object-pascal-tree)
-checked out next to this repository as `..\object-pascal-tree`.
+Requirements: Windows, RAD Studio / Delphi **11 Alexandria or newer** - 11,
+12 Athens and 13 Florence are supported, both to build the server and to
+index and compile a project with - and
+[PasTree](https://github.com/oskliar83/object-pascal-tree) checked out next
+to this repository as `..\object-pascal-tree` (`build.bat` clones it there
+when it is missing). The installed RAD Studio's registry library paths and
+RTL/VCL sources are what third-party and system units resolve against.
+
+The server indexes a project with the RAD Studio of `$BDS` when it is set
+(a command prompt of that version), else with the newest installed one; a
+Delphi 11 project on a machine that also has 12 or 13 takes
+`--studio 22.0` (BDS versions: 11 is 22.0, 12 is 23.0, 13 is 37.0).
+`compile` with `code` and `studio` builds a snippet with any installed
+version.
 
 ```
 build.bat 37.0
 ```
 
-builds `out\pastree-mcp.exe` (Win64). `build.bat 37.0 --test` also runs the
-smoke test (`tests\smoke.ps1`) and must end with `built, smoke test passed`.
+builds `out\pastree-mcp.exe` (Win64) with RAD Studio 13 (`22.0` or `23.0`
+for 11 or 12; with no version, the only installed one, else a choice).
+`build.bat 37.0 --test` also runs the smoke test (`tests\smoke.ps1`) and
+must end with `built, smoke test passed`.
 
 `pastree-mcp.dproj` builds the same exe by hand - in RAD Studio, or with
 `msbuild pastree-mcp.dproj /p:Config=Release` from a RAD Studio command
@@ -224,9 +236,11 @@ no log, only a small state file per session under
 
 | Option | Default | |
 | --- | --- | --- |
+| `--version` | | Print the server's and PasTree's versions and the build time, and exit |
+| `--hook` | | Run as the grep hook (above); the only argument |
 | `--project <file>` | discovered | `.groupproj`, `.dproj`, `.dpr` or `.dpk`; none discovered: the installed library, no project (above) |
 | `--also <file>` | none | A `.dproj` or `.dpr` outside the group, or a pattern (`tests/*.dpr`), indexed, checked and built as a member of it (`status` marks it); repeats. Relative to the project's directory. For a tests project no `.groupproj` lists; `pastree-mcp.json` (above) names them without a new session |
-| `--studio <ver>` | `$BDS`, else newest | RAD Studio registry version: `37.0`, `23.0` |
+| `--studio <ver>` | `$BDS`, else newest | RAD Studio registry version: `37.0`, `23.0`, `22.0` |
 | `--platform <p>` | per project | Override every member's platform: `Win32`, `Win64` |
 | `--config <c>` | per project | Build configuration: `Debug`, `Release` |
 | `--groups <p>` | `shared` | `shared`: one analysis per platform. `strict`: one per distinct configuration. See SPEC.md |
@@ -282,7 +296,7 @@ not only what they cost. Options in the script's header.
 
 ## Status
 
-A prototype. It works end to end - including on the client group, where its
-answers were checked against the compiler, grep, a form-file oracle and a cold
-server (SPEC.md section 10) - but has not yet been used by an agent over a
-real task. See "Open questions" in SPEC.md.
+In use by agents on real tasks over the client group, whose reports drive
+most releases. Its answers there were checked against the compiler, grep, a
+form-file oracle and a cold server (SPEC.md section 10). What is still open:
+"Open questions" and section 9 of SPEC.md.
