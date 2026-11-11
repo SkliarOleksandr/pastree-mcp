@@ -74,9 +74,13 @@ uses
   System.Generics.Collections,
   System.Generics.Defaults,
   System.RegularExpressions,
+  System.Rtti,
+  System.TypInfo,
   PasTree.Types,
   PasTree.Preprocessor,
   PasTree.Ast,
+  PasTree.Format,
+  PasTree.SourceManager,
   PasTree.Outline,
   PasTree.Sema.Model,
   PasTree.Sema.Project,
@@ -20138,14 +20142,55 @@ const
     + '"name":{"type":"string","description":"With `file` and `line`"},'
     + '"limit":{"type":"integer","description":"Max rows: units (default 50 '
     + 'ranked, 100 for one cascade), cycles (default 20); 0: the header '
-    + 'alone"}},"required":["metric"]}}' +
+    + 'alone"}},"required":["metric"]}},' +
+
+    '{"name":"format","description":"A unit laid out by a style - '
+    + 'indentation, line breaks, spacing inside a line, the case of reserved '
+    + 'and directive words - by PasTree''s formatter, which rewrites only the '
+    + 'whitespace between tokens: every comment, directive, literal and '
+    + 'branch not compiled stays as written, and so does a construct the '
+    + 'parse flagged (the header counts the diagnostics). Without `apply`: '
+    + 'a row per edit, `line:col-line:col -> \"text\"` in the file as it is '
+    + 'now (the range the text replaces, line breaks written \\r\\n), then '
+    + 'the line it ends in as it will read; with `apply: true` the file '
+    + 'written, its encoding and line breaks kept. `lines` formats a '
+    + 'selection as a format of the whole file would there.",'
+    + '"inputSchema":{"type":"object","properties":{'
+    + '"file":{"type":"string","description":"A unit or include file"},'
+    + '"unit":{"type":"string","description":"Or the unit by name"},'
+    + '"lines":{"type":"string","description":"Only these lines: 40-80, 40- '
+    + '(to the end), -80 or 40"},'
+    + '"options":{"type":"object","description":"Style fields by name, '
+    + 'the rest their defaults"},'
+    + '"apply":{"type":"boolean","description":"Write the formatted text to '
+    + 'the file (default false: the edits only)"},'
+    + '"limit":{"type":"integer","description":"Max rows (default 100; 0: '
+    + 'the counts alone)"}}}}' +
     ']';
 
+function FormatOptionList: string; forward;
+
 function ToolDefinitions: TJSONArray;
+var
+  LOptions: TJSONObject;
+  LOld: string;
 begin
   Result := TJSONObject.ParseJSONValue(TOOLS_JSON) as TJSONArray;
   if Result = nil then
     raise Exception.Create('internal: the tool catalogue is not valid JSON');
+  // `format`'s style fields, read off TPasFormatOptions: one the library
+  // adds is listed with no change here.
+  for var LTool in Result do
+    if TJSONObject(LTool).GetValue<string>('name') = 'format' then
+    begin
+      LOptions := TJSONObject(LTool).GetValue<TJSONObject>(
+        'inputSchema.properties.options');
+      LOld := LOptions.GetValue<string>('description');
+      LOptions.RemovePair('description').Free;
+      LOptions.AddPair('description', LOld + ' - ' + FormatOptionList +
+        '; e.g. {"IndentStep": 4, "BeginOnNewLine": false, '
+        + '"ReservedWordCase": "keep"}');
+    end;
 end;
 
 function ServerInstructions(AWs: TMcpWorkspace): string;
@@ -20202,7 +20247,8 @@ begin
     + 'is compiled and which define decides it, `lint` the `uses` entries '
     + 'a unit does not need or needs only in its implementation, `metrics` '
     + 'what a change recompiles (`recompile`: the units binding what changed) '
-    + 'and the `uses` cycles. Their rows '
+    + 'and the `uses` cycles, `format` a unit or a range of it laid out by a '
+    + 'style - the edits, or the file written (`apply`). Their rows '
     + 'name the routine or type they sit '
     + 'in, which usually answers the question without opening the file. '
     + 'A header counts every row, cut or not: `limit: 0` asks whether and '
@@ -20356,6 +20402,396 @@ begin
   end;
 end;
 
+{ ---- format ------------------------------------------------------------------ }
+
+// An option's value as `format` writes it: true / false, a number, an enum
+// value without its prefix (fcLower -> lower).
+function FormatOptionText(const AValue: TValue): string;
+var
+  LName: string;
+  LAt: Integer;
+begin
+  if AValue.TypeInfo = TypeInfo(Boolean) then
+    Exit(IfThen(AValue.AsBoolean, 'true', 'false'));
+  if AValue.Kind <> TTypeKind.tkEnumeration then
+    Exit(AValue.ToString);
+  LName := GetEnumName(AValue.TypeInfo, AValue.AsOrdinal);
+  LAt := 1;
+  while (LAt <= Length(LName)) and LName[LAt].IsLower do
+    Inc(LAt);
+  Result := LowerCase(Copy(LName, LAt, MaxInt));
+end;
+
+// The values an enum option takes, as `format` writes them.
+function FormatEnumValues(AType: PTypeInfo): string;
+begin
+  Result := '';
+  for var LI := GetTypeData(AType).MinValue to GetTypeData(AType).MaxValue do
+    Result := Result + IfThen(Result <> '', ' / ') + FormatOptionText(
+      TValue.FromOrdinal(AType, LI));
+end;
+
+// Every field of TPasFormatOptions with its default - read off the record
+// by RTTI, so a field the library adds is taken and listed with no change
+// here (`options`' description in the catalogue is this list).
+function FormatOptionList: string;
+var
+  LCtx: TRttiContext;
+  LDefault: TPasFormatOptions;
+  LValue: TValue;
+begin
+  LDefault := TPasFormatOptions.Default;
+  Result := '';
+  for var LField in LCtx.GetType(TypeInfo(TPasFormatOptions)).GetFields do
+  begin
+    LValue := LField.GetValue(@LDefault);
+    Result := Result + IfThen(Result <> '', ', ') + LField.Name + ' ' +
+      FormatOptionText(LValue);
+    if (LValue.Kind = TTypeKind.tkEnumeration) and (LValue.TypeInfo <> TypeInfo(Boolean))
+    then
+      Result := Result + ' (' + FormatEnumValues(LValue.TypeInfo) + ')';
+  end;
+end;
+
+// One option's JSON value as the field's.
+function FormatOptionValue(AField: TRttiField; AJson: TJSONValue): TValue;
+var
+  LType: PTypeInfo;
+  LText: string;
+  LInt: Integer;
+begin
+  LType := AField.FieldType.Handle;
+  LText := Trim(AJson.Value);
+  if LType = TypeInfo(Boolean) then
+  begin
+    if AJson is TJSONBool then
+      Exit(TJSONBool(AJson).AsBoolean);
+    if SameText(LText, 'true') or SameText(LText, 'false') then
+      Exit(SameText(LText, 'true'));
+  end
+  else if AField.FieldType.TypeKind = TTypeKind.tkInteger then
+  begin
+    if TryStrToInt(LText, LInt) then
+      Exit(LInt);
+  end
+  else if AField.FieldType.TypeKind = TTypeKind.tkEnumeration then
+  begin
+    for var LI := GetTypeData(LType).MinValue to GetTypeData(LType).MaxValue do
+      if SameText(LText, GetEnumName(LType, LI)) or SameText(LText,
+         FormatOptionText(TValue.FromOrdinal(LType, LI))) then
+        Exit(TValue.FromOrdinal(LType, LI));
+    raise EToolError.CreateFmt('`options.%s` is %s (not `%s`)', [AField.Name,
+      FormatEnumValues(LType), LText]);
+  end
+  else if AField.FieldType.TypeKind in [TTypeKind.tkUString,
+    TTypeKind.tkString, TTypeKind.tkWString, TTypeKind.tkLString] then
+    Exit(TValue.From<string>(AJson.Value));
+  raise EToolError.CreateFmt('`options.%s` takes %s (not `%s`)', [AField.Name,
+    IfThen(LType = TypeInfo(Boolean), 'true or false', 'a number'),
+    AJson.ToJSON]);
+end;
+
+// `format`'s `options`: TPasFormatOptions.Default with the fields the object
+// names - by field name, case aside. ANote: the ones that differ from the
+// default, for the answer's header.
+function FormatOptionsOf(AArgs: TJSONObject; out ANote: string):
+  TPasFormatOptions;
+var
+  LCtx: TRttiContext;
+  LType: TRttiType;
+  LField: TRttiField;
+  LJson, LOwned: TJSONValue;
+  LDefault: TPasFormatOptions;
+  LGuess: string;
+  LBest: Integer;
+begin
+  Result := TPasFormatOptions.Default;
+  LDefault := Result;
+  ANote := '';
+  if AArgs = nil then
+    Exit;
+  LJson := AArgs.GetValue('options');
+  if (LJson = nil) or (LJson is TJSONNull) then
+    Exit;
+  LOwned := nil;
+  // An object written as JSON inside a string, as an agent may pass it.
+  if LJson is TJSONString then
+  begin
+    LOwned := TJSONObject.ParseJSONValue(LJson.Value);
+    LJson := LOwned;
+  end;
+  try
+    if not (LJson is TJSONObject) then
+      raise EToolError.Create('`options` is an object of style fields, e.g. '
+        + '{"IndentStep": 4} - the fields, with their defaults: ' +
+        FormatOptionList);
+    LType := LCtx.GetType(TypeInfo(TPasFormatOptions));
+    for var LPair in TJSONObject(LJson) do
+    begin
+      LField := nil;
+      for var LF in LType.GetFields do
+        if SameText(LF.Name, LPair.JsonString.Value) then
+          LField := LF;
+      if LField = nil then
+      begin
+        // The field a misspelling or a guess at the name means
+        // (`IndentSize`), when one is that close.
+        LGuess := '';
+        LBest := 4;
+        for var LF in LType.GetFields do
+          if EditDistance(LowerCase(LPair.JsonString.Value), LowerCase(
+             LF.Name), LBest) <= LBest then
+          begin
+            LBest := EditDistance(LowerCase(LPair.JsonString.Value), LowerCase(
+              LF.Name), LBest) - 1;
+            LGuess := Format(' (did you mean `%s`?)', [LF.Name]);
+          end;
+        raise EToolError.CreateFmt('`options` has no field `%s`%s - the '
+          + 'fields, with their defaults: %s', [LPair.JsonString.Value, LGuess,
+          FormatOptionList]);
+      end;
+      LField.SetValue(@Result, FormatOptionValue(LField, LPair.JsonValue));
+    end;
+    for var LF in LType.GetFields do
+      if FormatOptionText(LF.GetValue(@Result)) <>
+         FormatOptionText(LF.GetValue(@LDefault)) then
+        ANote := ANote + IfThen(ANote <> '', ', ') + LF.Name + ' ' +
+          FormatOptionText(LF.GetValue(@Result));
+  finally
+    LOwned.Free;
+  end;
+end;
+
+// The lines of a file as an editor numbers them: the empty one after a final
+// line break is not one.
+function LineCountOf(const ATS: TPasTokenStream): Integer;
+begin
+  Result := Length(ATS.LineStarts);
+  if (Result > 1) and (ATS.LineStarts[Result - 1] = Length(ATS.Source)) then
+    Dec(Result);
+end;
+
+// An edit's text in a row: quoted, a line break and a tab escaped.
+function QuoteEditText(const AText: string): string;
+begin
+  Result := '"' + AText.Replace('\', '\\').Replace('"', '\"').Replace(#13,
+    '\r').Replace(#10, '\n').Replace(#9, '\t') + '"';
+end;
+
+// AText to file APath in the encoding AOld (its bytes now) is in: the BOM
+// kept, a file without one UTF-8 when its bytes are, ANSI otherwise - the
+// rule PasTree reads it by (TPasSourceManager.DecodeBytes). AHow: the
+// encoding, for the answer.
+procedure WriteLikeFile(const APath: string; const AOld: TBytes;
+  const AText: string; out AHow: string);
+var
+  LEnc: TEncoding;
+  LStart: Integer;
+begin
+  LEnc := nil;
+  LStart := TEncoding.GetBufferEncoding(AOld, LEnc, TEncoding.UTF8);
+  if (LStart = 0) and (LEnc.CodePage = CP_UTF8) and
+     not TPasSourceManager.IsValidUtf8(AOld, 0) then
+    LEnc := TEncoding.ANSI;
+  if LEnc.CodePage = CP_UTF8 then
+    AHow := IfThen(LStart > 0, 'UTF-8 with its BOM', 'UTF-8, no BOM')
+  else
+    AHow := LEnc.EncodingName;
+  TFile.WriteAllBytes(APath, Copy(AOld, 0, LStart) + LEnc.GetBytes(AText));
+end;
+
+function ToolFormat(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
+var
+  LFile, LOptNote, LNew, LHow, LGap, LBreak: string;
+  LOpts: TPasFormatOptions;
+  LA: TMcpAnalysis;
+  LMid, LFi, LFrom, LTo, LDiags, LLimit, LShown, LLine, LCol, LEndLine,
+    LEndCol, LDelta, LAt, LRLine: Integer;
+  LBreaks, LSpaces, LCases: Integer;
+  LM: TPasSemaModel;
+  LTS: TPasTokenStream;
+  LRange: TLineRange;
+  LEdits: TPasTextEdits;
+  LApply: Boolean;
+  LBytes: TBytes;
+  LLines: TDictionary<Integer, Boolean>;
+  LResultStarts: TList<Integer>;
+  LSb: TStringBuilder;
+begin
+  if (ArgStr(AArgs, 'file') = '') and (ArgStr(AArgs, 'unit') <> '') then
+    LFile := ResolveNamed(AWs, ArgStr(AArgs, 'unit'), 'unit').DeclFile
+  else if ArgStr(AArgs, 'file') = '' then
+    raise EToolError.Create('give `file`, or the `unit` by name')
+  else
+    LFile := ArgFile(AWs, AArgs);
+  if TPasSourceManager.IsDcuPath(LFile) then
+    raise EToolError.CreateFmt('%s is a compiled unit - its source is '
+      + 'generated, there is no file to format', [AWs.RelPath(LFile)]);
+  LOpts := FormatOptionsOf(AArgs, LOptNote);
+  LRange := ParseLineRange(ArgStr(AArgs, 'lines'));
+  LApply := ArgBool(AArgs, 'apply', False);
+  LLimit := EnsureRange(ArgInt(AArgs, 'limit', 100), 0, 100000);
+  // A library unit read interface-only holds no text past it: analyzed in
+  // full first (one file's demand; the tool runs again).
+  for var LB in AWs.Analyses do
+    if LB.Proj <> nil then
+    begin
+      LMid := LB.Nav.ModelIdOf(LFile);
+      if (LMid >= 0) and LB.Proj.IsLight(LMid) then
+        QFile(AWs, LB, LFile);
+    end;
+  LA := nil;
+  LMid := -1;
+  LFi := 0;
+  for var LB in AWs.Analyses do
+    if (LB.Proj <> nil) and CondModelOf(AWs, LB, LFile, LMid, LFi) then
+    begin
+      LA := LB;
+      Break;
+    end;
+  if LA = nil then
+    raise EToolError.CreateFmt('%s is not part of any analyzed project - '
+      + '`format` lays a file out by the tree the index holds', [AWs.RelPath(
+      LFile)]);
+  LM := LA.Proj.Model(LMid);
+  LTS := LM.Tree.Source.Files[LFi];
+  if LTS.Truncated then
+    raise EToolError.CreateFmt('only the interface of %s was read - nothing '
+      + 'to format past it', [AWs.RelPath(LFile)]);
+  // The diagnostics of the parse in this file: the lexer's and the
+  // parser's. A construct the parse flagged is kept as written.
+  LDiags := Length(LTS.Diagnostics);
+  for var LD in LM.ParseDiags do
+    if (LD.VisIndex >= 0) and (LD.VisIndex < Length(LM.Tree.Source.Visible))
+       and (LM.Tree.Source.Visible[LD.VisIndex].FileId = LFi) then
+      Inc(LDiags);
+  if LRange.Text = '' then
+    LEdits := PasFormatEdits(LM.Tree, LFi, LOpts)
+  else
+  begin
+    LFrom := Max(LRange.First, 1);
+    LTo := LRange.Last;
+    if (LTo = 0) or (LTo > Length(LTS.LineStarts)) then
+      LTo := Length(LTS.LineStarts);
+    if LFrom > Length(LTS.LineStarts) then
+      raise EToolError.CreateFmt('`lines` %s: %s has %s', [LRange.Text,
+        AWs.RelPath(LFile), Plural(LineCountOf(LTS), 'line')]);
+    LAt := Length(LTS.Source);
+    if LTo < Length(LTS.LineStarts) then
+      LAt := LTS.LineStarts[LTo];
+    LEdits := PasFormatRangeEdits(LM.Tree, LFi, LOpts,
+      LTS.LineStarts[LFrom - 1], LAt);
+  end;
+  LNew := PasApplyEdits(LTS.Source, LEdits);
+  LLines := TDictionary<Integer, Boolean>.Create;
+  LResultStarts := TList<Integer>.Create;
+  LSb := TStringBuilder.Create;
+  try
+    LBreaks := 0;
+    LSpaces := 0;
+    LCases := 0;
+    for var LE in LEdits do
+    begin
+      LGap := Copy(LTS.Source, LE.Start + 1, LE.Len);
+      if Trim(LE.Text) <> '' then
+        Inc(LCases)
+      else if (LGap + LE.Text).IndexOfAny([#13, #10]) >= 0 then
+        Inc(LBreaks)
+      else
+        Inc(LSpaces);
+      LTS.OffsetToLineCol(LE.Start + LE.Len, LLine, LCol);
+      LLines.AddOrSetValue(LLine, True);
+    end;
+    if Length(LEdits) = 0 then
+      LSb.Append(Format('%s: already formatted - no edits', [AWs.RelPath(
+        LFile)]))
+    else
+    begin
+      LBreak := '';
+      if LBreaks > 0 then
+        LBreak := Format('%d indentation and line breaks', [LBreaks]);
+      if LSpaces > 0 then
+        LBreak := LBreak + IfThen(LBreak <> '', ', ') + Format('%d spacing',
+          [LSpaces]);
+      if LCases > 0 then
+        LBreak := LBreak + IfThen(LBreak <> '', ', ') + Format('%d case',
+          [LCases]);
+      LSb.Append(Format('%s: %s on %s of %d - %s', [AWs.RelPath(LFile),
+        Plural(Length(LEdits), 'edit'), Plural(LLines.Count, 'line'),
+        LineCountOf(LTS), LBreak]));
+    end;
+    if LRange.Text <> '' then
+      LSb.Append(Format(' (lines %d-%d)', [LFrom, LTo]));
+    LSb.AppendLine;
+    if LOptNote <> '' then
+      LSb.AppendLine('options: ' + LOptNote);
+    if LFi > 0 then
+      LSb.AppendLine(Format('(an include file: laid out as %s reads it)',
+        [AWs.RelPath(LA.Proj.ModelFile(LMid))]));
+    if LDiags > 0 then
+      LSb.AppendLine(Format('(%s in the parse of this file - the constructs '
+        + 'flagged are kept as written)', [Plural(LDiags, 'diagnostic')]));
+    if LApply then
+    begin
+      if Length(LEdits) > 0 then
+      begin
+        // The bytes the edits are offsets into: what the index read, or
+        // nothing is written.
+        LBytes := TFile.ReadAllBytes(LFile);
+        if TPasSourceManager.DecodeBytes(LBytes, LHow) <> LTS.Source then
+          raise EToolError.CreateFmt('%s changed on disk while it was '
+            + 'formatted - nothing written; call again', [AWs.RelPath(LFile)]);
+        if LHow <> '' then
+          raise EToolError.CreateFmt('%s is read %s - writing it back would '
+            + 'change more than its layout; nothing written', [AWs.RelPath(
+            LFile), LHow.Replace('|', ' ')]);
+        WriteLikeFile(LFile, LBytes, LNew, LHow);
+        LSb.AppendLine(Format('written: %s (%s, its line breaks kept) - the '
+          + 'next call reads it again', [AWs.RelPath(LFile), LHow]));
+      end;
+      Exit(LSb.ToString.TrimRight);
+    end;
+    // A row per edit: its range in the file as it is now, the text it puts
+    // there, and the line it ends in as it reads after every edit.
+    LResultStarts.Add(0);
+    for var LI := 1 to Length(LNew) do
+      if (LNew[LI] = #10) or ((LNew[LI] = #13) and ((LI = Length(LNew)) or
+         (LNew[LI + 1] <> #10))) then
+        LResultStarts.Add(LI);
+    LShown := 0;
+    LDelta := 0;
+    LRLine := 0;
+    for var LE in LEdits do
+    begin
+      LDelta := LDelta + Length(LE.Text) - LE.Len;
+      if LShown >= LLimit then
+        Continue;
+      Inc(LShown);
+      LTS.OffsetToLineCol(LE.Start, LLine, LCol);
+      LTS.OffsetToLineCol(LE.Start + LE.Len, LEndLine, LEndCol);
+      // The line of the result holding the end of the edit.
+      LAt := LE.Start + LE.Len + LDelta;
+      // The edits ascend, and so do their ends in the result.
+      while (LRLine + 1 < LResultStarts.Count) and
+            (LResultStarts[LRLine + 1] <= LAt) do
+        Inc(LRLine);
+      LGap := Copy(LNew, LResultStarts[LRLine] + 1, IfThen(LRLine + 1 <
+        LResultStarts.Count, LResultStarts[LRLine + 1], Length(LNew) + 1) -
+        LResultStarts[LRLine] - 1).TrimRight([#13, #10, ' ', #9]);
+      LSb.AppendLine(Format('  %d:%d-%d:%d -> %s  |%s', [LLine, LCol, LEndLine,
+        LEndCol, QuoteEditText(LE.Text), LGap]));
+    end;
+    if LShown < Length(LEdits) then
+      LSb.AppendLine(MoreRows(Length(LEdits) - LShown, LShown, 'raise '
+        + '`limit`, or `apply: true` writes them all'));
+    Result := LSb.ToString.TrimRight;
+  finally
+    LSb.Free;
+    LResultStarts.Free;
+    LLines.Free;
+  end;
+end;
+
 // The tool, or each of its `targets`.
 function WithTargets(AWs: TMcpWorkspace; const AName: string;
   AArgs: TJSONObject; const ATool: TFunc<TMcpWorkspace, TJSONObject, string>):
@@ -20439,6 +20875,8 @@ begin
         Result := ToolLint(AWs, AArgs)
       else if AName = 'metrics' then
         Result := ToolMetrics(AWs, AArgs)
+      else if AName = 'format' then
+        Result := ToolFormat(AWs, AArgs)
       else
         raise EToolError.Create('unknown tool: ' + AName);
     finally

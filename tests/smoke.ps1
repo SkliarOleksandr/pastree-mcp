@@ -726,6 +726,17 @@ Check 'metrics cycles' (Block $b 'metrics {"metric":"cycles"}') @('1 `uses` cycl
 Check 'metrics cycles file' (Block $b 'metrics {"metric":"cycles","file":"AppB/uCycC.pas"}') @('  shortest through uCycC: uCycC ~> uCycA ~> uCycC')
 Check 'metrics cycles none' (Block $b 'metrics {"metric":"cycles","file":"AppB/uRcA.pas"}') @('AppB\uRcA.pas is on no `uses` cycle')
 Check 'metrics cycles count only' (Block $b 'metrics {"metric":"cycles","limit":0}') @('1 `uses` cycle among the 44 own units') @('shortest')
+# format: a unit already in the default style (the empty case), a range in
+# another style - the gap before line 49's first token is the range's, line
+# 50's is not - an include laid out as its unit reads it, and the options
+# refused by name and by value.
+Check 'format none' (Block $b 'format {"file":"Shared/uShapes.pas"}') @('Shared\uShapes.pas: already formatted - no edits') @(' -> ')
+Check 'format range options' (Block $b 'format {"unit":"uShapes","lines":"42-49"') @('Shared\uShapes.pas: 9 edits on 7 lines of 78 - 2 indentation and line breaks, 7 case (lines 42-49)', 'options: IndentStep 4, ReservedWordCase upper', '  42:27-42:33 -> "STRING"  |FUNCTION TShape.Describe: STRING;', '  48:6-49:3 -> "\r\n    "  |    INHERITED Create;') @('49:20-50:3', 'TCircle.Area')
+Check 'format count only' (Block $b 'format {"file":"AppB/uBoxes.pas","limit":0}') @('AppB\uBoxes.pas: 3 edits on 1 line of 139 - 3 indentation and line breaks', '(limit 0: 3 not listed)') @(' -> ')
+Check 'format include' (Block $b 'format {"file":"Shared/Flags.inc"') @('Shared\Flags.inc: 6 edits on 6 lines of 9 - 6 case', '(an include file: laid out as Shared\uFlags.pas reads it)', '  7:1-7:9 -> "{$endif}"  |{$endif}')
+Check 'format unknown option' (Block $b 'format {"file":"Shared/uShapes.pas","options":{"IndentSize"') @('`options` has no field `IndentSize` (did you mean `IndentStep`?) - the fields, with their defaults: IndentStep 2, ', 'ReservedWordCase lower (lower / upper / keep)')
+Check 'format bad value' (Block $b 'format {"file":"Shared/uShapes.pas","options":{"ReservedWordCase":"mixed"') @('`options.ReservedWordCase` is lower / upper / keep (not `mixed`)')
+Check 'format not indexed' (Block $b 'format {"file":"AppB/uOrphan.pas"}') @('AppB\uOrphan.pas is not part of any analyzed project')
 }
 $script:mode = ''
 
@@ -1165,6 +1176,40 @@ Check 'compile git base' $gitBase @('compile - 2 members, those compiling the 1 
 Check 'compile git mixed' $gitMixed @('those compiling the 2 files changed (git: 1 not committed, 1 in the 1 commit since the branch left origin/release/1): AppB\uColors.pas, Shared\uShapes.pas') @('uAppA.pas')
 Check 'compile git bad base' $gitBadBase @('git knows no branch or commit `no-such-branch` to diff against')
 
+# ---- format with apply: a copy, written back --------------------------------------
+# A unit saved with a BOM and CRLF, out of the default style, with a routine
+# the parse flags: the edits, then `apply` - the file written in its
+# encoding and its line breaks, the flagged routine as it was - and a format
+# of the result that finds nothing left.
+Write-Host '--- CLI, format with apply'
+$fmtCopy = Join-Path ([IO.Path]::GetTempPath()) ('pastree-mcp-smoke-fmt-' + [Guid]::NewGuid().ToString('N'))
+$fmtCalls = $fmtCopy + '.calls'
+Copy-Item -Recurse $fixture $fmtCopy
+try {
+    $fmtUnit = Join-Path $fmtCopy 'AppA\uAppA.pas'
+    $fmtText = @('unit uAppA;', '', 'interface', '', 'procedure RunA;', '', 'implementation', '', 'uses', '  System.SysUtils,', '  uShapes;', '',
+        'procedure RunA;', 'var', '  LShape: TShape;', 'BEGIN', 'LShape:=TCircle.Create(2);', '  try', '    if LShape.Area > 1 then Writeln(LShape.Describe);',
+        '  finally', '    FreeAndNil(LShape);', '  end;', 'end;', '', 'procedure Broken;', 'begin', '      X := (1 + ;', 'end;', '', 'end.') -join "`r`n"
+    [IO.File]::WriteAllText($fmtUnit, $fmtText + "`r`n", (New-Object Text.UTF8Encoding($true)))
+    [IO.File]::WriteAllText($fmtCalls, "format {`"file`":`"AppA/uAppA.pas`"}`nformat {`"file`":`"AppA/uAppA.pas`",`"apply`":true}`nformat {`"file`":`"AppA/uAppA.pas`"}`n")
+    $ErrorActionPreference = 'Continue'
+    try { $fmtOut = (& $Exe --project (Join-Path $fmtCopy 'Fixture.groupproj') --log none --script $fmtCalls 2>$null | ForEach-Object { "$_" }) -join "`n" }
+    finally { $ErrorActionPreference = 'Stop' }
+    $fmtBytes = [IO.File]::ReadAllBytes($fmtUnit)
+    $fmtAfter = [Text.Encoding]::UTF8.GetString($fmtBytes, 3, $fmtBytes.Length - 3)
+}
+finally {
+    Remove-Item -Recurse -Force $fmtCopy -ErrorAction SilentlyContinue
+    Remove-Item -Force $fmtCalls -ErrorAction SilentlyContinue
+}
+$fmtParts = $fmtOut -split '(?m)^=== '
+Check 'format edits' $fmtParts[1] @('AppA\uAppA.pas: 5 edits on 3 lines of 30 - 2 indentation and line breaks, 2 spacing, 1 case', '(2 diagnostics in the parse of this file - the constructs flagged are kept as written)', '  16:1-16:6 -> "begin"  |begin', '  16:6-17:1 -> "\r\n  "  |  LShape := TCircle.Create(2);', '  19:28-19:29 -> "\r\n      "  |      Writeln(LShape.Describe);') @('27:')
+Check 'format apply' $fmtParts[2] @('written: AppA\uAppA.pas (UTF-8 with its BOM, its line breaks kept)')
+Check 'format applied' $fmtParts[3] @('AppA\uAppA.pas: already formatted - no edits', '(2 diagnostics in the parse of this file')
+Check 'format applied text' $fmtAfter @("begin`r`n  LShape := TCircle.Create(2);`r`n", "    if LShape.Area > 1 then`r`n      Writeln(LShape.Describe);`r`n", "begin`r`n      X := (1 + ;`r`nend;")
+if (($fmtBytes[0] -ne 0xEF) -or ($fmtBytes[1] -ne 0xBB) -or ($fmtBytes[2] -ne 0xBF)) { Write-Host 'FAIL [format applied] the BOM is gone'; $script:failures++ }
+if ($fmtAfter -match "[^`r]`n") { Write-Host 'FAIL [format applied] a line break without its CR'; $script:failures++ }
+
 # ---- 3. MCP over stdio, with an edit in between ------------------------------------
 Write-Host '--- MCP over stdio'
 $copy = Join-Path ([IO.Path]::GetTempPath()) ('pastree-mcp-smoke-' + [Guid]::NewGuid().ToString('N'))
@@ -1223,7 +1268,7 @@ try {
     $stdin.WriteLine('{"jsonrpc":"2.0","method":"notifications/initialized"}')
     $r = Rpc 2 'tools/list' '{}'
     $names = ($r.result.tools | ForEach-Object { $_.name }) -join ','
-    Check 'tools/list' $names @('status', 'find', 'definition', 'source', 'members', 'references', 'callers', 'callees', 'impact', 'compile', 'related', 'outline', 'diagnostics', 'unit_deps', 'rename_plan', 'change_plan', 'defines', 'lint', 'metrics')
+    Check 'tools/list' $names @('status', 'find', 'definition', 'source', 'members', 'references', 'callers', 'callees', 'impact', 'compile', 'related', 'outline', 'diagnostics', 'unit_deps', 'rename_plan', 'change_plan', 'defines', 'lint', 'metrics', 'format')
     $r = Rpc 3 'tools/call' '{"name":"related","arguments":{"relation":"creations","symbol":"TCircle"}}'
     Check 'call before edit' (ToolText $r) @('creations of TCircle', ': 1')
     if ($r.result.isError) { Write-Host 'FAIL call before edit reported isError'; $script:failures++ }

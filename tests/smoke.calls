@@ -359,3 +359,10 @@ unit_deps {"unit":"uFallback","direction":"used_by"}
 find {"query":"T*","limit":5000}
 references {"symbol":"TAuditBox","mode":"count"}
 compile {"code":"uses uShapes;\nWriteln(TCircle.ClassName);\nWriteln(NoSuchName);","member":"AppB"}
+format {"file":"Shared/uShapes.pas"}
+format {"unit":"uShapes","lines":"42-49","options":{"IndentStep":4,"ReservedWordCase":"upper"}}
+format {"file":"AppB/uBoxes.pas","limit":0}
+format {"file":"Shared/Flags.inc","options":{"CompilerDirectiveCase":"lower"}}
+format {"file":"Shared/uShapes.pas","options":{"IndentSize":4}}
+format {"file":"Shared/uShapes.pas","options":{"ReservedWordCase":"mixed"}}
+format {"file":"AppB/uOrphan.pas"}
