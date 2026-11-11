@@ -72,6 +72,7 @@ uses
   PasTree.Sema.Project,
   PasTree.Sema.Nav,
   PasTree.Sema.Workspace,
+  PasTree.SourceManager,
   PasMcp.Studio;
 
 type
@@ -209,6 +210,8 @@ type
     // directory or an --also root and outside every analysis' project
     // directory (which PasTree never reads light) - library, not own.
     FLightOn: Boolean;
+    FDcuFilter: TPasTextFilter;
+    FDcuFilterNote: string;
     FLightDirs: TArray<string>;
     FLightNotOwn: TArray<string>;
     // The members of an analysis a query escalated to a full analysis
@@ -319,6 +322,11 @@ type
       const AStudio: TMcpStudio; out AUnits: Integer;
       out AMs: Int64): TArray<TMcpSnippetDiag>;
     property LightOn: Boolean read FLightOn;
+    // --format-dcu (PasMcp.Tools.SetDcuFormat): what every analysis passes a
+    // compiled unit's generated text through, nil for none; ANote the style,
+    // for `status`. Before Load: a model keeps its text's positions.
+    procedure SetDcuFilter(const AFilter: TPasTextFilter; const ANote: string);
+    property DcuFilterNote: string read FDcuFilterNote;
     // A tool call starts (CallTool): its tally cleared; ACancelled (nil:
     // none) is what every workspace query polls.
     procedure BeginCall(const ACancelled: TFunc<Boolean>);
@@ -774,6 +782,13 @@ begin
   // Not the trees --light names: light mode changes how a unit is read, never
   // an answer (the light fixture's every answer equals the full run's).
   Result := IsOwnFile(APath) or not PasUnderDirTrees(APath, FLibTrees);
+end;
+
+procedure TMcpWorkspace.SetDcuFilter(const AFilter: TPasTextFilter;
+  const ANote: string);
+begin
+  FDcuFilter := AFilter;
+  FDcuFilterNote := ANote;
 end;
 
 procedure TMcpWorkspace.SetLight(AOn: Boolean; const ADirs: TArray<string>);
@@ -1627,6 +1642,10 @@ begin
     // The same switch pastree-lsp turns on: a member after a dot that nothing
     // resolves is E2003 too, and PasTree's corpus runs report zero false ones.
     Result.ReportUnresolvedMembers := True;
+    // --format-dcu: off unless asked - every position another tool reports
+    // in a compiled unit's generated text moves with it.
+    if Assigned(FDcuFilter) then
+      Result.DcuTextFilter := FDcuFilter;
   except
     Result.Free;
     raise;
@@ -2016,6 +2035,9 @@ begin
         Log('group member missing on disk: %s', [LMiss]);
       AssignAnalyses;
       AssignLightTrees;
+      if FDcuFilterNote <> '' then
+        Log('--format-dcu: compiled units'' generated source laid out by %s',
+          [FDcuFilterNote]);
       if not FLightOn then
         Log('light mode off (--no-light): library units are analyzed in full')
       else
@@ -2517,6 +2539,10 @@ begin
     LSb.AppendLine(Format('server: %s; pid %d, started %s', [PasMcpVersionBanner,
       GetCurrentProcessId, FormatDateTime('yyyy-mm-dd hh:nn', ProcessStarted)]));
     LSb.AppendLine('log: ' + IfThen(LogFile = '', 'none (stderr only)', LogFile));
+    if FDcuFilterNote <> '' then
+      LSb.AppendLine('compiled units (.dcu): their generated source laid out '
+        + 'by --format-dcu (' + FDcuFilterNote + ') - lines and columns in '
+        + 'it are the formatted text''s');
     if FNoProject <> '' then
     begin
       LSb.AppendLine('project: none - ' + FNoProject + '. ' + NoProjectAdvice

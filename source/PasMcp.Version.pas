@@ -16,8 +16,11 @@ unit PasMcp.Version;
 interface
 
 const
-  PasTreeMcpVersion = '0.49.0';
-  // 0.178.0: the formatter - PasFormatEdits, PasFormatRangeEdits (range mode
+  PasTreeMcpVersion = '0.50.0';
+  // 0.179.2: TPasSemaProject.DcuTextFilter, which --format-dcu sets on every
+  // analysis (a compile error without it), and F5's wrapping and alignment
+  // fields of TPasFormatOptions, which `format`'s `options` take.
+  // 0.178.0 before: the formatter - PasFormatEdits, PasFormatRangeEdits (range mode
   // and include files, F6) and the defaults tuned in F3, which `format`
   // answers with (a compile error without the range mode).
   // 0.145.0 before: nkAmbiguous and AmbigReadingOf - `F(Gen<A, B>(D))` is one node
@@ -40,7 +43,7 @@ const
   // overload (0.121.0). An older PasTree has no workspace (a compile error)
   // or a workspace whose demand misses a family (a silent light gap).
   // 0.117.1 before: light mode, promotion, LintPromotions (0.31.0).
-  cMinPasTreeVersion = '0.178.0';
+  cMinPasTreeVersion = '0.179.2';
 
 // 'pastree-mcp 0.1.0 (PasTree 0.50.1), built 2026-09-25 15:00' - the first
 // line of every log.

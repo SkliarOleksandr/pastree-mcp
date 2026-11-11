@@ -247,6 +247,7 @@ no log, only a small state file per session under
 | `--groups <p>` | `shared` | `shared`: one analysis per platform. `strict`: one per distinct configuration. See SPEC.md |
 | `--light <dir>` | none | A directory tree whose units are read interface-only, besides the installed library (registry library and browsing paths, Studio sources); repeats. Relative to the project's directory. Under the group directory its units count as library, not own (SPEC 9.9) |
 | `--no-light` | off | Analyze every library unit in full, bodies included - as before 0.31.0 |
+| `--format-dcu [style]` | off | A compiled unit with no source (a `.dcu` only) is read from the interface source PasTree generates for it; with this, that text is laid out by `format`'s style first - `Name=value` pairs (`IndentStep=4,ReservedWordCase=upper`, or a JSON object), none for the default style - in every analysis and in what a tool reads of it. Off by default: the lines and columns every tool reports in a `.dcu` are the generated text's, and they move with the style; `status` says when it is on. A style it cannot read stops the server |
 | `--build-dir <dir>` | `%TEMP%\pastree-mcp` | Where `compile` builds: a directory per group, member and configuration, kept between sessions so a build is incremental |
 | `--log <file\|none>` | beside the project | `<project>-pastree-mcp.log`, truncated per run. A file another server holds is not shared: this one logs to `<name>-<pid>.log` beside it and says so on stderr; `status` names the file written |
 

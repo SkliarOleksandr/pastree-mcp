@@ -1210,6 +1210,74 @@ Check 'format applied text' $fmtAfter @("begin`r`n  LShape := TCircle.Create(2);
 if (($fmtBytes[0] -ne 0xEF) -or ($fmtBytes[1] -ne 0xBB) -or ($fmtBytes[2] -ne 0xBF)) { Write-Host 'FAIL [format applied] the BOM is gone'; $script:failures++ }
 if ($fmtAfter -match "[^`r]`n") { Write-Host 'FAIL [format applied] a line break without its CR'; $script:failures++ }
 
+# ---- format: every style field taken -----------------------------------------------
+# The fields come from TPasFormatOptions through RTTI; the refusal of an
+# unknown one lists them all with their defaults. Each passed back by name at
+# that default must be taken - a field of a kind the reader cannot set fails
+# here, not in an agent's call - and the style it makes is the default one.
+Write-Host '--- CLI, format takes every style field'
+$fieldCalls = Join-Path ([IO.Path]::GetTempPath()) ('pastree-mcp-smoke-fields-' + [Guid]::NewGuid().ToString('N') + '.calls')
+function Run-Fields([string]$Calls) {
+    [IO.File]::WriteAllText($fieldCalls, $Calls + "`n")
+    $ErrorActionPreference = 'Continue'
+    try { return (& $Exe --project $group --log none --script $fieldCalls 2>$null | ForEach-Object { "$_" }) -join "`n" }
+    finally { $ErrorActionPreference = 'Stop' }
+}
+try {
+    $fieldList = Run-Fields 'format {"file":"Shared/uShapes.pas","options":{"NoSuchField":1}}'
+    $fieldPairs = @()
+    if ($fieldList -match 'with their defaults: (.*)') {
+        foreach ($f in ($Matches[1] -replace ' \([^)]*\)', '') -split ', ') {
+            $nv = $f.Trim() -split ' ', 2
+            $fieldPairs += ('"' + $nv[0] + '":"' + $nv[1] + '"')
+        }
+    }
+    $fieldAll = Run-Fields ('format {"file":"Shared/uShapes.pas","options":{' + ($fieldPairs -join ',') + '}}')
+}
+finally { Remove-Item -Force $fieldCalls -ErrorAction SilentlyContinue }
+# F5's fields among them, off by default.
+Check 'format fields listed' $fieldList @('IndentStep 2, ', 'RightMargin 0', 'WrapLongLines false', 'AlignAssignments false', 'AlignDeclColons false', 'AlignTrailingComments false')
+if ($fieldPairs.Count -lt 23) { Write-Host "FAIL [format fields] only $($fieldPairs.Count) fields read from the list"; $script:failures++ }
+Check 'format every field' $fieldAll @('Shared\uShapes.pas: already formatted - no edits') @('ERROR', 'options:')
+
+# ---- --format-dcu: a compiled unit's generated source in a style --------------------
+# A unit present only as its .dcu (built here, its source removed): without
+# --format-dcu its generated source is as PasTree prints it, with it every
+# analysis reads it formatted - the declaration's text in the answers too -
+# and `status` says so; a style it cannot read stops the server.
+Write-Host '--- CLI, --format-dcu'
+$dcuDir = Join-Path ([IO.Path]::GetTempPath()) ('pastree-mcp-smoke-dcu-' + [Guid]::NewGuid().ToString('N'))
+$dcuCalls = $dcuDir + '.calls'
+New-Item -ItemType Directory $dcuDir | Out-Null
+function Write-Dcu([string]$Name, [string[]]$Lines) { [IO.File]::WriteAllText((Join-Path $dcuDir $Name), ($Lines -join "`r`n") + "`r`n") }
+function Run-Dcu([string[]]$ExtraArgs) {
+    $ErrorActionPreference = 'Continue'
+    try { return (& $Exe --project (Join-Path $dcuDir 'P.dpr') --log none --build-dir ($dcuDir + '-build') --script $dcuCalls @ExtraArgs 2>&1 | ForEach-Object { "$_" }) -join "`n" }
+    finally { $ErrorActionPreference = 'Stop' }
+}
+try {
+    Write-Dcu 'uHidden.pas' @('unit uHidden;', 'interface', 'type', '  THidden = class', '  public', '    procedure Run;', '    function Twice(A: Integer): Integer;', '  end;', 'implementation', 'procedure THidden.Run;', 'begin', 'end;', 'function THidden.Twice(A: Integer): Integer;', 'begin', '  Result := A * 2;', 'end;', 'end.')
+    Write-Dcu 'P.dpr' @('program P;', '{$APPTYPE CONSOLE}', 'uses', "  uHidden in 'uHidden.pas';", 'begin', '  Writeln(THidden.Create.Twice(2));', 'end.')
+    [IO.File]::WriteAllText($dcuCalls, "compile {`"member`":`"P`"}`n")
+    $dcuBuilt = Run-Dcu @()
+    $dcuFile = Get-ChildItem -Recurse -Filter 'uHidden.dcu' ($dcuDir + '-build') | Select-Object -First 1
+    if ($dcuFile) { Copy-Item $dcuFile.FullName $dcuDir }
+    Remove-Item (Join-Path $dcuDir 'uHidden.pas')
+    Write-Dcu 'P.dpr' @('program P;', '{$APPTYPE CONSOLE}', 'uses', '  uHidden;', 'begin', '  Writeln(THidden.Create.Twice(2));', 'end.')
+    [IO.File]::WriteAllText($dcuCalls, "status`ndefinition {`"symbol`":`"THidden.Twice`"}`n")
+    $dcuPlain = Run-Dcu @()
+    $dcuStyled = Run-Dcu @('--format-dcu', 'ReservedWordCase=upper,IndentStep=4')
+    $dcuBad = Run-Dcu @('--format-dcu', 'IndentStep=wide')
+}
+finally {
+    Remove-Item -Recurse -Force $dcuDir, ($dcuDir + '-build') -ErrorAction SilentlyContinue
+    Remove-Item -Force $dcuCalls -ErrorAction SilentlyContinue
+}
+Check 'format-dcu built' $dcuBuilt @('compile P (Win32): built in')
+Check 'format-dcu off' $dcuPlain @('THidden.Twice (function) declared at uHidden.dcu:', '  function Twice(A: Integer): Integer;') @('--format-dcu', 'FUNCTION')
+Check 'format-dcu on' $dcuStyled @('compiled units (.dcu): their generated source laid out by --format-dcu (IndentStep 4, ReservedWordCase upper)', '  FUNCTION Twice(A: Integer): Integer;')
+Check 'format-dcu bad style' $dcuBad @('--format-dcu: `options.IndentStep` takes a number (not `"wide"`)') @('=== status')
+
 # ---- 3. MCP over stdio, with an edit in between ------------------------------------
 Write-Host '--- MCP over stdio'
 $copy = Join-Path ([IO.Path]::GetTempPath()) ('pastree-mcp-smoke-' + [Guid]::NewGuid().ToString('N'))

@@ -78,6 +78,9 @@ var
   GAlso: TArray<string>;
   GLight: TArray<string>;
   GNoLight: Boolean;
+  // --format-dcu: the style compiled units' generated source is laid out
+  // by ('{}' the default style); '' leaves it as generated.
+  GDcuStyle: string;
   GPolicy: TMcpGroupPolicy;
   GCalls: TArray<TCall>;
   GWs: TMcpWorkspace;
@@ -149,6 +152,15 @@ begin
       GLight := GLight + [Next]
     else if SameText(ParamStr(LIdx), '--no-light') then
       GNoLight := True
+    else if SameText(ParamStr(LIdx), '--format-dcu') then
+    begin
+      // The style may follow: `format`'s option fields as Name=value pairs
+      // (IndentStep=4,ReservedWordCase=upper) or a JSON object.
+      if (LIdx < ParamCount) and not ParamStr(LIdx + 1).StartsWith('--') then
+        GDcuStyle := Next
+      else
+        GDcuStyle := '{}';
+    end
     else if SameText(ParamStr(LIdx), '--studio') then
       GStudio := Next
     else if SameText(ParamStr(LIdx), '--platform') then
@@ -291,6 +303,7 @@ begin
   Result := TMcpWorkspace.Create(LProject, GStudio, GPlatformGiven, GConfig,
     GPolicy, GAlso);
   Result.SetLight(not GNoLight, GLight);
+  SetDcuFormat(Result, GDcuStyle);
   Result.SetLaunch(Format('%s, the project found from the client''s root %s',
     [GetCurrentDir, ADir]));
 end;
@@ -348,6 +361,7 @@ begin
     if GNoProject <> '' then
       GWs.SetNoProject(GNoProject);
     GWs.SetLight(not GNoLight, GLight);
+    SetDcuFormat(GWs, GDcuStyle);
     GWs.SetLaunch(GetCurrentDir + IfThen(not GDiscovered, ', the project given '
       + 'by --project', IfThen(GNoProject <> '', ', no project found from it',
       ', the project found from it')));

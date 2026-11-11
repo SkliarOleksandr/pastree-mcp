@@ -60,6 +60,11 @@ function CallTool(AWs: TMcpWorkspace; const AName: string; AArgs: TJSONObject;
 // the CLI's way.
 function CallToolNow(AWs: TMcpWorkspace; const AName: string;
   AArgs: TJSONObject; out AIsError: Boolean): string;
+// --format-dcu: the generated source of a compiled unit laid out by a style
+// (a JSON object of TPasFormatOptions fields; '' leaves it as generated) -
+// in every analysis of AWs, and in the text a tool reads of a .dcu. Before
+// the load: a model built keeps its text's positions. Raises on a bad style.
+procedure SetDcuFormat(AWs: TMcpWorkspace; const AJson: string);
 
 implementation
 
@@ -516,9 +521,19 @@ begin
     Result := AName;
 end;
 
+var
+  // --format-dcu's filter (SetDcuFormat), nil when off - the one every
+  // analysis' generated .dcu text goes through.
+  GDcuFilter: TPasTextFilter;
+
 function ReadLines(const APath: string): TArray<string>;
 begin
   try
+    // A compiled unit: the text its analysis ran on, generated and passed
+    // through the same filter, so a line number from it reads the line meant.
+    if TPasSourceManager.IsDcuPath(APath) then
+      Exit(TPasSourceManager.LoadFileTolerant(APath, GDcuFilter).Split(
+        [#13#10, #10]));
     Result := TFile.ReadAllLines(APath);   // BOM-aware
   except
     Result := nil;
@@ -20494,7 +20509,7 @@ end;
 // `format`'s `options`: TPasFormatOptions.Default with the fields the object
 // names - by field name, case aside. ANote: the ones that differ from the
 // default, for the answer's header.
-function FormatOptionsOf(AArgs: TJSONObject; out ANote: string):
+function FormatOptionsFrom(AJson: TJSONValue; out ANote: string):
   TPasFormatOptions;
 var
   LCtx: TRttiContext;
@@ -20508,9 +20523,7 @@ begin
   Result := TPasFormatOptions.Default;
   LDefault := Result;
   ANote := '';
-  if AArgs = nil then
-    Exit;
-  LJson := AArgs.GetValue('options');
+  LJson := AJson;
   if (LJson = nil) or (LJson is TJSONNull) then
     Exit;
   LOwned := nil;
@@ -20560,6 +20573,77 @@ begin
   finally
     LOwned.Free;
   end;
+end;
+
+// `format`'s `options` argument.
+function FormatOptionsOf(AArgs: TJSONObject; out ANote: string):
+  TPasFormatOptions;
+begin
+  if AArgs = nil then
+    Result := FormatOptionsFrom(nil, ANote)
+  else
+    Result := FormatOptionsFrom(AArgs.GetValue('options'), ANote);
+end;
+
+// The filter a compiled unit's generated text goes through: PasFormatText
+// in the style given. The style is the closure's own copy, never written
+// after - the filter runs on the analysis' worker threads.
+function DcuStyleFilter(const AStyle: TPasFormatOptions): TPasTextFilter;
+begin
+  Result :=
+    function(const APath, AText: string): string
+    begin
+      Result := PasFormatText(AText, APath, AStyle);
+    end;
+end;
+
+procedure SetDcuFormat(AWs: TMcpWorkspace; const AJson: string);
+var
+  LJson: TJSONValue;
+  LStyle: TPasFormatOptions;
+  LNote: string;
+begin
+  if AJson = '' then
+  begin
+    AWs.SetDcuFilter(nil, '');
+    GDcuFilter := nil;
+    Exit;
+  end;
+  // Name=value pairs - a command line keeps no quotes a JSON object could
+  // rely on (Windows' quoting of an argument is the caller's) - or JSON.
+  if AJson.TrimLeft.StartsWith('{') then
+    LJson := TJSONObject.ParseJSONValue(AJson)
+  else
+  begin
+    LJson := TJSONObject.Create;
+    for var LPair in AJson.Split([',', ';'], TStringSplitOptions.ExcludeEmpty)
+      do
+      if Pos('=', LPair) > 1 then
+        TJSONObject(LJson).AddPair(Trim(Copy(LPair, 1, Pos('=', LPair) - 1)),
+          Trim(Copy(LPair, Pos('=', LPair) + 1, MaxInt)))
+      else
+      begin
+        FreeAndNil(LJson);
+        Break;
+      end;
+  end;
+  try
+    if not (LJson is TJSONObject) then
+      raise Exception.CreateFmt('--format-dcu takes style fields as '
+        + 'Name=value pairs (IndentStep=4,ReservedWordCase=upper), not %s - '
+        + 'the fields: %s', [AJson, FormatOptionList]);
+    try
+      LStyle := FormatOptionsFrom(LJson, LNote);
+    except
+      on E: EToolError do
+        raise Exception.Create('--format-dcu: ' + E.Message);
+    end;
+  finally
+    LJson.Free;
+  end;
+  GDcuFilter := DcuStyleFilter(LStyle);
+  AWs.SetDcuFilter(GDcuFilter, IfThen(LNote <> '', LNote, 'the default '
+    + 'style'));
 end;
 
 // The lines of a file as an editor numbers them: the empty one after a final
