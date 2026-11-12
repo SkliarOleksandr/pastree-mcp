@@ -4596,11 +4596,57 @@ end;
 // The exact text of one declaration - or, for a name whose candidates are
 // the overloads of one routine, of each of them: an agent refused there read
 // the file instead (field report FR.3), as `definition` lists them all.
+// `file` + `lines` and nothing naming a declaration: those lines of the file,
+// numbered, and the routine the first of them is in. It is what the grep
+// hook offers for a `sed -n a,bp`, and it was read as "the unit" and refused
+// - every time, and the agent went back to sed (the usage audit of
+// 2026-11-12): a unit's header, its `uses`, a `type` section or a program's
+// main block are no one declaration, and a form file or a text file none at
+// all.
+function FileLinesOf(AWs: TMcpWorkspace; const AFile: string;
+  const ARange: TLineRange; ALimit: Integer): string;
+var
+  LLines: TArray<string>;
+  LFrom, LTo, LLast, LWidth, LHeadLine, LHeadCol: Integer;
+  LName: string;
+  LSb: TStringBuilder;
+begin
+  if not TFile.Exists(AFile) then
+    raise EToolError.Create('no such file: ' + AFile);
+  LLines := ReadLines(AFile);
+  LFrom := Max(ARange.First, 1);
+  LTo := ARange.Last;
+  if (LTo = 0) or (LTo > Length(LLines)) then
+    LTo := Length(LLines);
+  if LFrom > LTo then
+    raise EToolError.CreateFmt('`lines` %s: %s has %d lines', [ARange.Text,
+      AWs.RelPath(AFile), Length(LLines)]);
+  LSb := TStringBuilder.Create;
+  try
+    LSb.Append(Format('%s lines %d-%d', [AWs.RelPath(AFile), LFrom, LTo]));
+    if RoutineHeaderAt(AWs, AFile, LFrom, LName, LHeadLine, LHeadCol) then
+      LSb.Append(Format(' - from inside %s (header at line %d; `file` + '
+        + '`line` alone gives the whole routine)', [LName, LHeadLine]));
+    LSb.AppendLine;
+    LLast := Min(LTo, LFrom + ALimit - 1);
+    LWidth := Length(IntToStr(LLast));
+    // A tab after the number, as AppendPart.
+    for var LLine := LFrom to LLast do
+      LSb.AppendLine(Format('%*d'#9'%s', [LWidth, LLine, LLines[LLine - 1]]));
+    if LTo > LLast then
+      LSb.AppendLine(Format('... %d more lines, to line %d (raise `limit`)',
+        [LTo - LLast, LTo]));
+    Result := LSb.ToString.TrimRight;
+  finally
+    LSb.Free;
+  end;
+end;
+
 function ToolSource(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
 var
   LCands: TArray<TTarget>;
-  LPart: string;
-  LLimit, LLeft, LNext: Integer;
+  LPart, LName: string;
+  LLimit, LLeft, LNext, LHeadLine, LHeadCol: Integer;
   LRange: TLineRange;
   LSb: TStringBuilder;
 begin
@@ -4610,6 +4656,13 @@ begin
     raise EToolError.Create('`part` is impl, decl or both');
   LLimit := EnsureRange(ArgInt(AArgs, 'limit', 300), 1, 5000);
   LRange := ParseLineRange(ArgStr(AArgs, 'lines'));
+  // `file` + `lines` (a `line` in no routine beside them too): the lines.
+  if (LRange.Text <> '') and (ArgStr(AArgs, 'file') <> '') and
+     (ArgStr(AArgs, 'symbol') = '') and (ArgStr(AArgs, 'name') = '') and
+     (ArgInt(AArgs, 'column', 0) <= 0) and ((ArgInt(AArgs, 'line', 0) <= 0) or
+     not RoutineHeaderAt(AWs, ArgFile(AWs, AArgs), ArgInt(AArgs, 'line', 0),
+     LName, LHeadLine, LHeadCol)) then
+    Exit(FileLinesOf(AWs, ArgFile(AWs, AArgs), LRange, LLimit));
   LCands := ResolveOneOrOverloads(AWs, AArgs);
   // A routine of a library unit read interface-only: its body is read once
   // the unit is analyzed in full.
@@ -19783,7 +19836,8 @@ const
     + '"lines":{"type":"string","description":"Only these lines of it, '
     + 'by FILE line number: 40-80, 40- (to its end), -80 (from its start to '
     + 'line 80 of the file) or 40. A range wholly above it counts from its '
-    + 'first line instead (-40: its first 40 lines), and says so"}}}},' +
+    + 'first line instead (-40: its first 40 lines), and says so. With '
+    + '`file` and no name: those lines of the file, whatever they hold"}}}},' +
 
     '{"name":"members","description":"What can be used on a class, record '
     + 'or interface, inherited members included - instead of an outline per '

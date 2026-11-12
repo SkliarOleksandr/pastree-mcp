@@ -57,6 +57,7 @@ uses
   System.DateUtils,
   System.Character,
   System.RegularExpressions,
+  System.Generics.Collections,
   Winapi.Windows;
 
 const
@@ -418,42 +419,125 @@ begin
     'dir', 'ls', 'Get-Item', 'gi']);
 end;
 
+// A Git Bash path, `/c/Repos/x`, as Windows writes it: `C:/Repos/x`.
+function WindowsPath(const APath: string): string;
+begin
+  Result := APath;
+  if (Length(Result) >= 3) and (Result[1] = '/') and
+     CharInSet(Result[2], ['a'..'z', 'A'..'Z']) and (Result[3] = '/') then
+    Result := UpperCase(Result[2]) + ':' + Copy(Result, 3, MaxInt)
+  else if (Length(Result) = 2) and (Result[1] = '/') and
+     CharInSet(Result[2], ['a'..'z', 'A'..'Z']) then
+    Result := UpperCase(Result[2]) + ':/';
+end;
+
+// APath seen from ADir (a `cd` before it in the command; '' for none).
+function PathFrom(const ADir, APath: string): string;
+begin
+  Result := WindowsPath(APath);
+  if (ADir <> '') and not TPath.IsPathRooted(Result) then
+    Result := IncludeTrailingPathDelimiter(ADir.Replace('/', '\')) + Result;
+end;
+
+// `$R`, `${R}`, `$env:R` in APath from the assignments made before it in the
+// command; False when one is not known - the note would name a file no one
+// can open.
+function ExpandVars(var APath: string; AVars: TDictionary<string, string>):
+  Boolean;
+var
+  LM: TMatch;
+  LValue: string;
+begin
+  repeat
+    LM := TRegEx.Match(APath, '\$(?:env:)?\{?([A-Za-z_]\w*)\}?');
+    if not LM.Success then
+      Exit(True);
+    if not AVars.TryGetValue(LM.Groups[1].Value, LValue) then
+      Exit(False);
+    APath := Copy(APath, 1, LM.Index - 1) + LValue +
+      Copy(APath, LM.Index + LM.Length, MaxInt);
+  until False;
+end;
+
+// The segments one by one. A `cd` (`pushd`, `Set-Location`) and a variable
+// set (`R="C:/..."`, `$R = "..."`) are kept for the segments after them: the
+// note names the file a `sed -n` reads, and in the usage audit of 2026-11-12
+// 53 of 91 notes named one that is not where the server looks - `cd source;
+// sed -n 10,20p X.pas`, `sed -n ... "$R/rtl/X.pas"`, `/c/Repos/...`.
 function CommandFinding(const ACommand: string; out AFinding: TFinding): Boolean;
 var
   LWords, LSeg: TArray<string>;
   LPipeIn: Boolean;
+  LDir, LPath: string;
+  LVars: TDictionary<string, string>;
+  LAssign: TMatch;
 begin
   LWords := ShellWords(ACommand) + [';'];
   LSeg := nil;
   LPipeIn := False;
-  for var LW in LWords do
-    if (LW = '|') or (LW = ';') then
-    begin
-      if SegmentFinding(LSeg, ACommand, LPipeIn, AFinding) then
-        Exit(True);
-      LPipeIn := (LW = '|') and not ListsFiles(LSeg);
-      LSeg := nil;
-    end
-    else
-      LSeg := LSeg + [LW];
+  LDir := '';
+  LVars := TDictionary<string, string>.Create;
+  try
+    for var LW in LWords do
+      if (LW = '|') or (LW = ';') then
+      begin
+        if (Length(LSeg) = 2) and MatchText(LSeg[0], ['cd', 'pushd',
+          'Set-Location', 'sl', 'chdir']) then
+        begin
+          LPath := LSeg[1];
+          if ExpandVars(LPath, LVars) then
+            LDir := PathFrom(LDir, LPath)
+          else
+            LDir := '?';
+        end
+        else if (Length(LSeg) = 3) and LSeg[0].StartsWith('$') and
+          (LSeg[1] = '=') then
+          LVars.AddOrSetValue(LSeg[0].Substring(1).Replace('env:', ''), LSeg[2])
+        else if Length(LSeg) >= 1 then
+        begin
+          LAssign := TRegEx.Match(LSeg[0], '^([A-Za-z_]\w*)=(.*)$');
+          if LAssign.Success then
+            LVars.AddOrSetValue(LAssign.Groups[1].Value, LAssign.Groups[2].Value);
+        end;
+        if SegmentFinding(LSeg, ACommand, LPipeIn, AFinding) then
+        begin
+          if AFinding.FileName = '' then
+            Exit(True);
+          // A line read: the file as the server will look for it.
+          LPath := AFinding.FileName;
+          if (LDir <> '?') and ExpandVars(LPath, LVars) then
+          begin
+            AFinding.FileName := PathFrom(LDir, LPath);
+            Exit(True);
+          end;
+        end;
+        LPipeIn := (LW = '|') and not ListsFiles(LSeg);
+        LSeg := nil;
+      end
+      else
+        LSeg := LSeg + [LW];
+  finally
+    LVars.Free;
+  end;
   Result := False;
 end;
 
-// A Delphi project in ADir or a directory above it, up to the repository
-// root - the walk the server's own project discovery makes. So a hook
-// installed once for every repository says nothing in the others.
-function InDelphiProject(const ADir: string): Boolean;
+// The directory of a Delphi project in ADir or a directory above it, up to
+// the repository root - the walk the server's own project discovery makes;
+// '' for none. So a hook installed once for every repository says nothing in
+// the others.
+function ProjectDirOf(const ADir: string): string;
 var
   LDir, LUp: string;
 begin
-  Result := False;
+  Result := '';
   if (ADir = '') or not TDirectory.Exists(ADir) then
     Exit;
   LDir := IncludeTrailingPathDelimiter(ADir);
   repeat
     if (Length(TDirectory.GetFiles(LDir, '*.groupproj')) > 0) or
        (Length(TDirectory.GetFiles(LDir, '*.dproj')) > 0) then
-      Exit(True);
+      Exit(LDir);
     if TDirectory.Exists(LDir + '.git') or TFile.Exists(LDir + '.git') then
       Exit;
     LUp := IncludeTrailingPathDelimiter(
@@ -593,8 +677,22 @@ begin
         LFound := False;
       if not LFound or (LNow - LNoted < cNoteEverySeconds) or
          (LNow - LUsed < cKnowsToolsSeconds) or
-         not InDelphiProject(Str(LObj, 'cwd')) then
+         (ProjectDirOf(Str(LObj, 'cwd')) = '') then
         ExitProcess(0);
+      // A line read in a directory below the project's (the shell keeps a
+      // `cd source` from a call before): the file as the server, which
+      // resolves against the project's directory, finds it.
+      if (LFinding.FileName <> '') and
+         not TPath.IsPathRooted(LFinding.FileName) then
+      begin
+        var LProjDir := ProjectDirOf(Str(LObj, 'cwd'));
+        var LFull := TPath.GetFullPath(TPath.Combine(Str(LObj, 'cwd'),
+          LFinding.FileName));
+        if LFull.StartsWith(LProjDir, True) then
+          LFinding.FileName := Copy(LFull, Length(LProjDir) + 1, MaxInt)
+        else
+          LFinding.FileName := LFull;
+      end;
       WriteState(LState, LNow, LUsed);
       Deny(NoteFor(LFinding));
     finally

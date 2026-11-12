@@ -16,7 +16,7 @@ unit PasMcp.Version;
 interface
 
 const
-  PasTreeMcpVersion = '0.50.0';
+  PasTreeMcpVersion = '0.50.2';
   // 0.179.2: TPasSemaProject.DcuTextFilter, which --format-dcu sets on every
   // analysis (a compile error without it), and F5's wrapping and alignment
   // fields of TPasFormatOptions, which `format`'s `options` take.

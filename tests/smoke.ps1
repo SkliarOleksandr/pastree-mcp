@@ -264,6 +264,13 @@ Check 'source lines relative range' (Block $b 'source {"symbol":"RunB", "lines":
 Check 'source lines outside' (Block $b 'source {"symbol":"RunB", "lines":"100-120"}') @('RunB (procedure) implemented at AppB\uAppB.pas:26-32', '(`lines` 100-120 is outside it: give file line numbers, 26-32)') @('26  procedure')
 Check 'source lines bad' (Block $b 'source {"symbol":"RunB", "lines":"31-29"}') @('`lines` 31-29: give file line numbers as the answers number them')
 Check 'source lines overloads' (Block $b 'source {"symbol":"TBase.Add", "lines"') @('TBase.Add - 2 overloads:', '(line 77 of it', '77    Inc(FCount, AValue);', '(`lines` 77 is outside it: give file line numbers, 80-83)') @('76  ', '82  ')
+# `file` + `lines` and no name: the file's lines, what the grep hook offers
+# for a `sed -n` - a `uses` clause, a form file, a routine's piece (named).
+Check 'source file lines' (Block $b 'source {"file":"AppB/uAppB.pas", "lines":"5-8"}') @('AppB\uAppB.pas lines 5-8', "5  interface", "7  uses`n8    uShapes;") @('is a unit', 'from inside', '9  ')
+Check 'source file lines in routine' (Block $b 'source {"file":"AppB/uAppB.pas", "lines":"29-31"}') @('AppB\uAppB.pas lines 29-31 - from inside RunB (header at line 26', "29  begin`n30    LSquare := TSquare.Create(4);") @('28  ', '32  ')
+Check 'source file line in no routine' (Block $b 'source {"file":"AppB/uAppB.pas", "line":7') @('AppB\uAppB.pas lines 7-8', '8    uShapes;') @('in no routine')
+Check 'source file lines form' (Block $b 'source {"file":"AppF/uChildForm.dfm"') @('AppF\uChildForm.dfm lines 1-2', '1  inherited frmChild: TfrmChild', "2    Caption = 'Child'") @('3  ')
+Check 'source file lines past end' (Block $b 'source {"file":"AppB/uAppB.pas", "lines":"90-"}') @('`lines` 90-: AppB\uAppB.pas has 34 lines')
 Check 'source external overloads' (Block $b 'source {"symbol":"Winapi.Windows.SendMessage"}') @('SendMessage - 2 overloads:', "external minuser name 'SendMessageW';", 'function SendMessage(hWnd: HWND; Msg: UINT; wParam: WPARAM; lParam: LPARAM): LRESULT; external', 'function SendMessage(hWnd: HWND; Msg: UINT; wParam: INT_PTR; lParam: LPARAM): LRESULT; external')
 # members: by the type declaring each, under its visibility section. Seen from
 # TDerived's own methods: its ancestor's private field (same unit) but not the
@@ -1664,6 +1671,13 @@ Check 'hook powershell' (Hook 'e' 'PowerShell' '{"command":"Get-ChildItem -Recur
 # one mangled `lines` (0.46.1); a sed script doing more is not a line read.
 Check 'hook sed ranges' (Hook 'j' 'Bash' '{"command":"sed -n ''1695,1700p;1762,1766p'' source/PasMcp.Build.pas"}') @($deny, '`source` {"targets":[{"file":"source/PasMcp.Build.pas","lines":"1695-1700"},{"file":"source/PasMcp.Build.pas","lines":"1762-1766"}]}')
 Check 'hook sed ranges -e' (Hook 'k' 'Bash' '{"command":"sed -n -e 10,20p -e 40,50p source/uShapes.pas"}') @($deny, '{"file":"source/uShapes.pas","lines":"40-50"}')
+# The file as the server looks for it: after a `cd`, with a variable the
+# command set, a Git Bash path; a variable it did not set names no file.
+Check 'hook sed after cd' (Hook 'o' 'Bash' '{"command":"cd source && sed -n 10,20p uShapes.pas"}') @($deny, '`source` {"file":"source/uShapes.pas","lines":"10-20"}')
+Check 'hook sed variable' (Hook 'p' 'Bash' '{"command":"R=\"C:/lib/rtl\"; sed -n 10,20p \"$R/System.Classes.pas\""}') @($deny, '`source` {"file":"C:/lib/rtl/System.Classes.pas","lines":"10-20"}')
+Check 'hook sed git bash path' (Hook 'q' 'Bash' '{"command":"cd /c/Repos/x; sed -n 10,20p src/uA.pas"}') @($deny, '`source` {"file":"C:/Repos/x/src/uA.pas","lines":"10-20"}')
+Check 'hook sed below the project' (Hook 's' 'Bash' '{"command":"sed -n 10,20p uShapes.pas"}' (Join-Path $fixture 'Shared')) @($deny, '`source` {"file":"Shared/uShapes.pas","lines":"10-20"}')
+Check 'hook sed unknown variable' (Hook 'r' 'Bash' '{"command":"sed -n 10,20p \"$S/System.pas\""}') @() @($deny)
 Check 'hook sed script' (Hook 'l' 'Bash' '{"command":"sed -n ''10,20p;/TCircle/p'' source/uShapes.pas"}') @() @($deny)
 # A search with no file reads the pipe - a build's output, not Pascal
 # sources, though the command names a .dpr (0.46.1).

@@ -64,6 +64,11 @@ source {"symbol":"RunB", "lines":"31-29"}
 source {"symbol":"TBase.Add", "lines":"77"}
 source {"symbol":"RunB", "lines":"-3"}
 source {"symbol":"RunB", "lines":"2-3"}
+source {"file":"AppB/uAppB.pas", "lines":"5-8"}
+source {"file":"AppB/uAppB.pas", "lines":"29-31"}
+source {"file":"AppB/uAppB.pas", "line":7, "lines":"7-8"}
+source {"file":"AppF/uChildForm.dfm", "lines":"-2"}
+source {"file":"AppB/uAppB.pas", "lines":"90-"}
 members {"symbol":"TDerived"}
 members {"symbol":"TDerived", "visibility":"public"}
 members {"symbol":"TDerived", "visibility":"all", "member_kind":"fields"}
