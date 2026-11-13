@@ -326,13 +326,13 @@ Check 'members match alternatives' (Block $b 'members {"symbol":"TDerived", "mat
 # "AppA\tuAppA.pas" in JSON is a tab, not a backslash: say so, not "invalid characters in path".
 Check 'control character' (Block $b 'outline {"file":"AppA') @('`file` holds a control character (#9)')
 Check 'references' (Block $b 'references {"symbol":"TShape.Area"}') @('1 references in 1 files', "  RunA`n    22  Writeln(LShape.Describe")
-Check 'references by position' (Block $b 'references {"file":"AppA\\uAppA.pas"') @('TCircle.Radius (property)', '21  TCircle(LShape).Radius := 3;')
+Check 'references by position' (Block $b 'references {"file":"AppA\\uAppA.pas"') @('TCircle.Radius (property)', '21  [write]  TCircle(LShape).Radius := 3;')
 # A row in no routine or type (a uses clause) stays at the file level.
 Check 'references unit' (Block $b 'references {"symbol":"uShapes"}') @('3 references in 3 files', 'AppB\AppB.dpr', "AppA\uAppA.pas`n  13  uShapes;")
 # Rows under what they sit in: a member declaration under its class, a
 # statement under its routine, two uses on one line under one heading.
 # A line naming it twice is one row; the header counts occurrences.
-Check 'references grouped' (Block $b 'references {"symbol":"TCircle.FRadius"}') @('5 references in 1 files', "  TCircle`n    27  property Radius: Double read FRadius write FRadius;`n  TCircle.Create", "  TCircle.Create`n    50  FRadius := ARadius;", "  TCircle.Area`n    55  Result := Pi * FRadius * FRadius;") @("FRadius;`n    55  ", "FRadius;`n    27  ")
+Check 'references grouped' (Block $b 'references {"symbol":"TCircle.FRadius"}') @('5 references in 1 files', "  TCircle`n    27  property Radius: Double read FRadius write FRadius;`n    27  [write]`n  TCircle.Create", "  TCircle.Create`n    50  [write]  FRadius := ARadius;", "  TCircle.Area`n    55  Result := Pi * FRadius * FRadius;") @("FRadius;`n    55  ", "FRadius;`n    27  property")
 # A class's own implementation headers are not uses, but a rename changes
 # them: counted and pointed at, not listed.
 Check 'references class headers' (Block $b 'references {"symbol":"TCircle"}') @('3 references in 2 files', '(+2 implementation headers of its own methods name it, not listed: Shared\uShapes.pas:47, Shared\uShapes.pas:53 - a rename changes them too)') @('47  constructor TCircle.Create')
@@ -370,7 +370,7 @@ Check 'references form sub-property' (Block $b 'references {"symbol":"TNameStyle
 # Cut by the limit, the code rows come first and the form lines left out are
 # counted: form lines filling the rows by file name hid the code a rename
 # changes.
-Check 'references form cut' (Block $b 'references {"symbol":"TNameStyle.Accent","limit":1}') @("AppF\uFrame.pas`n  TfraName.btnClearClick`n    70  FStyle.Accent := 0;`n... 2 more (raise ``limit``)", '(cut: code rows come first - 2 of the rows left out are form lines)') @('uChildForm.dfm')
+Check 'references form cut' (Block $b 'references {"symbol":"TNameStyle.Accent","limit":1}') @("AppF\uFrame.pas`n  TfraName.btnClearClick`n    70  [write]  FStyle.Accent := 0;`n... 2 more (raise ``limit``)", '(cut: code rows come first - 2 of the rows left out are form lines)') @('uChildForm.dfm')
 # Several targets in one call: each block is the answer the target gets alone
 # - header, rows, notes (the files outside the index too, listed once for the
 # call since 0.51.2) - and a target with none, or no such name, answers in
@@ -591,7 +591,7 @@ Check 'find wildcard qualifier none' (Block $b 'find {"query":"*.NoSuchMember"}'
 Check 'find inherited member' (Block $b 'find {"query":"TDerived.GetCount"}') @('AppA\uMembers.pas:23  TBase.GetCount (function)  function GetCount: Integer;  [inherited by TDerived]')
 Check 'find inherited none' (Block $b 'find {"query":"TDerived.NoSuchMember"}') @('no declaration matches `TDerived.NoSuchMember`') @('inherited by')
 Check 'source inherited member' (Block $b 'source {"symbol":"TDerived.GetCount"}') @('TBase.GetCount (function) implemented at AppA\uMembers.pas:70-73', '72    Result := FCount + FSecret;')
-Check 'references inherited field' (Block $b 'references {"symbol":"TDerived.FCount"}') @('TBase.FCount (field) declared at AppA\uMembers.pas:19 - 3 references in 1 files', '87  FCount := 0;')
+Check 'references inherited field' (Block $b 'references {"symbol":"TDerived.FCount"}') @('TBase.FCount (field) declared at AppA\uMembers.pas:19 - 3 references in 1 files', '87  [write]  FCount := 0;')
 # The overloads of one routine are answered together, each row with the one
 # it binds to, and each one's count: it was a refusal as ambiguous. Namesakes
 # are refused still (`Area` above); a tool taking one routine refuses an
@@ -689,6 +689,15 @@ Check 'references files cut' (Block $b 'references {"symbol":"TfrmMain.btnSave",
 Check 'references count' (Block $b 'references {"symbol":"TShape.Area","mode":"count"}') @('1 references in 1 files', '(limit 0: 1 not listed)') @('RunA')
 Check 'references bad mode' (Block $b 'references {"symbol":"TShape.Area","mode":"bogus"}') @("``mode`` of ``references`` is lines, files or count (not ``bogus``)")
 Check 'references files none' (Block $b 'references {"symbol":"NeverCalled","mode":"files"}') @('0 references in 0 files')
+# What each use of a field does (access): assigned, Inc, var and out
+# arguments, @, read; a record's field changed through it; FreeAndNil.
+Check 'references access' (Block $b 'references {"symbol":"TCounter.FCount"}') @('(access: 2 read, 2 write, 1 var, 1 out, 1 addr', "  TCounter.Run`n    208  [write]  FCount := 1;`n    209  [write]  Inc(FCount);`n    210  [var]  Bump(FCount);`n    211  [out]  Take(FCount);`n    212  [addr]  P := @FCount;`n    213  if FCount > P^ then`n    214  FRec.Count := FCount;")
+Check 'references access changes' (Block $b 'references {"symbol":"TCounter.FCount","access":"changes"}') @('7 references in 1 files', '(access write, var, out: 4 references in 1 file listed', '211  [out]  Take(FCount);') @('212  ', '213  ')
+Check 'references access record' (Block $b 'references {"symbol":"TCounter.FRec"}') @('214  [write]  FRec.Count := FCount;', '215  [var]  Bump(FRec.Count);')
+Check 'references access FreeAndNil' (Block $b 'references {"symbol":"TCounter.FList","access":"write"}') @('(access: 1 read, 1 write', '216  [write]  FreeAndNil(FList);') @('217  ')
+Check 'references access none' (Block $b 'references {"symbol":"TCounter.FRec","access":"addr"}') @('(access addr: none of them)') @('214  ')
+Check 'references access routine' (Block $b 'references {"symbol":"TCounter.Run","access":"write"}') @('`access` is for a variable, field, parameter or property - TCounter.Run is a procedure')
+Check 'references access bad' (Block $b 'references {"symbol":"TCounter.FCount","access":"bogus"}') @('`access` takes read, write, var, out, addr or changes')
 
 # defines: Shared\uFlags.pas, lines pinned. AppB shares AppA's analysis and
 # not its FIXTURE_A: said where it decides a branch.
@@ -777,7 +786,7 @@ Check 'metrics cycles count only' (Block $b 'metrics {"metric":"cycles","limit":
 # refused by name and by value.
 Check 'format none' (Block $b 'format {"file":"Shared/uShapes.pas"}') @('Shared\uShapes.pas: already formatted - no edits') @(' -> ')
 Check 'format range options' (Block $b 'format {"unit":"uShapes","lines":"42-49"') @('Shared\uShapes.pas: 9 edits on 7 lines of 78 - 2 indentation and line breaks, 7 case (lines 42-49)', 'options: IndentStep 4, ReservedWordCase upper', '  42:27-42:33 -> "STRING"  |FUNCTION TShape.Describe: STRING;', '  48:6-49:3 -> "\r\n    "  |    INHERITED Create;') @('49:20-50:3', 'TCircle.Area')
-Check 'format count only' (Block $b 'format {"file":"AppB/uBoxes.pas","limit":0}') @('AppB\uBoxes.pas: 3 edits on 1 line of 170 - 3 indentation and line breaks', '(limit 0: 3 not listed)') @(' -> ')
+Check 'format count only' (Block $b 'format {"file":"AppB/uBoxes.pas","limit":0}') @('AppB\uBoxes.pas: 3 edits on 1 line of 221 - 3 indentation and line breaks', '(limit 0: 3 not listed)') @(' -> ')
 Check 'format include' (Block $b 'format {"file":"Shared/Flags.inc"') @('Shared\Flags.inc: 6 edits on 6 lines of 9 - 6 case', '(an include file: laid out as Shared\uFlags.pas reads it)', '  7:1-7:9 -> "{$endif}"  |{$endif}')
 Check 'format unknown option' (Block $b 'format {"file":"Shared/uShapes.pas","options":{"IndentSize"') @('`options` has no field `IndentSize` (did you mean `IndentStep`?) - the fields, with their defaults: IndentStep 2, ', 'ReservedWordCase lower (lower / upper / keep)')
 Check 'format bad value' (Block $b 'format {"file":"Shared/uShapes.pas","options":{"ReservedWordCase":"mixed"') @('`options.ReservedWordCase` is lower / upper / keep (not `mixed`)')

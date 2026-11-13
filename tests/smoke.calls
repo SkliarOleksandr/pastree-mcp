@@ -315,6 +315,13 @@ references {"symbol":"TfrmMain.btnSave","mode":"files","limit":1}
 references {"symbol":"TShape.Area","mode":"count"}
 references {"symbol":"TShape.Area","mode":"bogus"}
 references {"symbol":"NeverCalled","mode":"files"}
+references {"symbol":"TCounter.FCount"}
+references {"symbol":"TCounter.FCount","access":"changes"}
+references {"symbol":"TCounter.FRec"}
+references {"symbol":"TCounter.FList","access":"write"}
+references {"symbol":"TCounter.FRec","access":"addr"}
+references {"symbol":"TCounter.Run","access":"write"}
+references {"symbol":"TCounter.FCount","access":"bogus"}
 references {"symbol":"TfrmMain.btnSave","in":".pas"}
 defines {"file":"Shared/uFlags.pas","line":21}
 defines {"file":"Shared/uFlags.pas","line":25,"name":"FIXTURE_OFF"}

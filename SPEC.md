@@ -457,8 +457,15 @@ and to `<project>-pastree-mcp.log` beside the project.
    `agent_id` its own, 0.51.3) and not within 5 of a
    pastree call. Denied rather than added beside the result
    (`additionalContext`): an agent holding the grep's answer has no reason
-   to ask again. Whether it brings the tools arm up to the hint arm is the
-   next run of 10.4's tasks.
+   to ask again. Measured on 10.4's tasks again (2026-11-13, 0.51.1, each
+   task its own `claude -p` session): the agent with the tools and no word
+   of them called pastree in 12 of 12 runs without the hook, and every
+   answer of both arms was right; the hook noted 2 greps in 12 runs, both
+   followed by a pastree call. The 5-in-12 did not come back - with a newer
+   model, a main session instead of a workflow's subagent, and the server's
+   instructions rewritten since, not told apart by that run (10.4). The
+   hook stays for the agents that still start with grep: subagents, other
+   models.
 3. **Tool descriptions.** They are what the model decides by; wording them is
    empirical. Adjust after watching real sessions.
 4. **Re-demotion.** Library units hydrated by queries stay hydrated until the
@@ -686,6 +693,25 @@ are here so a new tool is not the one that breaks them.
    (passed to a `var`/`out` parameter), `addr` (`@X`) or `call`; `access`
    filters. "Who changes `FState`" is then one call; `related assignments`
    covers direct writes only, not `var` passing.
+
+   Done in 0.52.0 for a variable, field, parameter or property (a routine's
+   calls are `callers`' rows, `[not a call]` included). A row is tagged
+   `[write]` - the target of `:=`, a for counter, `write FX` in a property
+   declaration, a builtin that changes its argument (Inc, Dec, Include,
+   SetLength, Str, Val, FillChar, New...) and FreeAndNil, whose `const
+   [ref]` writes nil - `[var]` or `[out]` by the parameter the argument
+   binds to (the overload PasTree chose), `[addr]` for `@X` and Addr; a read
+   is untagged, so an answer costs a header line more and a tag per change.
+   A change of a record's field, an array's element, a string's char is a
+   change of the variable holding it; of an object's field, not - `Obj.F :=
+   1` reads Obj, and `VariableList.Sorted := True` reads VariableList. A form
+   line setting a property counts as a write. The header counts each kind;
+   `access` (read, write, var, out, addr, `changes` for the three that
+   change it) lists those rows, the header still counting all. Measured on
+   the client group: TStrings.Strings, 2,566 uses - 260 writes, all through
+   `L[I] :=` - in the same 0.31-0.34 s as before; the answer 31 tokens
+   more. The field of phase 6's T10 answers "2 write: SetImported,
+   LoadFromStream" where the task's agents read every row.
 3. **`impact`** - given symbols, or a unified diff (the agent passes
    `git diff` output; the server does not run git): the routines the diff
    touches, their callers to `depth`, the overrides and interface
@@ -1237,7 +1263,9 @@ gap between the answers and the truth.
    the hook gets the 5-in-12 of 10.4. Open: where the plugin takes the exe
    from - a plugin is the files of a git repository, the exe is built
    locally (a release binary in the plugin, or the exe on `PATH`).
-   After the hook is measured on our own repositories.
+   The hook is measured (8.2, 2026-11-13): a main session on today's model
+   calls the index without it, so the plugin's case is the one-step setup,
+   not the hook - and a subagent, which the run did not measure.
 
 `type_of`, `overview`, `implement_plan`, `scope_at` and `uses_for` go in
 when a measured session asks for them - the October audit (9.2.6) did not.
@@ -1542,7 +1570,7 @@ builds.
 | C6 size p95 | < 5k tokens | every tool but `outline` (up to 141k in one answer) | `outline` and `form` bounded, 300 rows |
 | C7 notes | every gap said | every cut said; not said: uses in branches not compiled, implementation headers left out, whose property a redeclaration answers for, what a cut left out | said |
 | C8 freshness | identical | 266 of 290 pairs | 290 of 290 |
-| C9 sufficiency | >= 80% of tasks, fewer tokens | - | pilot on 0.16.8 (10.4): 4 of 4 correct with the tools and 4 of 4 without; tokens with/without 1.04, time 0.71 - the tasks do not discriminate. Scaled up on 0.23.2 (10.4), 12 tasks x 3 arms, 1 run each: correct bare 9, tools 11, hint 10 of 12 (hint 2 partial); tokens tools/bare 0.97, hint/bare 0.87 |
+| C9 sufficiency | >= 80% of tasks, fewer tokens | - | pilot on 0.16.8 (10.4): 4 of 4 correct with the tools and 4 of 4 without; tokens with/without 1.04, time 0.71 - the tasks do not discriminate. Scaled up on 0.23.2 (10.4), 12 tasks x 3 arms, 1 run each: correct bare 9, tools 11, hint 10 of 12 (hint 2 partial); tokens tools/bare 0.97, hint/bare 0.87. Rerun on 0.51.1 (10.4), tools and hook arms as `claude -p` sessions: 12 of 12 correct in both, pastree called in every run; tokens 0.65 and 0.60 of 0.23.2's tools arm |
 
 The tools also found four latent defects of the product itself: three form
 files naming components their forms do not have, and one with text after
@@ -1655,6 +1683,23 @@ its root's `end` - seven property lines dcc drops from the exe.
   rename across frames, field writers) were right on every arm at the same
   cost. One run per cell: this says which tasks discriminate and what the
   agents do, not a rate.
+- **Rerun with the grep hook** (2026-11-13, pastree-mcp 0.51.1, the same 12
+  tasks and prompts, 2 arms, one run each,
+  `local/audit/findings-phase6-rerun-2026-11-13.md`).
+  Each task its own headless session (`claude -p`):
+  the hook keeps a note per session, and a workflow's subagents shared
+  their parent's (fixed in 0.51.3, per `agent_id`). Arms: tools (hooks
+  off) and hook. Correct: 12 of 12 in both. pastree called in 12 of 12
+  runs of both (55 and 48 calls), grep and reads 20 and 21, nearly all
+  cross-checks the answers name; the hook noted 2 greps, each followed by a
+  pastree call. Cost: tools 2.42 M tokens / 581 s, hook 2.26 M / 560 s,
+  against 3.74 M / 472 s for the tools arm of 0.23.2. Not told apart: the
+  model, the session kind (a main session gets the server's instructions;
+  the 0.23.2 agents were a workflow's subagents) and the server version - a
+  tools arm run as subagents on the same server would separate them. One
+  false "nothing" found (F6r.1, fixed in 0.51.3): `callers` of a base
+  form's static FormActivate answered "no calls" where four descendants
+  redeclare it and call `inherited;` - both arms found them by grep.
 - **Found by the pilot** (on 0.16.8):
   - F6.1 (fixed in 0.20.2, PasTree 0.75.2): `related assignments` of a
     property an own class republishes scanned the closure once per link of

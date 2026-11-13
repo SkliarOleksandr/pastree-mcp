@@ -167,4 +167,55 @@ procedure TPlainOther.Reset;
 begin
 end;
 
+// A field used every way `references` tells apart (`access`): assigned,
+// changed by a builtin, passed to a var and an out parameter, its address
+// taken, read; a record field changed through the record; an object freed
+// by FreeAndNil.
+type
+  TCounterRec = record
+    Count: Integer;
+  end;
+  TCounter = class
+  private
+    FCount: Integer;
+    FRec: TCounterRec;
+    FList: TObject;
+    procedure Bump(var AValue: Integer);
+    procedure Take(out AValue: Integer);
+  public
+    procedure Run;
+  end;
+
+procedure TCounter.Bump(var AValue: Integer);
+begin
+  Inc(AValue);
+end;
+
+procedure TCounter.Take(out AValue: Integer);
+begin
+  AValue := 0;
+end;
+
+// As System.SysUtils declares it: `const [ref]`, and it writes nil.
+procedure FreeAndNil(const [ref] Obj: TObject);
+begin
+end;
+
+procedure TCounter.Run;
+var
+  P: PInteger;
+begin
+  FCount := 1;
+  Inc(FCount);
+  Bump(FCount);
+  Take(FCount);
+  P := @FCount;
+  if FCount > P^ then
+    FRec.Count := FCount;
+  Bump(FRec.Count);
+  FreeAndNil(FList);
+  if FList = nil then
+    Exit;
+end;
+
 end.

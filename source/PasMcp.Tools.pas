@@ -107,6 +107,10 @@ type
 
   TTargetKind = (tkSymbol, tkUnit, tkBuiltin, tkDefine);
 
+  // What one use of a variable, field, parameter or property does (RefAccess):
+  // the `access` of `references`. raNone: no access to report.
+  TRefAccess = (raNone, raRead, raWrite, raVar, raOut, raAddr);
+
   TSymId = record
     Mid, Sym: Integer;
   end;
@@ -3674,8 +3678,12 @@ begin
       LPrev := LLine;
     end
     else
-      ASb.AppendLine(Format('%s%d  %s', [LIndent, LH.Line,
-        IfThen(LH.Joined <> '', LH.Joined, CleanLine(LH.Snippet))]));
+    begin
+      // A tagged row after it on the same line shows its tag alone:
+      // `read FX write FX` is a read and a write of FX.
+      LPrev := IfThen(LH.Joined <> '', LH.Joined, CleanLine(LH.Snippet));
+      ASb.AppendLine(Format('%s%d  %s', [LIndent, LH.Line, LPrev]));
+    end;
     Inc(LShown);
   end;
   if Length(AHits) - LSame > LShown then
@@ -5248,6 +5256,62 @@ end;
 function OwnerClassX(AA: TMcpAnalysis; AMid, ASym: Integer): TSemaXType;
   forward;
 function StreamsX(AA: TMcpAnalysis; AClass: TSemaXType): Boolean; forward;
+function RefAccess(AA: TMcpAnalysis; LM: TPasSemaModel; AMid,
+  ANode: Integer): TRefAccess; forward;
+function IsPropertyDeclName(LM: TPasSemaModel; ANode: Integer): Boolean;
+  forward;
+
+const
+  cAccessTags: array[TRefAccess] of string = ('', 'read', 'write', 'var',
+    'out', 'addr');
+
+// A row's access: its tag, a code row untagged is a read, a form line sets.
+function RowAccess(const AH: THit): TRefAccess;
+begin
+  if AH.Form then
+    Exit(raWrite);
+  for var LK := raWrite to High(TRefAccess) do
+    if AH.Tag = cAccessTags[LK] then
+      Exit(LK);
+  Result := raRead;
+end;
+
+// `access`: the kinds asked for, by name - `changes` is write, var and out.
+function ParseAccess(const AText: string): TArray<Boolean>;
+var
+  LAny: Boolean;
+begin
+  SetLength(Result, Ord(High(TRefAccess)) + 1);
+  LAny := False;
+  for var LPart in AText.Split([',', ';', ' ', '|'],
+    TStringSplitOptions.ExcludeEmpty) do
+  begin
+    var LW := LowerCase(Trim(LPart));
+    if (LW = 'changes') or (LW = 'change') then
+    begin
+      Result[Ord(raWrite)] := True;
+      Result[Ord(raVar)] := True;
+      Result[Ord(raOut)] := True;
+    end
+    else if (LW = 'read') or (LW = 'reads') then
+      Result[Ord(raRead)] := True
+    else if (LW = 'write') or (LW = 'writes') then
+      Result[Ord(raWrite)] := True
+    else if LW = 'var' then
+      Result[Ord(raVar)] := True
+    else if LW = 'out' then
+      Result[Ord(raOut)] := True
+    else if LW = 'addr' then
+      Result[Ord(raAddr)] := True
+    else
+      raise EToolError.CreateFmt('`access` takes read, write, var, out, addr '
+        + 'or changes (write, var and out), several joined by commas - not `%s`',
+        [LPart]);
+    LAny := True;
+  end;
+  if not LAny then
+    Result := nil;
+end;
 
 // AHits with the code rows before the form rows, each part in its order.
 function CodeRowsFirst(const AHits: TArray<THit>): TArray<THit>;
@@ -5287,6 +5351,33 @@ var
   LTag, LCounts, LMode, LIn: string;
   LAll: TArray<THit>;
   LKept: Integer;
+  LAccess: TArray<Boolean>;
+  LValued: Boolean;
+  LIdent: TPasNavIdent;
+  LAccessCounts: array[TRefAccess] of Integer;
+
+  // The access tag of a use of a valued symbol - '' for a read.
+  function AccessTag(AA: TMcpAnalysis; const AH: TPasRefHit): string;
+  var
+    LMid, LNode: Integer;
+  begin
+    Result := '';
+    LMid := AA.Nav.ModelIdOf(AH.FilePath);
+    if LMid < 0 then
+      Exit;
+    if AH.Implicit then
+      LNode := AH.IndexNode
+    else if AA.Nav.IdentAt(LMid, AH.Line, AH.Col, LIdent) then
+      LNode := LIdent.Node
+    else
+      Exit;
+    if IsPropertyDeclName(AA.Proj.Model(LMid), LNode) then
+      Exit;
+    Result := cAccessTags[RefAccess(AA, AA.Proj.Model(LMid), LMid, LNode)];
+    if Result = 'read' then
+      Result := '';
+  end;
+
 begin
   LMode := LowerCase(ArgStr(AArgs, 'mode'));
   if LMode = '' then
@@ -5300,6 +5391,16 @@ begin
   // with the one it binds to, as `callers` tells them apart.
   LTargets := ResolveOneOrOverloads(AWs, AArgs);
   LT := LTargets[0];
+  // What each use does - read, write, passed by reference, its address -
+  // for what holds a value: "who changes FState" in one call, `var`
+  // passing included, which `related assignments` does not see.
+  LValued := (LT.Kind = tkSymbol) and ((LT.Head = 'var') or
+    (LT.Head = 'field') or (LT.Head = 'parameter') or (LT.Head = 'property'));
+  LAccess := ParseAccess(ArgStr(AArgs, 'access'));
+  if (LAccess <> nil) and not LValued then
+    raise EToolError.CreateFmt('`access` is for a variable, field, parameter '
+      + 'or property - %s is a %s (`callers` tells calls from routines handed '
+      + 'on)', [LT.Name, LT.Head]);
   LLimit := EnsureRange(ArgInt(AArgs, 'limit', 150), 0, 5000);
   if LMode = 'count' then
     LLimit := 0;
@@ -5327,7 +5428,10 @@ begin
           begin
             var LBefore := LSet.Count;
             for var LH in QRefs(AWs, LA, LId.Mid, LId.Sym) do
-              LSet.Add(LH, LTag);
+              if LValued then
+                LSet.Add(LH, AccessTag(LA, LH))
+              else
+                LSet.Add(LH, LTag);
             Inc(LCodeRows[LTi], LSet.Count - LBefore);
             // A class's name qualifying its own methods' implementation
             // headers is no use, but a rename must change it: counted.
@@ -5379,14 +5483,19 @@ begin
     // The header counts every row; `in` narrows the ones listed.
     LAll := LSet.Sorted;
     LHits := LAll;
-    if LIn <> '' then
+    FillChar(LAccessCounts, SizeOf(LAccessCounts), 0);
+    if LValued then
+      for var LH in LAll do
+        Inc(LAccessCounts[RowAccess(LH)]);
+    if (LIn <> '') or (LAccess <> nil) then
     begin
       // A new array: LHits := LAll shares it, and the header counts LAll.
       LHits := nil;
       SetLength(LHits, Length(LAll));
       LKept := 0;
       for var LI := 0 to High(LAll) do
-        if InFilterMatches(AWs, LAll[LI].FilePath, LIn) then
+        if ((LIn = '') or InFilterMatches(AWs, LAll[LI].FilePath, LIn)) and
+           ((LAccess = nil) or LAccess[Ord(RowAccess(LAll[LI]))]) then
         begin
           LHits[LKept] := LAll[LI];
           Inc(LKept);
@@ -5431,8 +5540,30 @@ begin
     else
       LSb.AppendLine(Format('%s (%s) - %d references in %d files', [LT.Name,
         LT.Head, Length(LAll), FileCount(LAll)]));
+    if LValued and (Length(LAll) > 0) then
+    begin
+      LCounts := '';
+      for var LK := raRead to High(TRefAccess) do
+        if LAccessCounts[LK] > 0 then
+          LCounts := LCounts + IfThen(LCounts <> '', ', ') + Format('%d %s',
+            [LAccessCounts[LK], cAccessTags[LK]]);
+      LSb.AppendLine(Format('(access: %s - rows tagged [write], [var] or '
+        + '[out] (passed to such a parameter), [addr]; reads untagged%s)',
+        [LCounts, IfThen(LSet.FormCount > 0, '; a form line sets it: a '
+        + 'write')]));
+    end;
+    if LAccess <> nil then
+    begin
+      LCounts := '';
+      for var LK := raRead to High(TRefAccess) do
+        if LAccess[Ord(LK)] then
+          LCounts := LCounts + IfThen(LCounts <> '', ', ') + cAccessTags[LK];
+      LIn := IfThen(LIn <> '', Format('in `%s`, ', [LIn])) + 'access ' +
+        LCounts;
+    end;
     if LIn <> '' then
-      LSb.AppendLine(Format('(in `%s`: %s)', [LIn,
+      LSb.AppendLine(Format('(%s: %s)', [IfThen(LAccess <> nil, LIn,
+        'in `' + LIn + '`'),
         IfThen(Length(LHits) = 0, 'none of them', Format('%s in %s listed, the rest left out',
         [Plural(Length(LHits), 'reference'), Plural(FileCount(LHits),
         'file')]))]));
@@ -7863,6 +7994,252 @@ begin
   LP := LM.Tree.Nodes[ANode].Parent;
   Result := (LP <> NIL_NODE) and (LM.Tree.Nodes[LP].Kind = nkPropertyDecl) and
     (LM.Tree.Nodes[LP].FirstChild = ANode);
+end;
+
+// The symbol the name ANode binds to: in its model (RefMap) or another
+// (ExtRefMap). False when it binds nothing.
+function BoundSym(LM: TPasSemaModel; AMid, ANode: Integer;
+  out ABMid, ABSym: Integer): Boolean;
+var
+  LExt: TPasExtRef;
+begin
+  ABMid := -1;
+  ABSym := NIL_SYM;
+  if (ANode >= 0) and (ANode < Length(LM.RefMap)) and
+     (LM.RefMap[ANode] <> NIL_SYM) then
+  begin
+    ABMid := AMid;
+    ABSym := LM.RefMap[ANode];
+  end
+  else if LM.ExtRefMap.TryGetValue(ANode, LExt) then
+  begin
+    ABMid := LExt.UnitId;
+    ABSym := LExt.Sym;
+  end;
+  Result := (ABMid >= 0) and (ABSym >= 0);
+end;
+
+// The name a call's head ends in: `Foo`, `Obj.Foo`, `Foo<T>`, `inherited
+// Foo` - the identifier its routine is bound at.
+function CallHeadName(LM: TPasSemaModel; AHead: Integer): Integer;
+begin
+  Result := AHead;
+  for var LDepth := 1 to 32 do
+  begin
+    if Result = NIL_NODE then
+      Exit;
+    case LM.Tree.Nodes[Result].Kind of
+      nkMember:
+        begin
+          // The last child is the name.
+          var LC := LM.Tree.Nodes[Result].FirstChild;
+          while (LC <> NIL_NODE) and (LM.Tree.Nodes[LC].NextSibling <> NIL_NODE) do
+            LC := LM.Tree.Nodes[LC].NextSibling;
+          Result := LC;
+        end;
+      nkTypeArgs, nkInherited:
+        Result := LM.Tree.Nodes[Result].FirstChild;
+    else
+      Exit;
+    end;
+  end;
+end;
+
+// What a builtin routine does to its argument AArg (0-based): raWrite when
+// it changes it in place - the compiler's own `var` parameters, which have
+// no declaration to read the mode off. raNone: it only reads it.
+function BuiltinArgAccess(const AName: string; AArg: Integer): TRefAccess;
+var
+  LN: string;
+begin
+  Result := raNone;
+  LN := LowerCase(AName);
+  if ((AArg = 0) and ((LN = 'inc') or (LN = 'dec') or (LN = 'include') or
+     (LN = 'exclude') or (LN = 'setlength') or (LN = 'setstring') or
+     (LN = 'fillchar') or (LN = 'new') or (LN = 'dispose') or
+     (LN = 'getmem') or (LN = 'reallocmem') or (LN = 'initialize') or
+     (LN = 'finalize') or (LN = 'delete'))) or
+     ((AArg = 1) and ((LN = 'str') or (LN = 'insert') or (LN = 'val'))) or
+     ((AArg = 2) and (LN = 'val')) or
+     ((AArg > 0) and ((LN = 'read') or (LN = 'readln'))) then
+    Result := raWrite;
+end;
+
+// The mode of a declared parameter: raVar, raOut, raNone (by value, const).
+function ParamAccess(AA: TMcpAnalysis; AMid, ASym: Integer): TRefAccess;
+var
+  LM: TPasSemaModel;
+  LDecl, LParam: Integer;
+begin
+  Result := raNone;
+  LM := AA.Proj.Model(AMid);
+  LDecl := LM.Symbols[ASym].DeclNode;
+  if LDecl = NIL_NODE then
+    Exit;
+  LParam := LM.Tree.Nodes[LDecl].Parent;
+  if (LParam = NIL_NODE) or (LM.Tree.Nodes[LParam].Kind <> nkParam) then
+    Exit;
+  if nfVar in LM.Tree.Nodes[LParam].Flags then
+    Result := raVar
+  else if nfOut in LM.Tree.Nodes[LParam].Flags then
+    Result := raOut;
+end;
+
+// What the use ANode of a variable, field, parameter or property does there:
+// writes it (`X := `, `X.F := ` of a record, `X[I] := `, a for counter, a
+// builtin changing its argument - Inc, SetLength, FreeAndNil), passes it to
+// a `var` or `out` parameter, takes its address (`@X`, Addr), or - raRead -
+// anything else. A record's field changed changes the record; an object's
+// field changed leaves the variable holding it as it was (`Obj.F := 1` reads
+// Obj). Through a pointer (`P^ := `) the variable P is read.
+function RefAccess(AA: TMcpAnalysis; LM: TPasSemaModel; AMid,
+  ANode: Integer): TRefAccess;
+var
+  LCur, LP, LArg, LHead, LBMid, LBSym, LIdx: Integer;
+  LBases: TList<Integer>;
+  LParams: TArray<Integer>;
+  LX: TSemaXType;
+  LName: string;
+
+  // A change of the part changes the whole only for a value type.
+  function BasesHoldValue: Boolean;
+  begin
+    for var LB in LBases do
+    begin
+      LX := AA.Proj.CanonTypeX(AA.Proj.WithTargetTypeX(AMid, LB));
+      if not XValid(LX) or not (AA.Proj.Model(LX.UnitId).Symbols[LX.Sym].
+         TypeCat in [tcRecord, tcArray, tcString, tcSet, tcVariant]) then
+        Exit(False);
+    end;
+    Result := True;
+  end;
+
+  function Modified(AKind: TRefAccess): TRefAccess;
+  begin
+    if (LBases.Count = 0) or BasesHoldValue then
+      Result := AKind
+    else
+      Result := raRead;
+  end;
+
+begin
+  Result := raRead;
+  if (ANode < 0) or (ANode > High(LM.Tree.Nodes)) then
+    Exit;
+  // `L[I]` through a default array property: its setter when assigned.
+  if LM.Tree.Nodes[ANode].Kind = nkIndex then
+  begin
+    if IsAssignTarget(LM, ANode) then
+      Result := raWrite;
+    Exit;
+  end;
+  LBases := TList<Integer>.Create;
+  try
+    LCur := ANode;
+    for var LDepth := 1 to 64 do
+    begin
+      LP := LM.Tree.Nodes[LCur].Parent;
+      if LP = NIL_NODE then
+        Exit;
+      case LM.Tree.Nodes[LP].Kind of
+        nkMember:
+          begin
+            // As the name (the last child) it is the member itself; as the
+            // base, what changes is its part.
+            if LM.Tree.Nodes[LCur].NextSibling <> NIL_NODE then
+              LBases.Add(LCur);
+            LCur := LP;
+          end;
+        nkTypeArgs:
+          if LM.Tree.Nodes[LP].FirstChild = LCur then
+            LCur := LP
+          else
+            Exit;
+        nkIndex:
+          begin
+            // An index expression is read; the brackets of a default array
+            // property run its getter or setter, not a write of the object.
+            if (LM.Tree.Nodes[LP].FirstChild <> LCur) or
+               ((LP <= High(LM.RefMap)) and (LM.RefMap[LP] <> NIL_SYM)) or
+               LM.ExtRefMap.ContainsKey(LP) then
+              Exit;
+            LBases.Add(LCur);
+            LCur := LP;
+          end;
+        nkParen:
+          LCur := LP;
+        // `property X: T read FX write FX`: every write of X writes FX.
+        nkPropSpec:
+          begin
+            if LM.Tree.NodeTextEquals(LP, 'write') then
+              Result := raWrite;
+            Exit;
+          end;
+        nkAssign:
+          begin
+            if LM.Tree.Nodes[LP].FirstChild = LCur then
+              Result := Modified(raWrite);
+            Exit;
+          end;
+        nkForStmt, nkForInStmt:
+          begin
+            if LM.Tree.Nodes[LP].FirstChild = LCur then
+              Result := raWrite;
+            Exit;
+          end;
+        nkUnaryOp:
+          begin
+            if LM.Tree.Source.VisibleToken(LM.Tree.Nodes[LP].Aux).Kind = tkAt
+            then
+              Result := raAddr;
+            Exit;
+          end;
+        nkCall:
+          begin
+            LHead := LM.Tree.Nodes[LP].FirstChild;
+            if LHead = LCur then
+              Exit;   // what is called: a procedural variable, read
+            LIdx := 0;
+            LArg := LM.Tree.Nodes[LHead].NextSibling;
+            while (LArg <> NIL_NODE) and (LArg <> LCur) do
+            begin
+              Inc(LIdx);
+              LArg := LM.Tree.Nodes[LArg].NextSibling;
+            end;
+            if LArg = NIL_NODE then
+              Exit;
+            LHead := CallHeadName(LM, LHead);
+            if (LHead = NIL_NODE) or not BoundSym(LM, AMid, LHead, LBMid,
+               LBSym) then
+              Exit;
+            LName := AA.Proj.Model(LBMid).Symbols[LBSym].Name;
+            if (LIdx = 0) and SameText(LName, 'Addr') then
+              Exit(raAddr);
+            if (LIdx = 0) and SameText(LName, 'FreeAndNil') then
+              Exit(Modified(raWrite));   // `const [ref]`: it writes nil
+            if sfBuiltin in AA.Proj.Model(LBMid).Symbols[LBSym].Flags then
+            begin
+              if BuiltinArgAccess(LName, LIdx) = raWrite then
+                Result := Modified(raWrite);
+              Exit;
+            end;
+            if AA.Proj.Model(LBMid).Symbols[LBSym].Kind <> skRoutine then
+              Exit;
+            LParams := AA.Proj.XParamSyms(LBMid, LBSym);
+            if LIdx <= High(LParams) then
+              case ParamAccess(AA, LBMid, LParams[LIdx]) of
+                raVar: Result := Modified(raVar);
+                raOut: Result := Modified(raOut);
+              end;
+            Exit;
+          end;
+      else
+        Exit;
+      end;
+    end;
+  finally
+    LBases.Free;
+  end;
 end;
 
 // The routine with a body around ANode; NIL_NODE in a program's main block,
@@ -20049,7 +20426,11 @@ const
     + 'Also takes a unit name (its uses '
     + 'clauses), and by position a compiler built-in or a conditional '
     + 'define. The name of an overloaded routine lists the uses of each '
-    + 'overload, a row tagged with the one it binds to. A widely used '
+    + 'overload, a row tagged with the one it binds to. A variable, field, '
+    + 'parameter or property: each row tagged by what it does there - '
+    + '[write], [var]/[out] (passed to such a parameter, Inc and SetLength '
+    + 'count as writes), [addr] - reads untagged, counted in the header; '
+    + '`access: changes` lists only what can change it. A widely used '
     + 'symbol: `mode: files` first - a count per file - then the lines of '
     + 'the files that matter with `in`.",'
     + '"inputSchema":{"type":"object","properties":{' + TARGET_PROPS + ','
@@ -20061,6 +20442,11 @@ const
     + 'whose path relative to the group contains this (a directory, a file '
     + 'name) or matches it as a wildcard (*.dfm, client\\*Edit*); the header '
     + 'still counts all"},'
+    + '"access":{"type":"string","description":"A variable, field, '
+    + 'parameter or property: only the rows that do this - read, write, var, '
+    + 'out, addr, or changes (write, var and out; a form line setting a '
+    + 'property is a write), several joined by commas; the header still '
+    + 'counts all"},'
     + '"limit":{"type":"integer","description":"Max rows - files, in mode '
     + 'files (default 150; 0: the counts and notes alone, no rows)"}}}},' +
 
