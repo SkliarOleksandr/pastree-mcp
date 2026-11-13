@@ -96,6 +96,9 @@ source {"file":"Shared/uShapes.pas", "line":30}
 source {"file":"AppF/uChildForm.dfm", "line":10}
 source {"name":"RunB"}
 find {"name":"TSquare"}
+find {"query":"TSquare|RunB|TCircle.Area"}
+find {"query":"TSquare\\|NoSuchNameAtAll", "scope":"project"}
+find {"query":"NoSuchNameAtAll|NorThisOne"}
 outline {"file":"AppB/uAppB.pas", "line":30}
 outline {"file":"AppA\tuAppA.pas"}
 source {"targets":["TCircle.Area","TWideBox.Configure"],"part":"decl"}

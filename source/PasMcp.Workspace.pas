@@ -1113,12 +1113,18 @@ var
     LDonor := -1;
     LBest := -1;
     LNames := '';
+    // `like` may name a .dproj `also` added too: pastree-lsp's IDE plugin
+    // tests take the plugin's settings, and the plugin is not in the group.
+    // The largest stays a member of the group's.
     for var LIdx := 0 to High(FMembers) do
-      if not FMembers[LIdx].Extra and (FMembers[LIdx].Error = '') then
+      if (FMembers[LIdx].Error = '') and (not FMembers[LIdx].Extra or
+         SameText(ExtractFileExt(FMembers[LIdx].ProjectFile), '.dproj')) then
       begin
         LNames := LNames + IfThen(LNames <> '', ', ', '') + FMembers[LIdx].Name;
         if (FAlsoLike <> '') and SameText(FMembers[LIdx].Name, FAlsoLike) then
           LDonor := LIdx;
+        if FMembers[LIdx].Extra then
+          Continue;
         if Length(FMembers[LIdx].Files) > LBest then
         begin
           LBest := Length(FMembers[LIdx].Files);
@@ -1128,8 +1134,9 @@ var
       end;
     if (FAlsoLike <> '') and (LDonor < 0) then
     begin
-      FAlsoNote := FAlsoNote + Format('"like": no member of the group is '
-        + 'named %s (%s) - the projects it adds take their own defaults'#13#10,
+      FAlsoNote := FAlsoNote + Format('"like": no member of the group, nor '
+        + 'a .dproj "also" adds, is named %s (%s) - the projects it adds take '
+        + 'their own defaults'#13#10,
         [FAlsoLike, LNames]);
       Exit;
     end;

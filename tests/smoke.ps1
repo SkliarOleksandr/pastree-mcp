@@ -316,6 +316,11 @@ Check 'source form line' (Block $b 'source {"file":"AppF/uChildForm.dfm", "line"
 # `name` alone is a symbol's name (`query` for find): refused before.
 Check 'source name alone' (Block $b 'source {"name":"RunB"}') @('RunB (procedure) implemented at AppB\uAppB.pas:26-32') @('give `symbol`')
 Check 'find name alone' (Block $b 'find {"name":"TSquare"}') @('Shared\uShapes.pas:30  TSquare (class)') @('takes no argument')
+# Several names joined by | (grep's \| too): each in its own block, the
+# call's other arguments for every one; one finding nothing says so there.
+Check 'find several' (Block $b 'find {"query":"TSquare|RunB|TCircle.Area"}') @("=== 1 of 3: TSquare`nShared\uShapes.pas:30  TSquare (class)", "=== 2 of 3: RunB`n", 'AppB\uAppB.pas:16  RunB (procedure)', "=== 3 of 3: TCircle.Area`nShared\uShapes.pas:26  TCircle.Area (function)")
+Check 'find several grep bar' (Block $b 'find {"query":"TSquare\\|NoSuchNameAtAll"') @('=== 1 of 2: TSquare', 'Shared\uShapes.pas:30  TSquare (class)', '=== 2 of 2: NoSuchNameAtAll')
+Check 'find several none' (Block $b 'find {"query":"NoSuchNameAtAll|NorThisOne"}') @('=== 1 of 2: NoSuchNameAtAll', '=== 2 of 2: NorThisOne')
 Check 'outline line' (Block $b 'outline {"file":"AppB/uAppB.pas", "line":30}') @('`outline` takes no argument `line` (the routine around a line: `source` with `file` + `line`)')
 Check 'members match alternatives' (Block $b 'members {"symbol":"TDerived", "match":"Guard|Count"') @('named like *guard* or *count*', '33  procedure Guarded; override;', '38  property Count;') @('procedure Add(')
 # "AppA\tuAppA.pas" in JSON is a tab, not a backslash: say so, not "invalid characters in path".
@@ -1528,13 +1533,25 @@ try {
     $alsoJson = Join-Path $copy 'pastree-mcp.json'
     [IO.File]::WriteAllText($alsoJson, '{"also": ["Tests/*.dpr", "Nowhere/*.dpr"], "like": "AppX"}', $utf8)
     $r = Rpc 61 'tools/call' '{"name":"callers","arguments":{"symbol":"TotalArea"}}'
-    Check 'also file written' (ToolText $r) @('project file(s) changed: pastree-mcp.json; the workspace was reloaded - pastree-mcp.json adds 1 project(s): AppU; "also": Nowhere/*.dpr matches no .dproj, .dpr or .dpk under ', '; "like": no member of the group is named AppX (AppA, AppB, AppF) - the projects it adds take their own defaults)', '- 2 calls in 2 routines', "Tests\AppU.dpr`n  14  [main block]  if TotalArea") @('not counted above')
+    Check 'also file written' (ToolText $r) @('project file(s) changed: pastree-mcp.json; the workspace was reloaded - pastree-mcp.json adds 1 project(s): AppU; "also": Nowhere/*.dpr matches no .dproj, .dpr or .dpk under ', '; "like": no member of the group, nor a .dproj "also" adds, is named AppX (AppA, AppB, AppF) - the projects it adds take their own defaults)', '- 2 calls in 2 routines', "Tests\AppU.dpr`n  14  [main block]  if TotalArea") @('not counted above')
     [IO.File]::WriteAllText($alsoJson, '{"also": "Tests/AppU.dpr", "like": "AppA"}', $utf8)
     # `status` answers as the index is; a call reads the file.
     $r = Rpc 62 'tools/call' '{"name":"find","arguments":{"query":"TotalArea"}}'
     Check 'also file rewritten' (ToolText $r) @('the workspace was reloaded - pastree-mcp.json adds 1 project(s): AppU)') @('matches no')
     $r = Rpc 63 'tools/call' '{"name":"status","arguments":{}}'
     Check 'also file status' (ToolText $r) @('pastree-mcp.json: "also" [Tests/AppU.dpr] - 1 project(s) added, "like" AppA', 'member AppU: Win32 (bare project file), 0 listed files, analysis 0 - not in the group, added by pastree-mcp.json (Tests\AppU.dpr), the settings of AppA') @('matches no')
+    # `like` names a .dproj `also` adds (pastree-lsp's IDE plugin tests take
+    # the plugin's settings, and no group lists the plugin).
+    $appL = Join-Path $copy 'Tests\AppL'
+    New-Item -ItemType Directory -Force $appL | Out-Null
+    [IO.File]::WriteAllText((Join-Path $appL 'AppL.dpr'), "program AppL;`r`n`r`nuses`r`n  uShapes;`r`n`r`nbegin`r`nend.`r`n", $utf8)
+    [IO.File]::WriteAllText((Join-Path $appL 'AppL.dproj'), ([IO.File]::ReadAllText((Join-Path $copy 'AppA\AppA.dproj')) -replace 'AppA\.dpr', 'AppL.dpr' -replace '\.\.\\Shared', '..\..\Shared'), $utf8)
+    [IO.File]::WriteAllText($alsoJson, '{"also": ["Tests/AppU.dpr", "Tests/AppL/AppL.dproj"], "like": "AppL"}', $utf8)
+    $r = Rpc 65 'tools/call' '{"name":"find","arguments":{"query":"TotalArea"}}'
+    Check 'also like a dproj it adds' (ToolText $r) @('pastree-mcp.json adds 2 project(s): ') @('no member of the group')
+    $r = Rpc 66 'tools/call' '{"name":"status","arguments":{}}'
+    Check 'also like a dproj status' (ToolText $r) @('"like" AppL', 'added by pastree-mcp.json (Tests\AppU.dpr), the settings of AppL') @('no member of the group')
+    Remove-Item -Recurse $appL
     Remove-Item $alsoJson
     $r = Rpc 64 'tools/call' '{"name":"references","arguments":{"symbol":"TotalArea"}}'
     Check 'also file removed' (ToolText $r) @('the workspace was reloaded - pastree-mcp.json is gone, the projects it added with it', '- 1 references in 1 files', 'Tests\AppU.dpr:14  if TotalArea')
@@ -1660,10 +1677,22 @@ Check 'hook not delphi' (Hook 'g' 'Grep' '{"pattern":"TCircle"}' ([IO.Path]::Get
 Check 'hook grep word' (Hook 'b' 'Grep' '{"pattern":"TODO"}') @() @($deny)
 Check 'hook grep text' (Hook 'b' 'Grep' '{"pattern":"\"a string\""}') @() @($deny)
 Check 'hook grep other files' (Hook 'b' 'Grep' '{"pattern":"TCircle","glob":"*.md"}') @() @($deny)
-Check 'hook grep declaration' (Hook 'b' 'Grep' '{"pattern":"procedure\\s+TFoo\\.Save\\b","glob":"*.{pas,inc}"}') @($deny, '`TFoo.Save`')
+Check 'hook grep declaration' (Hook 'b' 'Grep' '{"pattern":"procedure\\s+TFoo\\.Save\\b","glob":"*.{pas,inc}"}') @($deny, '`find` {"query":"TFoo.Save"} gives their declarations')
+# Several names: `find` with A|B for declarations - in one named file too,
+# with `in` - and `references` with `targets` for uses.
+Check 'hook declarations in a file' (Hook 't' 'Bash' '{"command":"grep -n \"function TCircle.Area\\|procedure RunB\" Shared/uShapes.pas"}') @($deny, '`find` {"query":"TCircle.Area|RunB","in":"uShapes.pas"}')
+Check 'hook several names' (Hook 'u' 'Grep' '{"pattern":"TCircle|TSquare"}') @($deny, '`references` {"targets":["TCircle","TSquare"]}', '`find` {"query":"TCircle|TSquare"}')
+# A name's part written as a regex is find's wildcard; a group after a dot is
+# spelled out; an alternative's first name is the one it looks for.
+Check 'hook wildcard names' (Hook 'w' 'Bash' '{"command":"grep -rn \"function PasArray\\w*\\|function TFoo\\.\\(Load\\|Save\\)\\|procedure SetSite(const Value: Integer)\" source/"}') @($deny, '`find` {"query":"PasArray*|TFoo.Load|TFoo.Save|SetSite"}') @('Value')
+Check 'hook declarations over the tree' (Hook 'v' 'Bash' '{"command":"grep -rn \"TSquare = class\\|TCircle = class\" ."}') @($deny, '`find` {"query":"TSquare|TCircle"}') @('"in"')
 Check 'hook bash recursive' (Hook 'c' 'Bash' '{"command":"cd src && grep -rn \"SaveToFile\" source/"}') @($deny, '`SaveToFile`')
 Check 'hook bash piped' (Hook 'd' 'Bash' '{"command":"git log --oneline | grep SaveToFile"}') @() @($deny)
-Check 'hook bash other include' (Hook 'd' 'Bash' '{"command":"grep -rn SaveToFile --include=*.md ."}') @() @($deny)
+# .bat files searched by name and glob; a path through object-pascal-tree in
+# another segment is not a Pascal extension (`-pascal-` matched `pascal`).
+Check 'hook other files, pascal in a path' (Hook 'x' 'Bash' '{"command":"grep -n -i \"Smoke\\|rad-studio\" build.bat scripts/*.bat; grep -o x /c/Repos/object-pascal-tree/tests/SemaNavSmoke.dproj"}') @() @($deny)
+Check 'hook pascal in a path, recursive' (Hook 'y' 'Bash' '{"command":"grep -rn SaveToFile /c/Repos/object-pascal-tree/source"}') @($deny, '`SaveToFile`')
+Check 'hook bash other include' (Hook 'd''Bash' '{"command":"grep -rn SaveToFile --include=*.md ."}') @() @($deny)
 Check 'hook sed lines' (Hook 'd' 'Bash' '{"command":"sed -n 120,160p source/uShapes.pas"}') @($deny, '`source` {"file":"source/uShapes.pas","lines":"120-160"}')
 # A search in files named one by one is a read of what the agent found
 # already - `grep -n "X =" Version.pas` was denied in a compound command,

@@ -14370,8 +14370,15 @@ begin
     if LL.LightAsked <> nil then
       for var LMid in LL.LightAsked do
         LFiles := LFiles + [LL.A.Proj.ModelFile(LMid)];
-    for var LF in LFiles do
-      QFile(AWs, LL.A, LF, True);
+    // All in one query (PasTree 0.181.0): one at a time, each was a round of
+    // its own and none reached PasTree's escalation bound - the first lint
+    // on the client group took 327 rounds and 27.7 s, against 2.0 s with
+    // the library read in full.
+    if LFiles <> nil then
+    begin
+      LL.A.WS.EnsureFiles(LFiles);
+      AWs.QueryDone(LL.A, True);
+    end;
   end;
   AWs.RaiseIfChanged;
 end;
@@ -19944,7 +19951,8 @@ const
     + 'write it.",'
     + '"inputSchema":{"type":"object","properties":{'
     + '"query":{"type":"string","description":"Name, qualified name or '
-    + 'wildcard pattern"},'
+    + 'wildcard pattern; several joined by | (TFoo.Bar|Baz|*Qux*), each '
+    + 'answered in its own block"},'
     + '"kind":{"type":"string","description":"type, class, record, '
     + 'interface, routine, procedure, function, constructor, var, const, '
     + 'field, property, enum (a value), parameter, unit"},'
@@ -20588,6 +20596,8 @@ begin
         end;
         LLabel := ArgStr(LOne, 'symbol');
         if LLabel = '' then
+          LLabel := ArgStr(LOne, 'query');
+        if LLabel = '' then
           LLabel := ArgStr(LOne, 'file') + IfThen(ArgStr(LOne, 'line') <> '',
             ':' + ArgStr(LOne, 'line'), '') + IfThen(ArgStr(LOne, 'name') <> '',
             ' ' + ArgStr(LOne, 'name'), '');
@@ -21080,6 +21090,34 @@ begin
   end;
 end;
 
+// `find` of several names, `query` joined by `|` (or grep's `\|`): each name a
+// target of its own. 587 of the 771 greps for a declaration in the sessions
+// of 2026-11-03..12 asked for several names at once - `grep -n "function
+// A\|procedure B\|C ="` for their lines - where `find` took one.
+function FindMany(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
+var
+  LParts: TArray<string>;
+  LArgs: TJSONObject;
+  LList: TJSONArray;
+begin
+  LParts := ArgStr(AArgs, 'query').Replace('\|', '|').Split(['|'],
+    TStringSplitOptions.ExcludeEmpty);
+  if Length(LParts) < 2 then
+    Exit(ToolFind(AWs, AArgs));
+  LArgs := TJSONObject(AArgs.Clone);
+  try
+    LArgs.RemovePair('query').Free;
+    LList := TJSONArray.Create;
+    for var LPart in LParts do
+      if Trim(LPart) <> '' then
+        LList.Add(TJSONObject.Create(TJSONPair.Create('query', Trim(LPart))));
+    LArgs.AddPair('targets', LList);
+    Result := EachTarget(AWs, 'find', LArgs, ToolFind);
+  finally
+    LArgs.Free;
+  end;
+end;
+
 // The tool, or each of its `targets`.
 function WithTargets(AWs: TMcpWorkspace; const AName: string;
   AArgs: TJSONObject; const ATool: TFunc<TMcpWorkspace, TJSONObject, string>):
@@ -21120,7 +21158,7 @@ begin
       if AName = 'status' then
         Result := ToolStatus(AWs, AArgs)
       else if AName = 'find' then
-        Result := ToolFind(AWs, AArgs)
+        Result := FindMany(AWs, AArgs)
       else if AName = 'definition' then
         Result := WithTargets(AWs, AName, AArgs, ToolDefinition)
       else if AName = 'source' then

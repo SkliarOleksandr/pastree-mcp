@@ -16,8 +16,11 @@ unit PasMcp.Version;
 interface
 
 const
-  PasTreeMcpVersion = '0.50.3';
-  // 0.179.2: TPasSemaProject.DcuTextFilter, which --format-dcu sets on every
+  PasTreeMcpVersion = '0.51.0';
+  // 0.181.0: TPasWorkspace.EnsureFiles, which lint makes the library units
+  // a removal's answer needs full through, in one query (a compile error
+  // without it).
+  // 0.179.2 before: TPasSemaProject.DcuTextFilter, which --format-dcu sets on every
   // analysis (a compile error without it), and F5's wrapping and alignment
   // fields of TPasFormatOptions, which `format`'s `options` take.
   // 0.178.0 before: the formatter - PasFormatEdits, PasFormatRangeEdits (range mode
@@ -43,7 +46,7 @@ const
   // overload (0.121.0). An older PasTree has no workspace (a compile error)
   // or a workspace whose demand misses a family (a silent light gap).
   // 0.117.1 before: light mode, promotion, LintPromotions (0.31.0).
-  cMinPasTreeVersion = '0.179.2';
+  cMinPasTreeVersion = '0.181.0';
 
 // 'pastree-mcp 0.1.0 (PasTree 0.50.1), built 2026-09-25 15:00' - the first
 // line of every log.

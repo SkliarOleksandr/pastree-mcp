@@ -161,7 +161,8 @@ project file names such projects:
 the project file's directory; a `.dpr` beside a `.dproj` that is matched
 too, or that the group lists, is that project. A bare `.dpr` takes the
 settings - platform, search path, defines, namespaces - of the member `like`
-names, else of the group's largest, and shares its analysis. The file is
+names (a `.dproj` `also` adds counts: tests of a package no group lists take
+the package's), else of the group's largest, and shares its analysis. The file is
 read again on the call after it changes, so an agent can write it and go
 on; that call says which projects it added and what in it is wrong, and
 `status` shows it. `--also` does the same from the command line (0.48.0).

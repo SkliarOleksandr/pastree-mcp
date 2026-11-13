@@ -73,6 +73,9 @@ const
 type
   TFinding = record
     Name: string;      // the name searched for, '' for a line read
+    Names: TArray<string>;  // every name of the pattern, Name first
+    Decl: Boolean;     // a search for their declarations
+    InFile: string;    // a declaration search in one named file: that file
     FileName: string;  // a line read: the file
     Lines: TArray<string>;  // a line read: `A-B`, one per sed range
   end;
@@ -127,11 +130,13 @@ begin
 end;
 
 // A glob, a type or a whole command naming a Pascal extension: `*.pas`,
-// `*.{pas,inc}`, `-t pascal` - not `pastree` or `--include`.
+// `*.{pas,inc}`, `-t pascal` - not `pastree` or `--include`, nor a path
+// through `object-pascal-tree` (a hyphen is a word boundary: every command
+// naming PasTree's directory was a search over Pascal sources).
 function NamesPascal(const AText: string): Boolean;
 begin
   Result := TRegEx.IsMatch(AText,
-    '(?i)[.{,](pas|dpr|dpk|inc|dfm|fmx)\b|\bpascal\b');
+    '(?i)[.{,](pas|dpr|dpk|inc|dfm|fmx)\b|(^|[\s=''"])pascal\b(?!-)');
 end;
 
 function LooksLikeName(const AToken: string): Boolean;
@@ -158,36 +163,119 @@ end;
 // keywords before a declaration (`procedure\s+TFoo\.Bar`, `\bSave\b`,
 // `Load|Save`). Anything else - a quote, a bracket, a quantifier - is a
 // search for text.
-function NameInPattern(const APattern: string): string;
+//
+// Every name of an alternation (`A\|B`, `TFoo\.\(A\|B\)`), one per
+// alternative - the first there: `SetSite(const Value: Integer)` is SetSite,
+// not Value - in order. A part of a name written as a regex (`PasArray\w*`,
+// `TFoo\..*Builtin`) is `find`'s wildcard (`PasArray*`, `TFoo.*Builtin`).
+// ADecl: a search for their declarations - a routine's or a type's keyword
+// in the pattern (AKeyword too), or `Name =`. 587 of 771 declaration greps in
+// the sessions of 2026-11-03..12 named several names, for their lines - what
+// `find` with `A|B` answers (0.51.0); the note named the first one only.
+function NamesInPattern(const APattern: string; out ADecl,
+  AKeyword: Boolean): TArray<string>;
 const
-  cDecor: array[0..14] of string = ('(?i)', '\b', '\s+', '\s*', '\s', '\w*',
-    '\w+', '.*', '.+', '\<', '\>', '^', '$', '\(', '\)');
+  cWild: array[0..3] of string = ('\w*', '\w+', '.*', '.+');
+  cDecor: array[0..8] of string = ('(?i)', '\b', '\s+', '\s*', '\s', '\<',
+    '\>', '^', '$');
+  cDeclWords: array[0..7] of string = ('procedure', 'function', 'constructor',
+    'destructor', 'class', 'record', 'interface', 'property');
 var
-  LText, LSeg: string;
+  LText, LSeg, LBare: string;
+  LHasEq: Boolean;
 begin
-  Result := '';
-  LText := APattern;
+  Result := nil;
+  ADecl := False;
+  AKeyword := False;
+  // grep's basic regex as an extended one, then `Prefix\.(A|B)` spelled out
+  // as `Prefix\.A|Prefix\.B`.
+  LText := APattern.Replace('\|', '|', [rfReplaceAll]).Replace('\(', '(',
+    [rfReplaceAll]).Replace('\)', ')', [rfReplaceAll]);
+  var LGroup := TRegEx.Match(LText,
+    '([A-Za-z_]\w*(?:\\\.[A-Za-z_]\w*)*)\\\.\(([^()]*)\)');
+  while LGroup.Success do
+  begin
+    var LSpelled := '';
+    for var LAlt in LGroup.Groups[2].Value.Split(['|']) do
+      LSpelled := LSpelled + IfThen(LSpelled <> '', '|') +
+        LGroup.Groups[1].Value + '\.' + LAlt;
+    LText := Copy(LText, 1, LGroup.Index - 1) + LSpelled +
+      Copy(LText, LGroup.Index + LGroup.Length, MaxInt);
+    LGroup := TRegEx.Match(LText,
+      '([A-Za-z_]\w*(?:\\\.[A-Za-z_]\w*)*)\\\.\(([^()]*)\)');
+  end;
+  for var LW in cWild do
+    LText := LText.Replace(LW, '*', [rfReplaceAll]);
   for var LD in cDecor do
     LText := LText.Replace(LD, ' ', [rfReplaceAll]);
   LText := LText.Replace('\.', '.', [rfReplaceAll]);
   for var LC in LText do
     if not (LC.IsLetterOrDigit or CharInSet(LC, ['_', '.', ' ', '|', '(', ')',
-      ':', '=', ';', ',', '-'])) then
+      ':', '=', ';', ',', '-', '*'])) then
       Exit;
-  for var LTok in LText.Split([' ', '|', '(', ')', ':', '=', ';', ',', '-'],
-    TStringSplitOptions.ExcludeEmpty) do
+  LHasEq := LText.Contains('=');
+  for var LAlt in LText.Split(['|']) do
+    for var LTok in LAlt.Split([' ', '(', ')', ':', '=', ';', ',', '-'],
+      TStringSplitOptions.ExcludeEmpty) do
+    begin
+      if MatchText(LTok, cDeclWords) then
+      begin
+        AKeyword := True;
+        Continue;
+      end;
+      // A dotted name is found by its last segment; every segment must be
+      // one (a wildcard aside).
+      LSeg := LTok.Trim(['.']);
+      LBare := LSeg.Replace('*', '', [rfReplaceAll]);
+      if (LBare = '') or LBare.EndsWith('.') then
+        Continue;
+      var LOk := True;
+      for var LPart in LSeg.Split(['.']) do
+        if not ((LPart <> '') and (LPart[1].IsLetter or CharInSet(LPart[1],
+          ['_', '*']))) then
+          LOk := False;
+      if LOk and LooksLikeName(Copy(LBare, LastDelimiter('.', LBare) + 1,
+        MaxInt)) then
+      begin
+        if not MatchText(LSeg, Result) then
+          Result := Result + [LSeg];
+        Break;   // the alternative's first name is the one it looks for
+      end;
+    end;
+  ADecl := (Result <> nil) and (AKeyword or LHasEq);
+end;
+
+function NameInPattern(const APattern: string): string;
+var
+  LDecl, LKeyword: Boolean;
+  LNames: TArray<string>;
+begin
+  LNames := NamesInPattern(APattern, LDecl, LKeyword);
+  if LNames = nil then
+    Exit('');
+  Result := LNames[0];
+end;
+
+// The finding's names from APattern; a search in one file the agent named
+// is a finding only when it looks for routines or types by their keyword:
+// their lines are `find`'s answer, `in` that file. `grep -n "X =" Version.pas`
+// for a line's text stays a read (0.45.2).
+function FillNames(var AFinding: TFinding; const APattern, ANamedFile: string;
+  ANamedOnly: Boolean): Boolean;
+var
+  LKeyword: Boolean;
+begin
+  AFinding.Names := NamesInPattern(APattern, AFinding.Decl, LKeyword);
+  if AFinding.Names = nil then
+    Exit(False);
+  AFinding.Name := AFinding.Names[0];
+  if ANamedOnly then
   begin
-    // A dotted name is found by its last segment; every segment must be one.
-    LSeg := LTok.Trim(['.']);
-    if LSeg = '' then
-      Continue;
-    var LOk := True;
-    for var LPart in LSeg.Split(['.']) do
-      if not ((LPart <> '') and (LPart[1].IsLetter or (LPart[1] = '_'))) then
-        LOk := False;
-    if LOk and LooksLikeName(Copy(LSeg, LastDelimiter('.', LSeg) + 1, MaxInt)) then
-      Exit(LSeg);
+    if not LKeyword then
+      Exit(False);
+    AFinding.InFile := ANamedFile;
   end;
+  Result := True;
 end;
 
 // A file named as such - an extension, no wildcard. A search in files the
@@ -215,11 +303,13 @@ begin
   else if LType <> '' then
     LPascal := NamesPascal(LType)
   else if IsNamedFile(LPath) then
-    Exit(False)   // one file the agent named: a read, not a search
+    // One file the agent named: a read, not a search - unless it looks for
+    // routines or types by their keyword.
+    Exit(IsPascalFile(LPath) and FillNames(AFinding, Str(AInput, 'pattern'),
+      LPath, True))
   else
     LPascal := True;
-  AFinding.Name := NameInPattern(Str(AInput, 'pattern'));
-  Result := LPascal and (AFinding.Name <> '');
+  Result := LPascal and FillNames(AFinding, Str(AInput, 'pattern'), '', False);
 end;
 
 // Words of one shell command, quotes taken off; outside quotes a pipe (`|`,
@@ -307,10 +397,22 @@ const
     '--exclude', '-Path', '-Include', '-Exclude', '-Context');
 var
   LStart, LI: Integer;
-  LPattern, LTool: string;
+  LPattern, LTool, LOneFile: string;
   LRecursive, LOtherInclude, LGrepLike, LNamedOnly, LHasPattern: Boolean;
-  LPaths: Integer;
+  LPaths, LOthers: Integer;
+
+  // A file, or a glob of files, by an extension not Pascal's: `x.bat`,
+  // `scripts/*.bat`. A directory has none - `.`, `..`, `../pastree-lsp`
+  // are not extensions (ExtractFileExt reads `/` as no delimiter).
+  function OtherKind(const APath: string): Boolean;
+  begin
+    Result := TRegEx.IsMatch(APath, '(^|[\\/])[^\\/.][^\\/]*\.[A-Za-z0-9]+$')
+      and not NamesPascal(APath);
+  end;
+
 begin
+  LOthers := 0;
+  LOneFile := '';
   AFinding := Default(TFinding);
   Result := False;
   if Length(AWords) = 0 then
@@ -376,7 +478,10 @@ begin
       if (LI < High(AWords)) and SameText(LW, '-Path') then
       begin
         Inc(LPaths);
+        if OtherKind(AWords[LI + 1]) then
+          Inc(LOthers);
         LNamedOnly := LNamedOnly and IsNamedFile(AWords[LI + 1]);
+        LOneFile := AWords[LI + 1];
       end;
       Inc(LI);
     end
@@ -396,7 +501,10 @@ begin
     else
     begin
       Inc(LPaths);
+      if OtherKind(LW) then
+        Inc(LOthers);
       LNamedOnly := LNamedOnly and IsNamedFile(LW);
+      LOneFile := LW;
     end;
     Inc(LI);
   end;
@@ -405,9 +513,16 @@ begin
   if APipeIn and (LPaths = 0) and (LStart = 1) and
      not (LGrepLike and LRecursive) then
     Exit;
-  AFinding.Name := NameInPattern(LPattern);
-  Result := (AFinding.Name <> '') and
-    not ((LPaths > 0) and LNamedOnly and not LRecursive) and
+  // Every path of another kind of file (`build.bat scripts/*.bat`): not a
+  // search of Pascal sources, whatever else the command names.
+  if (LPaths > 0) and (LOthers = LPaths) then
+    Exit;
+  // In files named one by one: a read - unless one Pascal file is searched
+  // for routines or types by their keyword (FillNames).
+  if (LPaths > 0) and LNamedOnly and not LRecursive then
+    Exit((LPaths = 1) and IsPascalFile(LOneFile) and FillNames(AFinding,
+      LPattern, LOneFile, True));
+  Result := FillNames(AFinding, LPattern, '', False) and
     (NamesPascal(AWhole) or (LRecursive and not LOtherInclude));
 end;
 
@@ -614,6 +729,24 @@ begin
         Format('{"file":"%s","lines":"%s"}', [LFile, LLines]);
     Result := Format('pastree index: `source` {"targets":[%s]} gives these ' +
       'lines; `file` + `line` alone, the whole routine.', [LTargets]);
+  end
+  else if AFinding.Decl or string.Join('|', AFinding.Names).Contains('*') then
+    // Declarations of one or several names - or a name written with a
+    // wildcard, which only `find` takes: `find`, a line each; in the file
+    // searched, by its name (`in` matches a part of the path).
+    Result := Format('pastree index: `find` {"query":"%s"%s} gives their ' +
+      'declarations, a line each; `source` their text.', [string.Join('|',
+      AFinding.Names), IfThen(AFinding.InFile <> '', Format(',"in":"%s"',
+      [ExtractFileName(AFinding.InFile.Replace('/', '\'))]), '')])
+  else if Length(AFinding.Names) > 1 then
+  begin
+    LTargets := '';
+    for var LN in AFinding.Names do
+      LTargets := LTargets + IfThen(LTargets <> '', ',') + '"' + LN + '"';
+    Result := Format('pastree index: these look like Pascal names - ' +
+      '`references` {"targets":[%s]} for their resolved uses, `find` ' +
+      '{"query":"%s"} for their declarations.', [LTargets, string.Join('|',
+      AFinding.Names)]);
   end
   else
     Result := Format('pastree index: `%s` looks like a Pascal name - ' +
