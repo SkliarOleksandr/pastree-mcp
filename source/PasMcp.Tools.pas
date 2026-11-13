@@ -101,6 +101,9 @@ uses
 
 type
   EToolError = class(Exception);
+  // `file` + `line` alone on a line no routine holds and that declares
+  // nothing: `source` answers with the lines around it instead.
+  ENoRoutineAt = class(EToolError);
 
   TTargetKind = (tkSymbol, tkUnit, tkBuiltin, tkDefine);
 
@@ -525,6 +528,13 @@ var
   // --format-dcu's filter (SetDcuFormat), nil when off - the one every
   // analysis' generated .dcu text goes through.
   GDcuFilter: TPasTextFilter;
+
+// A file the parser reads as Pascal - not a form file, a resource or text.
+function IsPascalSource(const APath: string): Boolean;
+begin
+  Result := MatchText(ExtractFileExt(APath), ['.pas', '.dpr', '.dpk', '.inc',
+    '.lpr', '.pp']);
+end;
 
 function ReadLines(const APath: string): TArray<string>;
 begin
@@ -1480,11 +1490,41 @@ begin
   // header - an agent asked `outline` for "the routine around line 7716".
   if (LCol <= 0) and (LName = '') then
   begin
-    if not RoutineHeaderAt(AWs, LFile, LLine, LName, LMore, LCol) then
-      raise EToolError.CreateFmt('line %d of %s is in no routine - give `name` '
-        + '(the identifier on that line) or `column`', [LLine,
-        AWs.RelPath(LFile)]);
-    LLine := LMore;
+    if RoutineHeaderAt(AWs, LFile, LLine, LName, LMore, LCol) then
+      LLine := LMore
+    else
+    begin
+      // In no routine: the declaration the line writes - `TFoo = class`, a
+      // constant, a field - by the first word on it that resolves to a
+      // declaration made on this very line. A form file declares nothing
+      // the index holds.
+      LLines := ReadLines(LFile);
+      if IsPascalSource(LFile) and (LLine <= Length(LLines)) then
+        for var LWord in TRegEx.Matches(TRegEx.Replace(LLines[LLine - 1],
+          '//.*$|\{.*?\}|''[^'']*''', ''), '\b[A-Za-z_]\w*\b') do
+        begin
+          var LOne := TJSONObject.Create;
+          try
+            LOne.AddPair('file', LFile);
+            LOne.AddPair('line', TJSONNumber.Create(LLine));
+            LOne.AddPair('column', TJSONNumber.Create(LWord.Index));
+            try
+              Result := ResolvePosition(AWs, LOne);
+              if not (Result.Kind in [tkUnit, tkBuiltin, tkDefine]) and
+                 (Result.DeclLine = LLine) and SameFileName(Result.DeclFile,
+                 LFile) then
+                Exit;
+            except
+              on EToolError do ;
+            end;
+          finally
+            LOne.Free;
+          end;
+        end;
+      raise ENoRoutineAt.CreateFmt('line %d of %s is in no routine and '
+        + 'declares nothing - give `name` (the identifier on that line) or '
+        + '`column`', [LLine, AWs.RelPath(LFile)]);
+    end;
   end;
   if LCol <= 0 then
   begin
@@ -4642,6 +4682,64 @@ begin
   end;
 end;
 
+// `file` + `line` alone on a line in no routine that declares nothing - a
+// form file's line, a program's main block, a `uses` clause: in a form file
+// the object the line belongs to (from its `object` line to its `end`), else
+// the lines around it. It was refused (7 times in the sessions of
+// 2026-09-25..11-12), and the agent read the file instead.
+function LinesAround(AWs: TMcpWorkspace; const AFile: string; ALine,
+  ALimit: Integer): string;
+var
+  LLines: TArray<string>;
+  LRange: TLineRange;
+  LIndent, LFrom: Integer;
+  LHead: TMatch;
+begin
+  LLines := ReadLines(AFile);
+  if (ALine < 1) or (ALine > Length(LLines)) then
+    raise EToolError.CreateFmt('%s has %d lines', [AWs.RelPath(AFile),
+      Length(LLines)]);
+  LRange := Default(TLineRange);
+  if MatchText(ExtractFileExt(AFile), ['.dfm', '.fmx', '.lfm', '.xfm']) then
+  begin
+    // The object around the line: the nearest `object`/`inherited`/`inline`
+    // line at or above it indented less than the line (or the line itself),
+    // to the `end` at its indent.
+    LIndent := Length(LLines[ALine - 1]) - Length(TrimLeft(LLines[ALine - 1]));
+    LFrom := ALine;
+    while LFrom >= 1 do
+    begin
+      LHead := TRegEx.Match(LLines[LFrom - 1],
+        '^(\s*)(object|inherited|inline)\s', [roIgnoreCase]);
+      if LHead.Success and ((LFrom = ALine) or
+         (LHead.Groups[1].Length < LIndent)) then
+        Break;
+      Dec(LFrom);
+    end;
+    if LFrom >= 1 then
+    begin
+      LRange.First := LFrom;
+      LRange.Last := Length(LLines);
+      for var LI := LFrom + 1 to Length(LLines) do
+        if TRegEx.IsMatch(LLines[LI - 1], '^' + StringOfChar(' ',
+          LHead.Groups[1].Length) + 'end\s*$', [roIgnoreCase]) then
+        begin
+          LRange.Last := LI;
+          Break;
+        end;
+      LRange.Text := Format('%d-%d', [LRange.First, LRange.Last]);
+      Exit(Format('the form object line %d belongs to:', [ALine]) + sLineBreak
+        + FileLinesOf(AWs, AFile, LRange, ALimit));
+    end;
+  end;
+  LRange.First := Max(1, ALine - 10);
+  LRange.Last := Min(Length(LLines), ALine + 20);
+  LRange.Text := Format('%d-%d', [LRange.First, LRange.Last]);
+  Result := Format('(line %d is in no routine and declares nothing: the '
+    + 'lines around it)', [ALine]) + sLineBreak + FileLinesOf(AWs, AFile,
+    LRange, ALimit);
+end;
+
 function ToolSource(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
 var
   LCands: TArray<TTarget>;
@@ -4663,7 +4761,13 @@ begin
      not RoutineHeaderAt(AWs, ArgFile(AWs, AArgs), ArgInt(AArgs, 'line', 0),
      LName, LHeadLine, LHeadCol)) then
     Exit(FileLinesOf(AWs, ArgFile(AWs, AArgs), LRange, LLimit));
-  LCands := ResolveOneOrOverloads(AWs, AArgs);
+  try
+    LCands := ResolveOneOrOverloads(AWs, AArgs);
+  except
+    on ENoRoutineAt do
+      Exit(LinesAround(AWs, ArgFile(AWs, AArgs), ArgInt(AArgs, 'line', 0),
+        LLimit));
+  end;
   // A routine of a library unit read interface-only: its body is read once
   // the unit is analyzed in full.
   if LPart <> 'decl' then
@@ -14272,10 +14376,44 @@ begin
   AWs.RaiseIfChanged;
 end;
 
+// `file` of `lint`: one unit, or several - a JSON list, or names joined by
+// commas or semicolons. An agent with 17 units to check sent 17 calls at
+// once; they ran one after another, the first paid the analysis and each
+// answer took 24-42 s to come back (the usage audit of 2026-11-12), where
+// one call over all of them takes what the first did.
+function LintFilesArg(AWs: TMcpWorkspace; AArgs: TJSONObject): TArray<string>;
+var
+  LV: TJSONValue;
+  LParts: TArray<string>;
+  LOne: TJSONObject;
+begin
+  Result := nil;
+  LV := AArgs.GetValue('file');
+  if LV = nil then
+    Exit;
+  if LV is TJSONArray then
+    for var LItem in TJSONArray(LV) do
+      LParts := LParts + [LItem.Value]
+  else
+    LParts := LV.Value.Split([',', ';', #10], TStringSplitOptions.ExcludeEmpty);
+  for var LPart in LParts do
+    if LPart.Trim <> '' then
+    begin
+      // Through ArgFile: its check of a JSON escape the caller did not mean.
+      LOne := TJSONObject.Create;
+      try
+        LOne.AddPair('file', LPart.Trim);
+        Result := Result + [ArgFile(AWs, LOne)];
+      finally
+        LOne.Free;
+      end;
+    end;
+end;
+
 function ToolLint(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
 var
-  LRules: TArray<string>;
-  LFile, LIn, LKey: string;
+  LRules, LAskedFiles: TArray<string>;
+  LFile, LIn, LKey, LNotHeld: string;
   LLimit, LShown, LDoubts, LN, LAsked: Integer;
   LUnused, LMove: Boolean;
   LFiles, LOthers: TList<string>;
@@ -14303,9 +14441,11 @@ begin
     LRules := LINT_RULES;
   LUnused := MatchText(LINT_UNUSED_USES, LRules);
   LMove := MatchText(LINT_USES_TO_IMPL, LRules);
+  LAskedFiles := LintFilesArg(AWs, AArgs);
+  // LFile: the one file asked about, for the answer's wording.
   LFile := '';
-  if ArgStr(AArgs, 'file') <> '' then
-    LFile := ArgFile(AWs, AArgs);
+  if Length(LAskedFiles) = 1 then
+    LFile := LAskedFiles[0];
   LIn := ArgStr(AArgs, 'in');
   LLimit := EnsureRange(ArgInt(AArgs, 'limit', 100), 0, 100000);
   LFiles := TList<string>.Create;
@@ -14328,20 +14468,28 @@ begin
         begin
           LKey := LA.Proj.ModelFile(LMid);
           if not SameText(ExtractFileExt(LKey), '.pas') or
-             not (AWs.IsOwnFile(LKey) or SameText(LKey, LFile)) or
+             not (AWs.IsOwnFile(LKey) or MatchText(LKey, LAskedFiles)) or
              not LSeen.TryAdd(LowerCase(LKey), True) then
             Continue;
-          if ((LFile <> '') and not SameText(LKey, LFile)) or
+          if ((LAskedFiles <> nil) and not MatchText(LKey, LAskedFiles)) or
              ((LIn <> '') and not InFilterMatches(AWs, LKey, LIn)) then
             LOthers.Add(LKey)
           else
             LFiles.Add(LKey);
         end;
       end;
-    if (LFile <> '') and (LFiles.Count = 0) then
-      raise EToolError.Create(AWs.RelPath(LFile) + ' is not a unit any '
-        + 'analysis holds - lint reads the `uses` of units; a program''s or '
-        + 'a package''s lists what it is made of');
+    // Each file asked about that no analysis holds is named; the others
+    // answer.
+    LNotHeld := '';
+    for var LAsk in LAskedFiles do
+      if not LSeen.ContainsKey(LowerCase(LAsk)) then
+        LNotHeld := LNotHeld + IfThen(LNotHeld <> '', ', ') + AWs.RelPath(LAsk);
+    if (LAskedFiles <> nil) and (LFiles.Count = 0) then
+      raise EToolError.Create(IfThen(Length(LAskedFiles) = 1,
+        AWs.RelPath(LAskedFiles[0]) + ' is not a unit', LNotHeld +
+        ' are not units')
+        + ' any analysis holds - lint reads the `uses` of units; a program''s '
+        + 'or a package''s lists what it is made of');
     for LL in LLints do
       LL.AskTree(LFiles.ToArray);
     for var LF in LFiles do
@@ -14405,6 +14553,8 @@ begin
     if (LShown < Length(LArr)) and (LLimit > 0) then
       LSb.AppendLine(Format('... %d more (raise `limit`, or narrow with '
         + '`file`, `in` or `rules`)', [Length(LArr) - LShown]));
+    if LNotHeld <> '' then
+      LSb.AppendLine('not a unit any analysis holds, not checked: ' + LNotHeld);
     Result := LSb.ToString.TrimRight;
   finally
     LByFile.Free;
@@ -20179,7 +20329,7 @@ const
     + '"inputSchema":{"type":"object","properties":{'
     + '"rules":{"type":"string","description":"Comma-separated: '
     + 'unused-uses, uses-to-implementation (default all)"},'
-    + '"file":{"type":"string","description":"Only this unit"},'
+    + '"file":{"type":"string","description":"Only this unit - or these, joined by commas: one call checks several units for the cost of one, where calls made at once wait for each other"},'
     + '"in":{"type":"string","description":"Only the units whose path '
     + 'relative to the group contains this or matches it as a wildcard '
     + '(client\\*, *Form.pas)"},'
@@ -21078,6 +21228,36 @@ end;
 // word before: the call answered unfiltered, and the agent took that for
 // the filtered answer (a field report: "the filters of `members` and `find`
 // are silently ignored").
+// `name` alone - no `file`, `line` or `column` it would be the identifier on
+// - is the name of a symbol: `source {"name":"TFoo.Bar"}` was refused with
+// "give `symbol`" 7 times and `find {"name":...}` 4 times in the sessions of
+// 2026-09-25..11-12, a turn lost each. Taken as `symbol` (`query` for find).
+procedure NameAsSymbol(const AName: string; AArgs: TJSONObject);
+var
+  LProps: TJSONObject;
+  LPair: TJSONPair;
+  LTo: string;
+begin
+  if (AArgs = nil) or not GToolProps.TryGetValue(AName, LProps) or
+     not (AArgs.GetValue('name') is TJSONString) then
+    Exit;
+  if LProps.GetValue('symbol') <> nil then
+    LTo := 'symbol'
+  else if LProps.GetValue('query') <> nil then
+    LTo := 'query'
+  else
+    Exit;
+  for var LKey in [LTo, 'file', 'line', 'column', 'targets'] do
+    if AArgs.GetValue(LKey) <> nil then
+      Exit;
+  LPair := AArgs.RemovePair('name');
+  try
+    AArgs.AddPair(LTo, LPair.JsonValue.Value);
+  finally
+    LPair.Free;
+  end;
+end;
+
 procedure CheckArguments(const AName: string; AArgs: TJSONObject);
 var
   LProps: TJSONObject;
@@ -21085,6 +21265,7 @@ var
   LKnown, LGuess, LValue: string;
   LOk: Boolean;
 begin
+  NameAsSymbol(AName, AArgs);
   if (AArgs = nil) or not GToolProps.TryGetValue(AName, LProps) then
     Exit;
   LKnown := '';

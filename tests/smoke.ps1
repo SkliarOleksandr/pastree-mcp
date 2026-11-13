@@ -308,7 +308,14 @@ Check 'args none taken' (Block $b 'status {"verbose"') @('`status` takes no argu
 # `outline` for it, which takes no line - and is told where to ask).
 Check 'source around a line' (Block $b 'source {"file":"AppB/uAppB.pas", "line":30}') @('RunB (procedure) implemented at AppB\uAppB.pas:26-32', '32  end;')
 Check 'source around a method line' (Block $b 'source {"file":"AppA/uMembers.pas", "line":92}') @('TDerived.Guarded (procedure) implemented at AppA\uMembers.pas:90-93')
-Check 'source around no routine' (Block $b 'source {"file":"AppB/uAppB.pas", "line":1}') @('line 1 of AppB\uAppB.pas is in no routine - give `name`')
+# `file` + `line` alone in no routine: the declaration the line writes, the
+# object of a form file, else the lines around it - it was refused.
+Check 'source around no routine' (Block $b 'source {"file":"AppB/uAppB.pas", "line":1}') @('(line 1 is in no routine and declares nothing: the lines around it)', 'AppB\uAppB.pas lines 1-21', '1  unit uAppB;') @('give `name`')
+Check 'source declaration line' (Block $b 'source {"file":"Shared/uShapes.pas", "line":30}') @('TSquare (class) declared at Shared\uShapes.pas:30-36') @('in no routine', 'lines around')
+Check 'source form line' (Block $b 'source {"file":"AppF/uChildForm.dfm", "line":10}') @('the form object line 10 belongs to:', 'AppF\uChildForm.dfm lines 7-15', '7    object chkConfirm: TCheckBox', '15    end') @('6  ', '16  ')
+# `name` alone is a symbol's name (`query` for find): refused before.
+Check 'source name alone' (Block $b 'source {"name":"RunB"}') @('RunB (procedure) implemented at AppB\uAppB.pas:26-32') @('give `symbol`')
+Check 'find name alone' (Block $b 'find {"name":"TSquare"}') @('Shared\uShapes.pas:30  TSquare (class)') @('takes no argument')
 Check 'outline line' (Block $b 'outline {"file":"AppB/uAppB.pas", "line":30}') @('`outline` takes no argument `line` (the routine around a line: `source` with `file` + `line`)')
 Check 'members match alternatives' (Block $b 'members {"symbol":"TDerived", "match":"Guard|Count"') @('named like *guard* or *count*', '33  procedure Guarded; override;', '38  property Count;') @('procedure Add(')
 # "AppA\tuAppA.pas" in JSON is a tab, not a backslash: say so, not "invalid characters in path".
@@ -704,6 +711,11 @@ Check 'lint together' (Block $b 'lint {"file":"AppB/uLintBase.pas"}') @('AppB\uL
 # among both, so the one the index does not bind to is not said unused bare.
 # uLintDef's System.Classes, used only in the implementation, is listed in
 # the interface under FIXTURE_A: the row names the block it is to move with.
+# Several units in one call - joined by commas or semicolons, or a JSON list;
+# one no analysis holds is named and the others answer.
+Check 'lint several files' (Block $b 'lint {"file":"AppB/uLint.pas, AppF/uMainForm.pas; AppB/uNope.pas"') @('4 findings in 1 file of 2 own units: unused-uses 4', 'AppB\uLint.pas:', 'not a unit any analysis holds, not checked: AppB\uNope.pas') @('AppF\uMainForm.pas:')
+Check 'lint files list' (Block $b 'lint {"file":["AppB/uLint.pas","Shared/uShapes.pas"]') @('of 2 own units', 'AppB\uLint.pas:')
+Check 'lint files none held' (Block $b 'lint {"file":"AppB/uNope.pas,AppB/uNope2.pas"}') @('AppB\uNope.pas, AppB\uNope2.pas are not units any analysis holds')
 Check 'lint conditional move' (Block $b 'lint {"file":"AppB/uLintDef.pas"}') @('AppB\uLintDef.pas:13:3: uses-to-implementation System.Classes - used only in the implementation (first at line 28, in LintDef); it is inside {$IFDEF FIXTURE_A} at line 11 - move it with its condition')
 Check 'lint other defines' (Block $b 'lint {"file":"AppB/uLintLast.pas"}') @('AppB\uLintLast.pas:11:3: unused-uses uLintOnce - no name of it is used here; but removing it leaves uLintOnce (initialization) out of AppB', 'AppB\uLintLast.pas:12:3: unused-uses uLintTwinA - no name of it is used here; but it declares an overload of `LintTwin`, called at AppB\uLintLast.pas:19 - removed, the call may take another overload')
 Check 'lint nothing' (Block $b 'lint {"file":"Shared/uShapes.pas"}') @('no findings (unused-uses, uses-to-implementation) in Shared\uShapes.pas')
