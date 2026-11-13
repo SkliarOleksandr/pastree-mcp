@@ -155,6 +155,9 @@ callers {"symbol":"TShapeBox.SetItem"}
 callers {"symbol":"TShapeBox.Changed"}
 callers {"symbol":"TBigBox.Changed"}
 callers {"symbol":"NeverCalled"}
+callers {"symbol":"TPlainBox.Reset"}
+callers {"symbol":"TPlainOther.Reset"}
+impact {"symbol":"TPlainBox.Reset"}
 callers {"symbol":"TCircle"}
 callers {"symbol":"OrphanRoutine"}
 callers {"symbol":"TfrmMain.btnSaveClick"}

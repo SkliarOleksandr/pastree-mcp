@@ -8841,7 +8841,7 @@ var
   LSrc: TCallSource;
   LFamily: TArray<TPasOverrideHit>;
   LByClass: TDictionary<string, Integer>;
-  LReaches: TDictionary<string, Boolean>;
+  LReaches, LBelowKeys: TDictionary<string, Boolean>;
   LName, LNameLower: string;
   LId: TSymId;
 
@@ -8874,6 +8874,7 @@ begin
   LBelow := TList<TSymId>.Create;
   LByClass := TDictionary<string, Integer>.Create;
   LReaches := TDictionary<string, Boolean>.Create;
+  LBelowKeys := TDictionary<string, Boolean>.Create;
   try
     AddSource(LRMid, LRSym, csSelf);
     LVirtual := False;
@@ -8906,6 +8907,7 @@ begin
             LId.Mid := LFamily[LI].UnitId;
             LId.Sym := LFamily[LI].Sym;
             LBelow.Add(LId);
+            LBelowKeys.AddOrSetValue(Key(LId.Mid, LId.Sym), True);
             if ANode.Level = 0 then
               NoteBelow(Format('%s (%s:%d)', [LFamily[LI].TypeName,
                 FWs.RelPath(LFamily[LI].Hit.FilePath), LFamily[LI].Hit.Line]));
@@ -8928,27 +8930,36 @@ begin
             LK := AA.Proj.CanonTypeX(AA.Proj.AncestorOfX(LK));
           end;
         end;
-      end
-      else if LHead = rhConstructor then
-        // A constructor that is not virtual: `inherited;` in a descendant's
-        // constructor of the same name.
-        for var LD in QDescendants(FWs, AA, LClass.UnitId, LClass.Sym) do
+      end;
+      // A descendant's method of the same name that does not override it -
+      // a static method hiding it, a constructor that is not virtual, a
+      // `reintroduce` - runs it by a bare `inherited;` as an override does.
+      // Only constructors were looked at before 0.51.3: four forms of the
+      // client group redeclare a base form's static FormActivate and call
+      // `inherited;`, and `callers` answered "no calls" (the phase 6 rerun,
+      // F6r.1). SearchBareInherited keeps a call only when PasTree binds it to
+      // this routine, so a namesake that does not reach it adds no row.
+      for var LD in QDescendants(FWs, AA, LClass.UnitId, LClass.Sym) do
+      begin
+        if LD.Kind <> pdkDescendant then
+          Continue;
+        LIM := AA.Proj.Model(LD.UnitId);
+        LTSym := LIM.FindLocal(LIM.Symbols[LD.Sym].MemberScope, LNameLower);
+        while LTSym <> NIL_SYM do
         begin
-          if LD.Kind <> pdkDescendant then
-            Continue;
-          LIM := AA.Proj.Model(LD.UnitId);
-          LTSym := LIM.FindLocal(LIM.Symbols[LD.Sym].MemberScope, LNameLower);
-          while LTSym <> NIL_SYM do
+          if LIM.Symbols[LTSym].Kind = skRoutine then
           begin
-            if LIM.RoutineHead(LTSym) = rhConstructor then
+            LId.Mid := LD.UnitId;
+            LId.Sym := LTSym;
+            if not LBelowKeys.ContainsKey(Key(LId.Mid, LId.Sym)) then
             begin
-              LId.Mid := LD.UnitId;
-              LId.Sym := LTSym;
+              LBelowKeys.Add(Key(LId.Mid, LId.Sym), True);
               LBelow.Add(LId);
             end;
-            LTSym := LIM.Symbols[LTSym].NextOverload;
           end;
+          LTSym := LIM.Symbols[LTSym].NextOverload;
         end;
+      end;
       // The interface methods it - or a virtual method it overrides - runs
       // for: same-named methods of an interface a class lists, when the
       // member that name finds from that class is one of them. Matched by
@@ -8989,6 +9000,7 @@ begin
       SearchBareInherited(AA, ANode, LB.Mid, LB.Sym);
     SearchFormBindings(AA, ANode);
   finally
+    LBelowKeys.Free;
     LReaches.Free;
     LByClass.Free;
     LBelow.Free;

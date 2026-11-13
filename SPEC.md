@@ -453,7 +453,8 @@ and to `<project>-pastree-mcp.log` beside the project.
    hook") does that here: a search for a name over Pascal sources, or a
    `sed` line range of a Pascal file, is denied once with the call that
    answers it, then let through when repeated - a text search is still the
-   agent's to make; at most once per 10 minutes and not within 5 of a
+   agent's to make; at most once per 10 minutes per agent (a subagent's
+   `agent_id` its own, 0.51.3) and not within 5 of a
    pastree call. Denied rather than added beside the result
    (`additionalContext`): an agent holding the grep's answer has no reason
    to ask again. Whether it brings the tools arm up to the hint arm is the
@@ -656,9 +657,14 @@ are here so a new tool is not the one that breaks them.
    the chain). What it does not see, and says where it can: an event handler
    a `.dfm` binds (9.5), a call through a method pointer (the
    row that assigns it is there, `[not a call]`), a function passed as a
-   callback (taken for a call), a bare `inherited;` in a static method
-   hiding another that is not a constructor, an interface method a
+   callback (taken for a call), an interface method a
    resolution clause maps to a differently named method in another unit.
+   A bare `inherited;` in a descendant's method hiding it - static, or
+   `reintroduce` - was in that list until 0.51.3, and the answer said
+   nothing of it: "no calls" for a base form's FormActivate that four
+   descendants run that way (the phase 6 rerun of 2026-11-13, both arms
+   found them by grep). Every same-named method below the class is now read
+   for one, as overrides and constructors were.
 
    `callees` - done in 0.7.0, section 3. No PasTree change: the maps the
    completion engine's `CalleeSyms` reads are the model's own. Measured on the

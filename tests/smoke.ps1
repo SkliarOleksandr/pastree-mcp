@@ -413,6 +413,11 @@ Check 'callers setter' (Block $b 'callers {"symbol":"TShapeBox.SetItem"}') @('al
 Check 'callers inherited' (Block $b 'callers {"symbol":"TShapeBox.Changed"}') @('2 calls in 2 routines', "  TBigBox.Changed`n    59  inherited;")
 Check 'callers override' (Block $b 'callers {"symbol":"TBigBox.Changed"}') @('all through TShapeBox.Changed (virtual)', "  TShapeBox.SetItem`n    44  Changed;") @('59  ')
 Check 'callers none' (Block $b 'callers {"symbol":"NeverCalled"}') @('callers of NeverCalled (AppB\uBoxes.pas:31) - none found')
+# A static method a descendant hides and calls by a bare inherited; (F6r.1:
+# "no calls" before 0.51.3); a hiding namesake that does not call it adds none.
+Check 'callers hidden static' (Block $b 'callers {"symbol":"TPlainBox.Reset"}') @('callers of TPlainBox.Reset (AppB\uBoxes.pas:146) - 1 call in 1 routine', "  TPlainChild.Reset`n    163  inherited;")
+Check 'callers hiding none' (Block $b 'callers {"symbol":"TPlainOther.Reset"}') @('callers of TPlainOther.Reset (AppB\uBoxes.pas:154) - none found')
+Check 'impact hidden static' (Block $b 'impact {"symbol":"TPlainBox.Reset"}') @('members to build and test: AppB', "callers - 1 call in 1 routine`nAppB\uBoxes.pas`n  TPlainChild.Reset`n    163  inherited;")
 Check 'callers not a routine' (Block $b 'callers {"symbol":"TCircle"}') @('TCircle is a class - `callers` takes a routine')
 Check 'callers outside the index' (Block $b 'callers {"symbol":"OrphanRoutine"}') @('no declaration named `OrphanRoutine` among the ', 'a local or a parameter is addressed by', 'AppB\uOrphan.pas:8  procedure OrphanRoutine;')
 # A handler's form bindings are rows under the component whose event runs it:
@@ -772,7 +777,7 @@ Check 'metrics cycles count only' (Block $b 'metrics {"metric":"cycles","limit":
 # refused by name and by value.
 Check 'format none' (Block $b 'format {"file":"Shared/uShapes.pas"}') @('Shared\uShapes.pas: already formatted - no edits') @(' -> ')
 Check 'format range options' (Block $b 'format {"unit":"uShapes","lines":"42-49"') @('Shared\uShapes.pas: 9 edits on 7 lines of 78 - 2 indentation and line breaks, 7 case (lines 42-49)', 'options: IndentStep 4, ReservedWordCase upper', '  42:27-42:33 -> "STRING"  |FUNCTION TShape.Describe: STRING;', '  48:6-49:3 -> "\r\n    "  |    INHERITED Create;') @('49:20-50:3', 'TCircle.Area')
-Check 'format count only' (Block $b 'format {"file":"AppB/uBoxes.pas","limit":0}') @('AppB\uBoxes.pas: 3 edits on 1 line of 139 - 3 indentation and line breaks', '(limit 0: 3 not listed)') @(' -> ')
+Check 'format count only' (Block $b 'format {"file":"AppB/uBoxes.pas","limit":0}') @('AppB\uBoxes.pas: 3 edits on 1 line of 170 - 3 indentation and line breaks', '(limit 0: 3 not listed)') @(' -> ')
 Check 'format include' (Block $b 'format {"file":"Shared/Flags.inc"') @('Shared\Flags.inc: 6 edits on 6 lines of 9 - 6 case', '(an include file: laid out as Shared\uFlags.pas reads it)', '  7:1-7:9 -> "{$endif}"  |{$endif}')
 Check 'format unknown option' (Block $b 'format {"file":"Shared/uShapes.pas","options":{"IndentSize"') @('`options` has no field `IndentSize` (did you mean `IndentStep`?) - the fields, with their defaults: IndentStep 2, ', 'ReservedWordCase lower (lower / upper / keep)')
 Check 'format bad value' (Block $b 'format {"file":"Shared/uShapes.pas","options":{"ReservedWordCase":"mixed"') @('`options.ReservedWordCase` is lower / upper / keep (not `mixed`)')
@@ -1684,8 +1689,9 @@ finally {
 # its own per run, so the state file of another run does not decide.
 Write-Host '--- grep hook'
 $hookSession = 'smoke-' + [Guid]::NewGuid().ToString('N')
-function Hook([string]$Suffix, [string]$Tool, [string]$InputJson, [string]$Cwd = $fixture) {
-    $json = '{"session_id":"' + $hookSession + $Suffix + '","cwd":"' + $Cwd.Replace('\', '\\') + '","tool_name":"' + $Tool + '","tool_input":' + $InputJson + '}'
+function Hook([string]$Suffix, [string]$Tool, [string]$InputJson, [string]$Cwd = $fixture, [string]$Agent = '') {
+    $agentPair = if ($Agent) { '"agent_id":"' + $Agent + '",' } else { '' }
+    $json = '{"session_id":"' + $hookSession + $Suffix + '",' + $agentPair + '"cwd":"' + $Cwd.Replace('\', '\\') + '","tool_name":"' + $Tool + '","tool_input":' + $InputJson + '}'
     $out = $json | & $Exe --hook
     if ($LASTEXITCODE -ne 0) { Write-Host "FAIL hook exited with $LASTEXITCODE"; $script:failures++ }
     if (-not $out) { return '' }
@@ -1695,6 +1701,13 @@ function Hook([string]$Suffix, [string]$Tool, [string]$InputJson, [string]$Cwd =
 $deny = 'deny: '
 Check 'hook grep name' (Hook 'a' 'Grep' '{"pattern":"TCircle"}') @($deny, 'pastree index: `TCircle` looks like a Pascal name', '`references` {"symbol":"TCircle"}', 'Repeat the command.')
 Check 'hook grep again' (Hook 'a' 'Grep' '{"pattern":"TCircle"}') @() @($deny)
+# A subagent's call carries its parent's session_id and its own agent_id: each
+# agent gets its note, and one agent's pastree call does not silence another.
+Check 'hook subagent own note' (Hook 'a' 'Grep' '{"pattern":"TCircle"}' $fixture 'ag1') @($deny, '`TCircle`')
+Check 'hook subagent again' (Hook 'a' 'Grep' '{"pattern":"TCircle"}' $fixture 'ag1') @() @($deny)
+Check 'hook subagent pastree used' (Hook 'a' 'mcp__pastree__find' '{"query":"TCircle"}' $fixture 'ag2') @() @($deny)
+Check 'hook subagent after pastree' (Hook 'a' 'Grep' '{"pattern":"TCircle"}' $fixture 'ag2') @() @($deny)
+Check 'hook other subagent' (Hook 'a' 'Grep' '{"pattern":"TCircle"}' $fixture 'ag3') @($deny, '`TCircle`')
 # Not a Delphi project's directory: a hook installed for every repository
 # says nothing there.
 Check 'hook not delphi' (Hook 'g' 'Grep' '{"pattern":"TCircle"}' ([IO.Path]::GetTempPath())) @() @($deny)

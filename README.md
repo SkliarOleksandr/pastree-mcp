@@ -231,8 +231,10 @@ one `targets` entry per range when sed reads several). The same command run agai
 a search for a comment or a string is the agent's to make. At most one note
 per 10 minutes, and none within 5 minutes of a pastree call - the agent
 knows the tools then. About 15 ms a call; it reads no project and writes
-no log, only a small state file per session under
-`%TEMP%\pastree-mcp\hook`. Any failure lets the call through.
+no log, only a small state file per agent under
+`%TEMP%\pastree-mcp\hook` - the session's, and each subagent's of its own
+(its `agent_id`), so the agents of one session do not share a note or the
+5 minutes. Any failure lets the call through.
 
 ### Options
 

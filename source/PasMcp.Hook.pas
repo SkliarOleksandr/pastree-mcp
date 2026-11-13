@@ -663,12 +663,16 @@ begin
   until False;
 end;
 
-function StateFile(const ASession: string): string;
+// One state per agent: Claude Code gives a subagent's call its parent's
+// `session_id` and adds `agent_id`. Keyed by the session alone, the subagents
+// of a session (Explore, a workflow's agents) shared one note per 10 minutes,
+// and one agent's pastree call silenced the hook for all of them.
+function StateFile(const ASession, AAgent: string): string;
 var
   LName: string;
 begin
   LName := '';
-  for var LC in ASession do
+  for var LC in ASession + IfThen(AAgent <> '', '-' + AAgent) do
     if LC.IsLetterOrDigit or (LC = '-') then
       LName := LName + LC;
   if LName = '' then
@@ -791,7 +795,7 @@ begin
         ExitProcess(0);
       LObj := TJSONObject(LRoot);
       LTool := Str(LObj, 'tool_name');
-      LState := StateFile(Str(LObj, 'session_id'));
+      LState := StateFile(Str(LObj, 'session_id'), Str(LObj, 'agent_id'));
       LNow := DateTimeToUnix(Now, False);
       ReadState(LState, LNoted, LUsed);
       if LTool.StartsWith('mcp__') and ContainsText(LTool, 'pastree') then

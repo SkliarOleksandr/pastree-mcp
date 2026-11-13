@@ -136,4 +136,35 @@ begin
   inherited AssignTo(Dest);
 end;
 
+// A static method a descendant hides and calls by a bare `inherited;`: no
+// code names TPlainBox.Reset, yet TPlainChild.Reset runs it (F6r.1 - a base
+// form's FormActivate redeclared by its descendants). TPlainOther hides it
+// without calling it.
+type
+  TPlainBox = class
+  public
+    procedure Reset;
+  end;
+  TPlainChild = class(TPlainBox)
+  public
+    procedure Reset;
+  end;
+  TPlainOther = class(TPlainBox)
+  public
+    procedure Reset;
+  end;
+
+procedure TPlainBox.Reset;
+begin
+end;
+
+procedure TPlainChild.Reset;
+begin
+  inherited;
+end;
+
+procedure TPlainOther.Reset;
+begin
+end;
+
 end.
