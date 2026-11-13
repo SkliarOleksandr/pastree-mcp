@@ -513,6 +513,8 @@ type
 function RunProcess(const AExe, AArgs, ADir, AEnvBlock: string;
   ATimeoutMs: Cardinal; const ATick: TProc<Int64>;
   ACancel: TBuildCancel): TRunOutcome;
+const
+  PIPE_BYTES = 1 shl 20;
 var
   LSA: TSecurityAttributes;
   LReadPipe, LWritePipe, LNul, LJob: THandle;
@@ -527,8 +529,11 @@ var
   LNextTick: Int64;
   LDone: Boolean;
 
-  procedure Drain;
+  // True when it read anything: the child is writing, and the next wait is
+  // short.
+  function Drain: Boolean;
   begin
+    Result := False;
     while PeekNamedPipe(LReadPipe, nil, 0, nil, @LAvail, nil) and (LAvail > 0)
     do
     begin
@@ -537,6 +542,7 @@ var
       if not ReadFile(LReadPipe, LBuf[0], LAvail, LRead, nil) or (LRead = 0) then
         Break;
       LOut.WriteBuffer(LBuf[0], LRead);
+      Result := True;
     end;
   end;
 
@@ -550,7 +556,11 @@ begin
   LSA.nLength := SizeOf(LSA);
   LSA.lpSecurityDescriptor := nil;
   LSA.bInheritHandle := True;
-  if not CreatePipe(LReadPipe, LWritePipe, @LSA, 0) then
+  // A pipe of the default size (a few KB) blocks the child on every fill,
+  // and it then waited out the 200 ms wait below: `git ls-files` of the
+  // client group (138 KB) took 3.6 s, 0.15 s in a shell - the time of every
+  // `find` that matched nothing (the search outside the index).
+  if not CreatePipe(LReadPipe, LWritePipe, @LSA, PIPE_BYTES) then
   begin
     Result.Error := 'cannot create a pipe: ' + SysErrorMessage(GetLastError);
     Exit;
@@ -605,8 +615,7 @@ begin
     LDone := False;
     while not LDone do
     begin
-      Drain;
-      case WaitForSingleObject(LPI.hProcess, 200) of
+      case WaitForSingleObject(LPI.hProcess, IfThen(Drain, 5, 200)) of
         WAIT_OBJECT_0:
           LDone := True;
         WAIT_TIMEOUT:

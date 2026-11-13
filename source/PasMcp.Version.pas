@@ -16,7 +16,7 @@ unit PasMcp.Version;
 interface
 
 const
-  PasTreeMcpVersion = '0.51.0';
+  PasTreeMcpVersion = '0.51.1';
   // 0.181.0: TPasWorkspace.EnsureFiles, which lint makes the library units
   // a removal's answer needs full through, in one query (a compile error
   // without it).
