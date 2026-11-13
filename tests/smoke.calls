@@ -133,6 +133,9 @@ references {"symbol":"TfraName.Title"}
 references {"symbol":"TfraName.Note"}
 references {"symbol":"TNameStyle.Accent"}
 references {"symbol":"TNameStyle.Accent","limit":1}
+references {"symbol":"NoSuchThing"}
+references {"targets":["TCircle","TCircle.FRadius","TfrmMain.btnSaveClick","TShape.Area","uShapes","TNameStyle.Accent"]}
+references {"targets":["TfrmMain.NeverBound","NoSuchThing"]}
 references {"symbol":"TNameTag.Weight"}
 references {"symbol":"TNameStyle.Shade"}
 impact {"symbols":["TfraName.Title"]}

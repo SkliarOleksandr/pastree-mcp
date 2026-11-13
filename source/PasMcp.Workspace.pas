@@ -231,6 +231,12 @@ type
     FCallEager: Boolean;
     FEscalationPercent: Integer;
     FChangePending: Boolean;
+    // UnindexedSources' answer, kept for the rest of the call: `references`
+    // with 8 targets listed the files outside the index 8 times (`git
+    // ls-files` and every model's file names each time). Dropped when a
+    // call starts and whenever the analysis changes (ForgetUnindexed).
+    FUnindexed: TArray<string>;
+    FUnindexedCut, FUnindexedKept: Boolean;
     FPlatformOverride: string;
     FConfig: string;
     FPolicy: TMcpGroupPolicy;
@@ -274,6 +280,7 @@ type
     // Proj and Nav set to the workspace's; a project the workspace replaced
     // (a rebuild, an escalation) demoted and stamped as a build's is.
     procedure SyncAnalysis(AAnalysis: TMcpAnalysis);
+    procedure ForgetUnindexed;
     procedure RecordStamps(AAnalysis: TMcpAnalysis);
     // After a module run: stamps the own files it took in that have none yet
     // - a unit a changed uses clause added, an include a changed unit now
@@ -1034,6 +1041,11 @@ var
   end;
 
 begin
+  if FUnindexedKept then
+  begin
+    ACut := FUnindexedCut;
+    Exit(FUnindexed);
+  end;
   LIndexed := TDictionary<string, Boolean>.Create;
   LDone := TDictionary<string, Boolean>.Create;
   LList := TList<string>.Create;
@@ -1080,6 +1092,9 @@ begin
       end;
     ACut := LCut;
     Result := LList.ToArray;
+    FUnindexed := Result;
+    FUnindexedCut := LCut;
+    FUnindexedKept := True;
   finally
     LList.Free;
     LDone.Free;
@@ -1884,10 +1899,19 @@ begin
   AAnalysis.WS.Options := LOpt;
 end;
 
+procedure TMcpWorkspace.ForgetUnindexed;
+begin
+  FUnindexed := nil;
+  FUnindexedCut := False;
+  FUnindexedKept := False;
+end;
+
 procedure TMcpWorkspace.SyncAnalysis(AAnalysis: TMcpAnalysis);
 begin
   if AAnalysis.WS = nil then
     Exit;
+  if AAnalysis.Proj <> AAnalysis.WS.Project then
+    ForgetUnindexed;
   if AAnalysis.Proj <> AAnalysis.WS.Project then
   begin
     // Rebuilt or escalated by a query: as after a build - the library text
@@ -1912,6 +1936,7 @@ begin
   FCallCancelled := ACancelled;
   FCallPartial := False;
   FCallEager := False;
+  ForgetUnindexed;
   for var LA in FAnalyses do
     if LA.WS <> nil then
       ApplyQueryOptions(LA);
@@ -1957,6 +1982,8 @@ begin
   end;
   if not LStatus.Changed then
     Exit;
+  // A unit taken in or made full is in the index now.
+  ForgetUnindexed;
   SyncAnalysis(AAnalysis);
   if ADefer then
     FChangePending := True
@@ -1988,6 +2015,7 @@ end;
 
 procedure TMcpWorkspace.ClearAnalyses;
 begin
+  ForgetUnindexed;
   FAnalyses.Clear;
   FOwner.Clear;
 end;
@@ -2251,6 +2279,8 @@ var
   LRunProj: TPasSemaProject;
 begin
   AReport := '';
+  // A file re-read may name others (a `uses` entry, an include).
+  ForgetUnindexed;
   if (FLoadError <> '') or (FAnalyses.Count = 0) then
     Exit;
   LConfig := ChangedConfigFiles;

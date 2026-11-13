@@ -371,6 +371,22 @@ Check 'references form sub-property' (Block $b 'references {"symbol":"TNameStyle
 # counted: form lines filling the rows by file name hid the code a rename
 # changes.
 Check 'references form cut' (Block $b 'references {"symbol":"TNameStyle.Accent","limit":1}') @("AppF\uFrame.pas`n  TfraName.btnClearClick`n    70  FStyle.Accent := 0;`n... 2 more (raise ``limit``)", '(cut: code rows come first - 2 of the rows left out are form lines)') @('uChildForm.dfm')
+# Several targets in one call: each block is the answer the target gets alone
+# - header, rows, notes (the files outside the index too, listed once for the
+# call since 0.51.2) - and a target with none, or no such name, answers in
+# its place.
+foreach ($multi in @('references {"targets":["TCircle","TCircle.FRadius"', 'references {"targets":["TfrmMain.NeverBound"')) {
+    $parts = (Block $b $multi) -split '(?m)^=== \d+ of \d+: (.*)\n'
+    for ($i = 1; $i -lt $parts.Count; $i += 2) {
+        $alone = Block $b ('references {"symbol":"' + $parts[$i] + '"}')
+        if ($parts[$i + 1].Trim() -ne $alone.Trim()) {
+            Write-Host "FAIL [references targets as alone$script:mode] $($parts[$i]):`n$($parts[$i + 1])`n--- alone:`n$alone"
+            $script:failures++
+        }
+    }
+    if ($parts.Count -lt 5) { Write-Host "FAIL [references targets as alone$script:mode] $($parts.Count) parts"; $script:failures++ }
+}
+Check 'references targets none' (Block $b 'references {"targets":["TfrmMain.NeverBound"') @("=== 1 of 2: TfrmMain.NeverBound`nTfrmMain.NeverBound (procedure) declared at AppF\uMainForm.pas:23 - 0 references in 0 files; no form file names it", "=== 2 of 2: NoSuchThing`nno declaration named ``NoSuchThing``")
 Check 'references form item property' (Block $b 'references {"symbol":"TNameTag.Weight"}') @('1 references in 1 files, 1 of them in form files', "AppF\uChildForm.dfm`n  fraName1`n    36  Weight = 3")
 Check 'references form sub-property none' (Block $b 'references {"symbol":"TNameStyle.Shade"}') @('0 references in 0 files; no form file sets it')
 Check 'impact form property' (Block $b 'impact {"symbols":["TfraName.Title"]}') @('uses - none in code, 1 form line', "  fraName1`n    32  Title = 'Child'")
@@ -1530,6 +1546,10 @@ try {
     # mistake in it said there, and its removal drops the project again.
     $r = Rpc 60 'tools/call' '{"name":"callers","arguments":{"symbol":"TotalArea"}}'
     Check 'outside uses note' (ToolText $r) @('- 1 call in 1 routine', "not counted above - 1 file(s) outside the index use uShapes and write ``TotalArea`` (a word match, not resolved):`n  Tests\AppU.dpr:14  if TotalArea([TCircle.Create(2)]) <= 0 then", 'to index them with the group: "also": ["Tests/AppU.dpr"] in pastree-mcp.json beside Fixture.groupproj - read on the next call')
+    # Several targets: the files outside the index are listed once for the
+    # call, and each target still gets its own note.
+    $r = Rpc 67 'tools/call' '{"name":"references","arguments":{"targets":["TotalArea","TCircle"]}}'
+    Check 'outside uses note, targets' (ToolText $r) @("=== 1 of 2: TotalArea`n", "not counted above - 1 file(s) outside the index use uShapes and write ``TotalArea`` (a word match, not resolved):`n  Tests\AppU.dpr:14  if TotalArea", "=== 2 of 2: TCircle`n", "not counted above - 1 file(s) outside the index use uShapes and write ``TCircle`` (a word match, not resolved):`n  Tests\AppU.dpr:14  if TotalArea([TCircle.Create(2)])")
     $alsoJson = Join-Path $copy 'pastree-mcp.json'
     [IO.File]::WriteAllText($alsoJson, '{"also": ["Tests/*.dpr", "Nowhere/*.dpr"], "like": "AppX"}', $utf8)
     $r = Rpc 61 'tools/call' '{"name":"callers","arguments":{"symbol":"TotalArea"}}'
@@ -1538,6 +1558,10 @@ try {
     # `status` answers as the index is; a call reads the file.
     $r = Rpc 62 'tools/call' '{"name":"find","arguments":{"query":"TotalArea"}}'
     Check 'also file rewritten' (ToolText $r) @('the workspace was reloaded - pastree-mcp.json adds 1 project(s): AppU)') @('matches no')
+    # AppU indexed now: the list of files outside the index is not the one
+    # the call before last kept.
+    $r = Rpc 68 'tools/call' '{"name":"references","arguments":{"targets":["TotalArea","TCircle"]}}'
+    Check 'outside uses note gone, targets' (ToolText $r) @("=== 1 of 2: TotalArea`n", "=== 2 of 2: TCircle`n", 'Tests\AppU.dpr') @('not counted above')
     $r = Rpc 63 'tools/call' '{"name":"status","arguments":{}}'
     Check 'also file status' (ToolText $r) @('pastree-mcp.json: "also" [Tests/AppU.dpr] - 1 project(s) added, "like" AppA', 'member AppU: Win32 (bare project file), 0 listed files, analysis 0 - not in the group, added by pastree-mcp.json (Tests\AppU.dpr), the settings of AppA') @('matches no')
     # `like` names a .dproj `also` adds (pastree-lsp's IDE plugin tests take

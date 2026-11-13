@@ -616,6 +616,15 @@ are here so a new tool is not the one that breaks them.
    two, `scope_at` none. With it, `symbol` + `file` and no `line` narrows
    the name to that file (it addressed the unit), `outline` takes `unit`,
    and `lint`'s `rules` a JSON list written as a string.
+
+   Each target is still a call of its own over the index, not one pass for
+   all of them: the reference walk is a few tens of ms per target on the
+   client group, and an answer per target stays the one it gets alone.
+   What a target repeated for nothing is the call's own work - the list of
+   files outside the index (`git ls-files` and every model's file names),
+   now made once per call (0.51.2) and dropped when the analysis changes.
+   `references` with 8 targets on the client group: 29 s on 0.51.0, 4.0 s
+   on 0.51.1 (the pipe fix), 1.7 s.
 7. **`overview`** - the group in one answer: members with platform, own
    units by directory with line counts, the largest units and classes. The
    first call in an unfamiliar group, instead of a directory listing and a
