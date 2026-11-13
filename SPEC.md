@@ -461,11 +461,12 @@ and to `<project>-pastree-mcp.log` beside the project.
    task its own `claude -p` session): the agent with the tools and no word
    of them called pastree in 12 of 12 runs without the hook, and every
    answer of both arms was right; the hook noted 2 greps in 12 runs, both
-   followed by a pastree call. The 5-in-12 did not come back - with a newer
-   model, a main session instead of a workflow's subagent, and the server's
-   instructions rewritten since, not told apart by that run (10.4). The
-   hook stays for the agents that still start with grep: subagents, other
-   models.
+   followed by a pastree call. Run again as subagents of one session (0.52.0),
+   the same: 12 of 12 called it, every answer right. The 5-in-12 did not
+   come back, and not for the session kind: on the 0.23.2 server the same
+   model called it in 10 of 12 - mostly the model, then, the server's text
+   since the rest (10.4). The hook stays for an agent that still starts
+   with grep: another model, a client other than Claude Code's.
 3. **Tool descriptions.** They are what the model decides by; wording them is
    empirical. Adjust after watching real sessions.
 4. **Re-demotion.** Library units hydrated by queries stay hydrated until the
@@ -1264,8 +1265,8 @@ gap between the answers and the truth.
    from - a plugin is the files of a git repository, the exe is built
    locally (a release binary in the plugin, or the exe on `PATH`).
    The hook is measured (8.2, 2026-11-13): a main session on today's model
-   calls the index without it, so the plugin's case is the one-step setup,
-   not the hook - and a subagent, which the run did not measure.
+   calls the index without it, and so does a subagent, so the plugin's case
+   is the one-step setup, not the hook.
 
 `type_of`, `overview`, `implement_plan`, `scope_at` and `uses_for` go in
 when a measured session asks for them - the October audit (9.2.6) did not.
@@ -1695,11 +1696,22 @@ its root's `end` - seven property lines dcc drops from the exe.
   pastree call. Cost: tools 2.42 M tokens / 581 s, hook 2.26 M / 560 s,
   against 3.74 M / 472 s for the tools arm of 0.23.2. Not told apart: the
   model, the session kind (a main session gets the server's instructions;
-  the 0.23.2 agents were a workflow's subagents) and the server version - a
-  tools arm run as subagents on the same server would separate them. One
+  the 0.23.2 agents were a workflow's subagents) and the server version. One
   false "nothing" found (F6r.1, fixed in 0.51.3): `callers` of a base
   form's static FormActivate answered "no calls" where four descendants
   redeclare it and call `inherited;` - both arms found them by grep.
+  The session kind, then (0.52.0, the tools arm as 12 `general-purpose`
+  subagents of one `claude -p` session sharing its server, hooks off): 12
+  of 12 correct, every subagent loaded the tools by ToolSearch and called
+  them (47 calls - `rename_plan` for the renames, `impact`, `form`), 2.60 M
+  tokens / 602 s; grep and reads 43, twice a main session's, nearly all
+  cross-checks. So not the session kind. The same subagent run on the
+  frozen 0.23.2 server: 12 of 12 correct, pastree called in 10 of 12 - the
+  two that did not are controls grep answers (dfAuto, the handler renamed
+  across frames), 2.58 M tokens / 617 s, grep and reads 75. Most of the
+  5-to-12 is the model, then (5 -> 10 on the same server); the server's
+  text since adds the controls and halves the grep and reads (75 -> 43) at
+  the same cost.
 - **Found by the pilot** (on 0.16.8):
   - F6.1 (fixed in 0.20.2, PasTree 0.75.2): `related assignments` of a
     property an own class republishes scanned the closure once per link of
