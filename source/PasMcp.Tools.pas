@@ -13152,7 +13152,12 @@ end;
 const
   LINT_UNUSED_USES = 'unused-uses';
   LINT_USES_TO_IMPL = 'uses-to-implementation';
+  LINT_UNUSED_SYMBOL = 'unused-symbol';
+  // The rules run when `rules` names none: unused-symbol is asked by name
+  // (a pass over every own unit's bindings, and a different question).
   LINT_RULES: TArray<string> = [LINT_UNUSED_USES, LINT_USES_TO_IMPL];
+  LINT_ALL_RULES: TArray<string> = [LINT_UNUSED_USES, LINT_USES_TO_IMPL,
+    LINT_UNUSED_SYMBOL];
   // Doubts and bindings named on one row; past them, counted.
   MAX_LINT_NAMED = 3;
 
@@ -14806,12 +14811,115 @@ begin
     end;
 end;
 
+{ ---- lint unused-symbol ---- }
+
+const
+  cUnusedSkipText: array[TPasUnusedSkip] of string = (
+    'published (forms, RTTI)',
+    'virtual, dynamic, abstract, override or message methods',
+    'members of an interface', 'methods an interface of their class names',
+    'operators', 'class constructors and destructors',
+    'attribute constructors', 'the for-in protocol (GetEnumerator, MoveNext, Current)',
+    'in generated units');
+
+{ unused-symbol: PasTree's FindUnusedSymbols (PasTree.Sema.Lint) over every
+  analysis holding the units asked about, through the workspace (light mode
+  makes the library bodies the search needs full). A declaration is a row
+  only when every analysis holding its unit finds it unused: one that only
+  another member's defines compile is used there. }
+procedure LintUnusedSymbols(AWs: TMcpWorkspace; const AFiles: TArray<string>;
+  ARows: TList<TLintRow>; out ASkipped: string);
+var
+  LHeld, LUnusedIn: TDictionary<string, Integer>;
+  LFirst: TDictionary<string, TPasUnusedSymbol>;
+  LFirstA: TDictionary<string, TMcpAnalysis>;
+  LUnitOf: TDictionary<string, string>;
+  LSkips, LMax: TPasUnusedSkips;
+  LFiles: TArray<string>;
+  LRes: TArray<TPasUnusedSymbol>;
+  LKey, LUnit: string;
+  LN: Integer;
+  LRow: TLintRow;
+  LS: TPasUnusedSymbol;
+begin
+  ASkipped := '';
+  FillChar(LMax, SizeOf(LMax), 0);
+  LHeld := TDictionary<string, Integer>.Create;
+  LUnusedIn := TDictionary<string, Integer>.Create;
+  LFirst := TDictionary<string, TPasUnusedSymbol>.Create;
+  LFirstA := TDictionary<string, TMcpAnalysis>.Create;
+  LUnitOf := TDictionary<string, string>.Create;
+  try
+    for var LA in AWs.Analyses do
+    begin
+      if LA.Proj = nil then
+        Continue;
+      LFiles := nil;
+      for var LF in AFiles do
+        if LA.Nav.ModelIdOf(LF) >= 0 then
+        begin
+          LFiles := LFiles + [LF];
+          if not LHeld.TryGetValue(LowerCase(LF), LN) then
+            LN := 0;
+          LHeld.AddOrSetValue(LowerCase(LF), LN + 1);
+        end;
+      if LFiles = nil then
+        Continue;
+      LRes := LA.WS.FindUnusedSymbols(LFiles, LSkips);
+      AWs.QueryDone(LA);
+      for var LW := Low(TPasUnusedSkip) to High(TPasUnusedSkip) do
+        LMax[LW] := Max(LMax[LW], LSkips[LW]);
+      for LS in LRes do
+      begin
+        LKey := LowerCase(Format('%s:%d:%d', [LS.FileName, LS.Line, LS.Col]));
+        if not LUnusedIn.TryGetValue(LKey, LN) then
+          LN := 0;
+        LUnusedIn.AddOrSetValue(LKey, LN + 1);
+        if LFirst.TryAdd(LKey, LS) then
+        begin
+          LFirstA.Add(LKey, LA);
+          LUnitOf.Add(LKey, LowerCase(LA.Proj.ModelFile(LS.UnitId)));
+        end;
+      end;
+    end;
+    for var LP in LFirst do
+    begin
+      LS := LP.Value;
+      LUnit := LUnitOf[LP.Key];
+      if not LHeld.TryGetValue(LUnit, LN) or (LUnusedIn[LP.Key] < LN) then
+        Continue;
+      LRow := Default(TLintRow);
+      LRow.FilePath := LS.FileName;
+      LRow.Line := LS.Line;
+      LRow.Col := LS.Col;
+      LRow.Rule := LINT_UNUSED_SYMBOL;
+      LRow.Text := Format('%s (%s) - nothing in the group uses it', [LS.Name,
+        HeadOf(LFirstA[LP.Key].Proj.Model(LS.UnitId), LS.Sym)]);
+      if LS.Doubts <> nil then
+        LRow.Text := LRow.Text + ', but ' + string.Join('; ', LS.Doubts);
+      LRow.Doubt := LS.Doubts <> nil;
+      ARows.Add(LRow);
+    end;
+    for var LW := Low(TPasUnusedSkip) to High(TPasUnusedSkip) do
+      if LMax[LW] > 0 then
+        ASkipped := ASkipped + IfThen(ASkipped <> '', ', ') + Format('%d %s',
+          [LMax[LW], cUnusedSkipText[LW]]);
+  finally
+    LUnitOf.Free;
+    LFirstA.Free;
+    LFirst.Free;
+    LUnusedIn.Free;
+    LHeld.Free;
+  end;
+end;
+
 function ToolLint(AWs: TMcpWorkspace; AArgs: TJSONObject): string;
 var
   LRules, LAskedFiles: TArray<string>;
   LFile, LIn, LKey, LNotHeld: string;
   LLimit, LShown, LDoubts, LN, LAsked: Integer;
-  LUnused, LMove: Boolean;
+  LUnused, LMove, LSymbols: Boolean;
+  LSkipped: string;
   LFiles, LOthers: TList<string>;
   LSeen: TDictionary<string, Boolean>;
   LRows: TList<TLintRow>;
@@ -14828,15 +14936,16 @@ begin
   for var LR in ArgStr(AArgs, 'rules').Split([',', ' ', '[', ']', '"'],
     TStringSplitOptions.ExcludeEmpty) do
   begin
-    if not MatchText(LR.Trim, LINT_RULES) then
+    if not MatchText(LR.Trim, LINT_ALL_RULES) then
       raise EToolError.CreateFmt('unknown rule `%s` - the rules: %s',
-        [LR.Trim, string.Join(', ', LINT_RULES)]);
+        [LR.Trim, string.Join(', ', LINT_ALL_RULES)]);
     LRules := LRules + [LowerCase(LR.Trim)];
   end;
   if LRules = nil then
     LRules := LINT_RULES;
   LUnused := MatchText(LINT_UNUSED_USES, LRules);
   LMove := MatchText(LINT_USES_TO_IMPL, LRules);
+  LSymbols := MatchText(LINT_UNUSED_SYMBOL, LRules);
   LAskedFiles := LintFilesArg(AWs, AArgs);
   // LFile: the one file asked about, for the answer's wording.
   LFile := '';
@@ -14900,6 +15009,9 @@ begin
     end;
     // Light mode: the initializations the rows met unread, read.
     EnsureLintEffects(AWs, LLints);
+    LSkipped := '';
+    if LSymbols then
+      LintUnusedSymbols(AWs, LFiles.ToArray, LRows, LSkipped);
     LArr := LRows.ToArray;
     TArray.Sort<TLintRow>(LArr, TComparer<TLintRow>.Construct(
       function(const L, R: TLintRow): Integer
@@ -14951,6 +15063,9 @@ begin
         + '`file`, `in` or `rules`)', [Length(LArr) - LShown]));
     if LNotHeld <> '' then
       LSb.AppendLine('not a unit any analysis holds, not checked: ' + LNotHeld);
+    if LSkipped <> '' then
+      LSb.AppendLine('(unused-symbol does not weigh what is reached other than '
+        + 'by name: ' + LSkipped + ')');
     Result := LSb.ToString.TrimRight;
   finally
     LByFile.Free;
@@ -20730,11 +20845,18 @@ const
     + 'removal leaves out of a program (a unit used for what it registers), '
     + 'a routine called here that the unit declares too (dcc picks among '
     + 'every unit''s), the bindings a move would change. A move row names the {$IF} blocks '
-    + 'the entry is written in: move it with them. Run `compile` after '
-    + 'acting on it.",'
+    + 'the entry is written in: move it with them. unused-symbol (asked by '
+    + 'name): a declaration - type, routine, variable, constant, field, '
+    + 'property - nothing in the group uses, by name, a bare inherited or a '
+    + 'form file; what is reached another way is not weighed and counted '
+    + '(published members, virtual and interface methods, attributes, '
+    + 'for-in), and a `but` names what the index cannot settle (a branch '
+    + 'not compiled or a string spelling it, another overload in use, a '
+    + 'namesake in another unit). Run `compile` after acting on it.",'
     + '"inputSchema":{"type":"object","properties":{'
     + '"rules":{"type":"string","description":"Comma-separated: '
-    + 'unused-uses, uses-to-implementation (default all)"},'
+    + 'unused-uses, uses-to-implementation (the default: both), '
+    + 'unused-symbol"},'
     + '"file":{"type":"string","description":"Only this unit - or these, joined by commas: one call checks several units for the cost of one, where calls made at once wait for each other"},'
     + '"in":{"type":"string","description":"Only the units whose path '
     + 'relative to the group contains this or matches it as a wildcard '

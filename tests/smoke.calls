@@ -348,6 +348,8 @@ lint {"limit":0}
 lint {"limit":2}
 lint {"file":"Shared/uShapes.pas"}
 lint {"rules":"nope"}
+lint {"rules":"unused-symbol","file":"AppB/uBoxes.pas"}
+lint {"rules":"unused-symbol","file":"Shared/uShapes.pas"}
 lint {"file":"AppB/AppB.dpr"}
 lint {"file":"AppB/uLintBase.pas"}
 lint {"file":"AppB/uLintLast.pas"}

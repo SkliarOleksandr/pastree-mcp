@@ -1084,6 +1084,48 @@ gap between the answers and the truth.
      rule waits for 9.5), `exports`, overrides, interface implementations.
      A false "unused" costs a deleted handler, so the exceptions are the
      rule.
+
+     Done in 0.53.0, asked by name (`rules`), as PasTree's own
+     `FindUnusedSymbols` (PasTree 0.182.0, `docs/editor-features.md` sec. 15)
+     so pastree-lsp and the IDE plugin take the same rule; the server runs it
+     through each analysis' workspace and keeps a row only when every
+     analysis holding the unit finds it unused. Not weighed, and counted
+     under the rows: published members (a streaming class's first section
+     too), virtual, dynamic, abstract, override and message methods,
+     interface members and the methods an interface of the class, an
+     ancestor or a descendant names (a method reference type names Invoke),
+     operators, class constructors, attribute constructors, the for-in
+     protocol, generated units. A `but`, where the index cannot settle it:
+     the name in a branch not compiled, a type as a whole string literal (a
+     member as `'TFoo.Bar'`), a record's field, another overload in use, a
+     unit-level namesake in another unit, the name written where the index
+     bound nothing.
+
+     Checked against dcc on the client group (`local/audit/unused`): every
+     row that takes a hint marked `deprecated '<tag>'` on the line ending
+     it (6,754 of 8,573; properties take none), the own units rebuilt, a
+     tagged W1000 a use the rule missed. The prototype's first run had 45
+     (0.66%) once a hint on `A, B: T;` was told from a use of its list's
+     other names; what they taught is the exceptions and the doubts above -
+     attribute constructors (11), method references' Invoke (2), the
+     for-in protocol (3), a hit in an include file (mapped back by name
+     now). Left, of 6,754: 15 W1000 - 3 at a descendant's declaration
+     hiding the method (dcc warns there; no use), 12 where PasTree binds
+     otherwise than dcc, every one of them a row with a `but`: 9 the one
+     that says why - another overload chosen (7: two nested and module
+     routines, five DevExpress and own methods), a unit-level namesake (2: a
+     Windows API routine and constant the RTL declares too, bound to the
+     RTL's though the own unit is listed later) - and 3 another doubt
+     (two DevExpress constructors' overloads, an unresolved member). Types
+     (a second build, a class's hint silencing its own methods): no tagged
+     W1000 in the four members that built clean; AVImark and the server
+     did not, a local class's hint breaking them. Of the 8,598 rows 4,207
+     carry a `but`, 2,995 of them a record's field (the database record
+     layouts, read whole). 224 s over the group's 1,965 own units, most of
+     it the library bodies the reference search makes full. The two
+     binding gaps are PasTree's to close: an overload dcc picks by an
+     AnsiString or an interface argument, and the `uses` order between an
+     own unit and an RTL one declaring the same name.
    - `const-param` - a `string`, dynamic array, interface or large record
      parameter passed by value and never assigned in the body. The classic
      Delphi saving: no reference count or copy per call.
@@ -1247,7 +1289,7 @@ gap between the answers and the truth.
 10. `defines` (done, 0.27.0, 9.6; `{$IFOPT}` and the options at a line,
    0.30.0) - `references` names the lines in branches not
    compiled; `defines` says which define selects each, and for which member.
-11. `lint` (the two `uses` rules - done, 0.28.0, 9.7), `metrics`
+11. `lint` (the two `uses` rules - done, 0.28.0; `unused-symbol` - done, 0.53.0, in PasTree; 9.7), `metrics`
    (`recompile` and `cycles` - done, 0.29.0, 9.7). `unused-symbol`'s
    exceptions are measured: 24 of 384 sampled symbols that no code names
    are called through a base, an interface or a property, and a published

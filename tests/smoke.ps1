@@ -754,7 +754,13 @@ Check 'lint files none held' (Block $b 'lint {"file":"AppB/uNope.pas,AppB/uNope2
 Check 'lint conditional move' (Block $b 'lint {"file":"AppB/uLintDef.pas"}') @('AppB\uLintDef.pas:13:3: uses-to-implementation System.Classes - used only in the implementation (first at line 28, in LintDef); it is inside {$IFDEF FIXTURE_A} at line 11 - move it with its condition')
 Check 'lint other defines' (Block $b 'lint {"file":"AppB/uLintLast.pas"}') @('AppB\uLintLast.pas:11:3: unused-uses uLintOnce - no name of it is used here; but removing it leaves uLintOnce (initialization) out of AppB', 'AppB\uLintLast.pas:12:3: unused-uses uLintTwinA - no name of it is used here; but it declares an overload of `LintTwin`, called at AppB\uLintLast.pas:19 - removed, the call may take another overload')
 Check 'lint nothing' (Block $b 'lint {"file":"Shared/uShapes.pas"}') @('no findings (unused-uses, uses-to-implementation) in Shared\uShapes.pas')
-Check 'lint bad rule' (Block $b 'lint {"rules":"nope"}') @('unknown rule `nope` - the rules: unused-uses, uses-to-implementation')
+Check 'lint bad rule' (Block $b 'lint {"rules":"nope"}') @('unknown rule `nope` - the rules: unused-uses, uses-to-implementation, unused-symbol')
+# unused-symbol (PasTree's FindUnusedSymbols): declarations nothing uses, a
+# record's field and a name in a branch not compiled with a "but"; an
+# override, the static method a descendant runs by inherited, the hiding one
+# a published member not rows; a unit with none says so.
+Check 'lint unused-symbol' (Block $b 'lint {"rules":"unused-symbol","file":"AppB/uBoxes.pas"}') @('19 findings in 1 file of 1 own unit: unused-symbol 19 - 3 with a "but"', 'AppB\uBoxes.pas:31:11: unused-symbol NeverCalled (procedure) - nothing in the group uses it, but the name is written in a branch this configuration does not compile', 'AppB\uBoxes.pas:94:5: unused-symbol TBufRec.Buf (field) - nothing in the group uses it, but a record''s field', 'AppB\uBoxes.pas:154:15: unused-symbol TPlainOther.Reset (procedure)', 'AppB\uBoxes.pas:186:15: unused-symbol TCounter.Run (procedure)', '(unused-symbol does not weigh what is reached other than by name: 2 published (forms, RTTI), 4 virtual') @('TPlainBox.Reset', 'TShapeBox.Changed', 'TBigBox.Changed', 'TCounter.Bump', 'TCounter.FCount', 'TShapeBox.BoxClick')
+Check 'lint unused-symbol none' (Block $b 'lint {"rules":"unused-symbol","file":"Shared/uShapes.pas"}') @('no findings (unused-symbol) in Shared\uShapes.pas')
 Check 'lint program' (Block $b 'lint {"file":"AppB/AppB.dpr"}') @('AppB\AppB.dpr is not a unit any analysis holds - lint reads the `uses` of units')
 # metrics: AppB\uRc*.pas mirror what dcc's Make was seen to recompile (SPEC
 # 9.7): a unit binding a declaration of uRcA or one taking it in (uRcE through
